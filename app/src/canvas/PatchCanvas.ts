@@ -207,6 +207,7 @@ export class PatchCanvas {
     for (const id of moduleIds) this.views.get(id)?.popIn();
   }
 
+
   // -- view lifecycle -------------------------------------------------------
 
   private rebuildAll(): void {
