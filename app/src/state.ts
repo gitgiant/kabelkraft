@@ -40,8 +40,14 @@ export class AppState {
 
   selectedWireId: string | null = null;
   selectedModuleId: string | null = null;
+  /** Multi-selection for grouping (shift-click / rubber band). */
+  readonly selectedModuleIds = new Set<string>();
+  readonly selectedGroupIds = new Set<string>();
 
   private listeners = new Map<StateEvent, Set<Listener>>();
+  private undoStack: string[] = [];
+  private redoStack: string[] = [];
+  private static readonly UNDO_LIMIT = 100;
 
   constructor() {
     this.engine.onStatus((status) => {
@@ -74,9 +80,59 @@ export class AppState {
     for (const fn of this.listeners.get(event) ?? []) fn();
   }
 
+  // -- Undo / redo --------------------------------------------------------
+
+  /**
+   * Push an undo snapshot. Call BEFORE a user-visible mutation; for drag
+   * gestures call once at gesture start so the whole drag is one undo step.
+   */
+  beginUndoable(): void {
+    this.undoStack.push(this.serialize());
+    if (this.undoStack.length > AppState.UNDO_LIMIT) this.undoStack.shift();
+    this.redoStack = [];
+  }
+
+  get canUndo(): boolean {
+    return this.undoStack.length > 0;
+  }
+
+  get canRedo(): boolean {
+    return this.redoStack.length > 0;
+  }
+
+  undo(): void {
+    const snapshot = this.undoStack.pop();
+    if (snapshot === undefined) return;
+    this.redoStack.push(this.serialize());
+    this.loadSnapshot(snapshot);
+  }
+
+  redo(): void {
+    const snapshot = this.redoStack.pop();
+    if (snapshot === undefined) return;
+    this.undoStack.push(this.serialize());
+    this.loadSnapshot(snapshot);
+  }
+
+  /** Restore graph state without touching the undo/redo stacks. */
+  private loadSnapshot(json: string): void {
+    const result = deserializeProject(json, MODULE_DEFS);
+    const wasPlaying = this.transport.playing;
+    this.graph = result.graph;
+    this.projectName = result.name;
+    this.transport = { ...result.transport, playing: wasPlaying };
+    this.clearSelection();
+    this.heldVoices.clear();
+    this.engine.syncGraph(this.graph);
+    this.emit('projectLoaded');
+    this.emit('graphChanged');
+    this.emit('transportChanged');
+  }
+
   // -- Structure --------------------------------------------------------
 
   addModule(type: string, x: number, y: number): ModuleInstance {
+    this.beginUndoable();
     const inst = createInstance(this.graph.def(type), x, y);
     this.graph.addModule(inst);
     this.engine.syncGraph(this.graph);
@@ -85,13 +141,18 @@ export class AppState {
   }
 
   removeModule(moduleId: string): void {
+    this.beginUndoable();
     this.graph.removeModule(moduleId);
     if (this.selectedModuleId === moduleId) this.selectedModuleId = null;
+    this.selectedModuleIds.delete(moduleId);
     this.engine.syncGraph(this.graph);
     this.emit('graphChanged');
   }
 
   connect(from: PortRef, to: PortRef): { ok: boolean; reason?: string; wire?: Wire } {
+    const check = this.graph.canConnect(from, to);
+    if (!check.ok) return { ok: false, reason: check.reason };
+    this.beginUndoable();
     const result = this.graph.connect(from, to);
     if (!result.ok) return { ok: false, reason: result.reason };
     this.engine.syncGraph(this.graph);
@@ -100,9 +161,61 @@ export class AppState {
   }
 
   disconnect(wireId: string): void {
+    this.beginUndoable();
     this.graph.disconnect(wireId);
     if (this.selectedWireId === wireId) this.selectedWireId = null;
     this.engine.syncGraph(this.graph);
+    this.emit('graphChanged');
+  }
+
+  // -- Groups (PRD §6) -----------------------------------------------------
+
+  /** Group the current multi-selection. Returns the group, or null if <2 items. */
+  groupSelection(): string | null {
+    // Only top-level items (no parent group) can be grouped together.
+    const moduleIds = [...this.selectedModuleIds].filter(
+      (id) => this.graph.modules.has(id) && !this.graph.groupOfModule(id),
+    );
+    const groupIds = [...this.selectedGroupIds].filter(
+      (id) => this.graph.groups.has(id) && !this.graph.parentGroup(id),
+    );
+    if (moduleIds.length + groupIds.length < 2) return null;
+    this.beginUndoable();
+    // Collapsed tile lands at the centroid of its members.
+    let cx = 0;
+    let cy = 0;
+    for (const id of moduleIds) {
+      const m = this.graph.modules.get(id)!;
+      cx += m.x;
+      cy += m.y;
+    }
+    for (const id of groupIds) {
+      const g = this.graph.groups.get(id)!;
+      cx += g.x;
+      cy += g.y;
+    }
+    const n = moduleIds.length + groupIds.length;
+    const group = this.graph.createGroup(`Group ${this.graph.groups.size + 1}`, moduleIds, groupIds, cx / n, cy / n);
+    this.clearSelection();
+    this.selectedGroupIds.add(group.id);
+    this.emit('graphChanged');
+    this.emit('selectionChanged');
+    return group.id;
+  }
+
+  ungroup(groupId: string): void {
+    if (!this.graph.groups.has(groupId)) return;
+    this.beginUndoable();
+    this.graph.dissolveGroup(groupId);
+    this.selectedGroupIds.delete(groupId);
+    this.emit('graphChanged');
+    this.emit('selectionChanged');
+  }
+
+  toggleGroupCollapsed(groupId: string): void {
+    const group = this.graph.groups.get(groupId);
+    if (!group) return;
+    group.collapsed = !group.collapsed;
     this.emit('graphChanged');
   }
 
@@ -129,15 +242,70 @@ export class AppState {
 
   // -- Selection --------------------------------------------------------
 
-  select(target: { wireId?: string; moduleId?: string } | null): void {
-    this.selectedWireId = target?.wireId ?? null;
-    this.selectedModuleId = target?.moduleId ?? null;
+  clearSelection(): void {
+    this.selectedWireId = null;
+    this.selectedModuleId = null;
+    this.selectedModuleIds.clear();
+    this.selectedGroupIds.clear();
+  }
+
+  select(target: { wireId?: string; moduleId?: string; groupId?: string } | null): void {
+    this.clearSelection();
+    if (target?.wireId) this.selectedWireId = target.wireId;
+    if (target?.moduleId) {
+      this.selectedModuleId = target.moduleId;
+      this.selectedModuleIds.add(target.moduleId);
+    }
+    if (target?.groupId) this.selectedGroupIds.add(target.groupId);
+    this.emit('selectionChanged');
+  }
+
+  /** Shift-click / rubber band: toggle or add without clearing. */
+  addToSelection(target: { moduleId?: string; groupId?: string }, toggle = false): void {
+    this.selectedWireId = null;
+    if (target.moduleId) {
+      if (toggle && this.selectedModuleIds.has(target.moduleId)) {
+        this.selectedModuleIds.delete(target.moduleId);
+      } else {
+        this.selectedModuleIds.add(target.moduleId);
+      }
+      this.selectedModuleId = target.moduleId;
+    }
+    if (target.groupId) {
+      if (toggle && this.selectedGroupIds.has(target.groupId)) {
+        this.selectedGroupIds.delete(target.groupId);
+      } else {
+        this.selectedGroupIds.add(target.groupId);
+      }
+    }
     this.emit('selectionChanged');
   }
 
   deleteSelection(): void {
-    if (this.selectedWireId) this.disconnect(this.selectedWireId);
-    else if (this.selectedModuleId) this.removeModule(this.selectedModuleId);
+    if (this.selectedWireId) {
+      this.disconnect(this.selectedWireId);
+      return;
+    }
+    if (this.selectedModuleIds.size === 0 && this.selectedGroupIds.size === 0) return;
+    this.beginUndoable();
+    // Deleting a group deletes its members (wires go with them).
+    const doomed = new Set<string>(this.selectedModuleIds);
+    for (const gid of this.selectedGroupIds) {
+      for (const m of this.graph.modulesInGroup(gid)) doomed.add(m);
+      const g = this.graph.groups.get(gid);
+      const dropGroups = (id: string) => {
+        const grp = this.graph.groups.get(id);
+        if (!grp) return;
+        for (const child of grp.groupIds) dropGroups(child);
+        this.graph.groups.delete(id);
+      };
+      if (g) dropGroups(gid);
+    }
+    for (const id of doomed) this.graph.removeModule(id);
+    this.clearSelection();
+    this.engine.syncGraph(this.graph);
+    this.emit('graphChanged');
+    this.emit('selectionChanged');
   }
 
   // -- Notes (keyboard modules) ------------------------------------------
@@ -197,6 +365,8 @@ export class AppState {
   }
 
   loadProject(json: string): string[] {
+    this.undoStack = [];
+    this.redoStack = [];
     const result = deserializeProject(json, MODULE_DEFS);
     this.graph = result.graph;
     this.projectName = result.name;

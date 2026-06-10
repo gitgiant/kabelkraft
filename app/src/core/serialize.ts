@@ -3,7 +3,7 @@
  * Same schema family the AI patch format (§10.1) builds on.
  */
 
-import { Graph, bumpWireId, type Wire } from './graph';
+import { Graph, bumpGroupId, bumpWireId, type ModuleGroup, type Wire } from './graph';
 import { bumpModuleId, type ModuleDef, type ModuleInstance } from './module';
 import { DEFAULT_TRANSPORT, type TransportState } from './types';
 
@@ -15,6 +15,7 @@ export interface ProjectFile {
   transport: TransportState;
   modules: ModuleInstance[];
   wires: Wire[];
+  groups?: ModuleGroup[];
 }
 
 export function serializeProject(name: string, graph: Graph, transport: TransportState): string {
@@ -24,6 +25,7 @@ export function serializeProject(name: string, graph: Graph, transport: Transpor
     transport: { ...transport, playing: false },
     modules: [...graph.modules.values()],
     wires: [...graph.wires.values()],
+    groups: [...graph.groups.values()],
   };
   return JSON.stringify(file, null, 2);
 }
@@ -69,6 +71,16 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
     result.wire.color = wire.color;
     graph.wires.set(wire.id, result.wire);
     bumpWireId(wire.id);
+  }
+
+  for (const group of raw.groups ?? []) {
+    const moduleIds = group.moduleIds.filter((id) => graph.modules.has(id));
+    graph.groups.set(group.id, { ...group, moduleIds });
+    bumpGroupId(group.id);
+  }
+  // Drop dangling child-group references (e.g. a skipped group).
+  for (const group of graph.groups.values()) {
+    group.groupIds = group.groupIds.filter((id) => graph.groups.has(id));
   }
 
   return {

@@ -6,7 +6,18 @@
   let tempo = $state(appState.transport.tempo);
   let playing = $state(appState.transport.playing);
   let audioOn = $state(false);
+  let canUndo = $state(false);
+  let canRedo = $state(false);
+  let canGroup = $state(false);
+  let selectedGroup = $state<string | null>(null);
   let fileInput: HTMLInputElement;
+
+  function refreshEditState() {
+    canUndo = appState.canUndo;
+    canRedo = appState.canRedo;
+    canGroup = appState.selectedModuleIds.size + appState.selectedGroupIds.size >= 2;
+    selectedGroup = [...appState.selectedGroupIds][0] ?? null;
+  }
 
   onMount(() => {
     const offT = appState.on('transportChanged', () => {
@@ -16,10 +27,14 @@
     const offP = appState.on('projectLoaded', () => {
       projectName = appState.projectName;
     });
+    const offG = appState.on('graphChanged', refreshEditState);
+    const offS = appState.on('selectionChanged', refreshEditState);
     const poll = setInterval(() => (audioOn = appState.engine.running), 500);
     return () => {
       offT();
       offP();
+      offG();
+      offS();
       clearInterval(poll);
     };
   });
@@ -54,6 +69,17 @@
   <button onclick={saveProject} title="Save project as .kkproj">Save</button>
   <button onclick={() => fileInput.click()} title="Load a .kkproj project">Load</button>
   <input bind:this={fileInput} type="file" accept=".kkproj,application/json" hidden onchange={loadProject} />
+
+  <span class="divider"></span>
+
+  <button disabled={!canUndo} onclick={() => appState.undo()} title="Undo (Cmd/Ctrl+Z)">↶</button>
+  <button disabled={!canRedo} onclick={() => appState.redo()} title="Redo (Cmd/Ctrl+Shift+Z)">↷</button>
+  <button disabled={!canGroup} onclick={() => appState.groupSelection()} title="Group selection (Cmd/Ctrl+G). Shift-click or shift-drag to multi-select.">
+    Group
+  </button>
+  <button disabled={!selectedGroup} onclick={() => selectedGroup && appState.ungroup(selectedGroup)} title="Ungroup (Cmd/Ctrl+Shift+G)">
+    Ungroup
+  </button>
 
   <span class="spacer"></span>
 
@@ -104,6 +130,16 @@
   }
   .spacer {
     flex: 1;
+  }
+  .divider {
+    width: 1px;
+    height: 20px;
+    background: #34343f;
+    margin: 0 4px;
+  }
+  button:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
   .transport {
     display: flex;

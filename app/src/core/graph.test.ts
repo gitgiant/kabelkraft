@@ -121,6 +121,56 @@ describe('connection rules (PRD §4.3)', () => {
   });
 });
 
+describe('module groups (PRD §6)', () => {
+  it('groups, nests, and resolves visibility through collapsed ancestors', () => {
+    const { graph, synth, synth2, keyboard } = setup();
+    const inner = graph.createGroup('Inner', [synth.id, synth2.id], [], 0, 0);
+    expect(graph.groupOfModule(synth.id)?.id).toBe(inner.id);
+    expect(graph.hiddenBehind(synth.id)?.id).toBe(inner.id); // collapsed by default
+
+    inner.collapsed = false;
+    expect(graph.hiddenBehind(synth.id)).toBeUndefined();
+
+    const outer = graph.createGroup('Outer', [keyboard.id], [inner.id], 0, 0);
+    expect(graph.parentGroup(inner.id)?.id).toBe(outer.id);
+    // Outer collapsed hides synth even though inner is expanded.
+    expect(graph.hiddenBehind(synth.id)?.id).toBe(outer.id);
+    expect([...graph.modulesInGroup(outer.id)]).toContain(synth.id);
+    expect([...graph.modulesInGroup(outer.id)]).toContain(keyboard.id);
+  });
+
+  it('dissolving a nested group reparents members to the parent', () => {
+    const { graph, synth, synth2, keyboard } = setup();
+    const inner = graph.createGroup('Inner', [synth.id, synth2.id], [], 0, 0);
+    const outer = graph.createGroup('Outer', [keyboard.id], [inner.id], 0, 0);
+    graph.dissolveGroup(inner.id);
+    expect(graph.groups.has(inner.id)).toBe(false);
+    expect(outer.moduleIds).toContain(synth.id);
+    expect(graph.groupOfModule(synth.id)?.id).toBe(outer.id);
+  });
+
+  it('removing a module removes it from its group', () => {
+    const { graph, synth, synth2 } = setup();
+    const group = graph.createGroup('G', [synth.id, synth2.id], [], 0, 0);
+    graph.removeModule(synth.id);
+    expect(group.moduleIds).toEqual([synth2.id]);
+  });
+
+  it('groups round-trip through serialization', () => {
+    const { graph, synth, synth2, keyboard } = setup();
+    const inner = graph.createGroup('Inner', [synth.id, synth2.id], [], 10, 20);
+    inner.collapsed = false;
+    graph.createGroup('Outer', [keyboard.id], [inner.id], 30, 40);
+    const json = serializeProject('Test', graph, DEFAULT_TRANSPORT);
+    const loaded = deserializeProject(json, MODULE_DEFS);
+    expect(loaded.graph.groups.size).toBe(2);
+    const loadedInner = loaded.graph.groups.get(inner.id)!;
+    expect(loadedInner.collapsed).toBe(false);
+    expect(loadedInner.moduleIds).toEqual([synth.id, synth2.id]);
+    expect(loaded.graph.parentGroup(inner.id)?.name).toBe('Outer');
+  });
+});
+
 describe('project serialization (PRD §15)', () => {
   it('round-trips modules, wires, params, transport', () => {
     const { graph, synth, keyboard, audioOut } = setup();

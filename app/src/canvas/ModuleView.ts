@@ -236,6 +236,7 @@ export class ModuleView extends Container {
   }
 
   private beginStepEdit(e: FederatedPointerEvent): void {
+    appState.beginUndoable();
     const local = this.toLocal(e.global);
     const steps = this.steps();
     const idx = this.stepIndexAt(local.x);
@@ -334,6 +335,7 @@ export class ModuleView extends Container {
   }
 
   private beginParamDrag(param: ParamSpec, e: FederatedPointerEvent): void {
+    appState.beginUndoable(); // whole drag (or option cycle) = one undo step
     const startX = e.clientX;
     const startValue = this.instance.params[param.id];
     let moved = false;

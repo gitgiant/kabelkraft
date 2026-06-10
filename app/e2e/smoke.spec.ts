@@ -59,6 +59,55 @@ test('play runs the sequencer and audio reaches the output', async ({ page }) =>
   expect(pos).toBeGreaterThan(0);
 });
 
+test('grouping keeps audio flowing and undo restores the graph', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('.enable-audio').click();
+  await page.locator('.transport button[title="Play"]').click();
+
+  // Group synth+LFO; graph stays flat for the engine, so audio must continue.
+  await page.evaluate(() => {
+    const s = window.__kk;
+    const mods = [...s.graph.modules.values()];
+    const synth = mods.find((m) => m.type === 'synth')!;
+    const lfo = mods.find((m) => m.type === 'lfo')!;
+    s.addToSelection({ moduleId: synth.id });
+    s.addToSelection({ moduleId: lfo.id });
+    s.groupSelection();
+  });
+
+  const groupCount = await page.evaluate(() => window.__kk.graph.groups.size);
+  expect(groupCount).toBe(1);
+
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const s = window.__kk;
+          const audioOut = [...s.graph.modules.values()].find((m) => m.type === 'audioOut')!;
+          return s.meters[audioOut.id]?.peak ?? 0;
+        }),
+      { timeout: 5000 },
+    )
+    .toBeGreaterThan(0.01);
+
+  // Undo removes the group; modules and wires intact.
+  const after = await page.evaluate(() => {
+    const s = window.__kk;
+    const before = { modules: s.graph.modules.size, wires: s.graph.wires.size };
+    s.undo();
+    return {
+      groups: s.graph.groups.size,
+      modulesSame: s.graph.modules.size === before.modules,
+      wiresSame: s.graph.wires.size === before.wires,
+      canRedo: s.canRedo,
+    };
+  });
+  expect(after.groups).toBe(0);
+  expect(after.modulesSame).toBe(true);
+  expect(after.wiresSame).toBe(true);
+  expect(after.canRedo).toBe(true);
+});
+
 test('effect inserted into the chain passes audio through', async ({ page }) => {
   await page.goto('/');
   await page.locator('.enable-audio').click();
