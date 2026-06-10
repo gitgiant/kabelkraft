@@ -1,0 +1,91 @@
+create a PRD for an audio playround app called KabelKraft
+
+requirements:
+modules that the user will wire their inputs/outputs to chain together logic to build sounds/music/visuals
+the modules will have input and outputs that can be wired together, either with audio signal or data (midi, etc)
+
+the modules will have UI controls which themselves are modules with their own inputs and ouptus (knobs, sliders, x-ycontroller)
+
+not every module must have an input, or an output
+
+modules can be grouped together into module groups which can be zoomed out to hide the internal modules
+zooming into a module group or doubleclicking reveals the internal modules and wiring, and the user can configure
+a module group can contain other module groups, allow layers of abstraction.
+allow labeling and coloring of modules, module groups, and wires
+module menu where user can drag drop in pre-configured module groups, and save their groups.
+project menu where user can save/load projects (entire modlue configs)
+setup framework to allow AI generated module groups:
+    user can describe in normal language, AI builds out modules and performs wiring
+    use a markdown file or some method that can be passed to an external AI (claude, chatgpt) which can then generate in response loadable module configs.  if not feasible or advisiable, let me know, open to options here.
+
+sampler sound generator modules  
+    input: loadable sample file, datawire to control notes
+    Sample editor: fully fledged sample editor, save/load, copy/paste/cut, loop tools (fade in/out), pitch, time stretching
+    Drum machine module: fully fledged drum machine, with sample editor integrated
+    Sample library module: browse samples, load them into sampler or drum machine.
+    output: audio out
+    
+
+synth sound generator modules
+    input: data wire to control notes
+    controls: waveform, pitch, octave, ASDR controllers
+    waveforms: all the classics sine, triangle, square, sawtooth, noise, 
+    modes: wavetable support with loadable wavetables, and FM support
+    output: audio out
+
+
+data modules:
+    have data modules which dont output audio instead output data which could be:
+    midi note data
+    automation data (such as LFO, ASDR, formula generator, random data generator, 
+    sequencer module - fully fledged sequencer with MIDI file loading support ()
+    arpegiator module - fully fledge arpegiator
+    composer module - fully fledged composer which can have patterns, and has song position state. Take play/stop/pause/rewind state from master tempo module.
+    performance module - TODO
+    output: data - if datatypes need to be made here to prevent wonky data types to be clicked together, let me know.
+
+visual modules: 
+    inputs: audio, data wire (midi note data)
+    output: resizable and full screenable window with graphics being displayed generatd from input, with option to put the video output to the background
+    Levels modules: show the audio output levels, and any clipping.
+
+Misc modules:
+    notepad module: take notes
+    controller modules: as mentioned before, knobs (both infinite spinning and range locked), sliders, x-y controllers
+
+Rules:
+all modules by default are locked to the same master tempo module where user can set the tempo (default 120 bpm) and has play/stop/pause/rewind controls. 
+if any logic rules are mised let me know.
+
+if a wire is carring audio, pulsate the wire with the audio
+if a wire is carring data, pulsate the wire with a different color for data
+
+have effect modules: reverb, delay, chorus, modulator, flanger, compressor, multiband compressor, limiter, distortion, bitcrusher, simple EQ, parametric EQ (show audio input frequencies in the background).  Give them all fully fleshed out controls.
+
+UI: we want clear informative design to the users, and keep clutter to a minimum.  Some clutter is to be expected, but propose some ways to do design.  
+have wires be dynamically drawn from user click-dragging or double clicking an input or output, and animate the wire connected as the user drags around until user connects the wire with a satisfying snap.
+hovering over anything : module, component, wire, has a small informative popup that describe what the object does, and any data values related to that module (inputs/outputs/diaganostics)
+Layout all modules in a 2d space, and have modules in the forground with wires in the background as to not block information.  dont let modules overlap.
+Generally have inputs in the left sides and outputs on the right side.
+Draw wire connections so that they are hidden behind modules
+For all modules, have a save config button, load config, undo, redo, unlock layout (to move things around, including input/output positions) and relock layout, and randomize controls (make all visible dials/controls random values)
+
+Tutorial: setup simple tutorial to show how modules and wires work, and the difference between audio and data.
+
+Recording: Have a recording module which can take inputs and pipe output to a file.
+controls: initial controls will be mouse and keyboard but setup touch screen controls.  If touch screen support is forcing the design, let me know and well revisit
+
+Options Menu:
+Audio options: Have ASIO driver support, setup audo inputs, outputs (based on what is available from interface), levels.  Create audio interface input and output modules based on config
+MIDI options: fully fledged controls to setup midi in and midi out, with port and channel settings, with any detected midi devices.
+Display: User can load custom backgroung (allow center, stretch, tile, etc).  Enable/disable visual effets (such as wire's glowing).  Allow custom color templates which colors all modules, wires, UI, etc and generate a light mode, dark mode (default) color template
+Debug menu: show/hide debug log, show/hide fps counter, performance diagnoistics, audio underruns
+
+software stack: need to determine after we finalize requirements
+
+Browser based: if feasible to achieve with low latentency, audio interface support, and MIDI support then lets do this browser based.  Browser is preferred for quick prototyping.
+second option is VST which can be loaded into a DAW (I use FL Studio or Ableton).
+Third option is standalone aplication, where performance is desired: I am familiar with C and python, somewhat familiar with C++, less familiar with Rust.  suggest a language/framework here.
+
+fourth option which would be IDEAL: support all 3, browser, VST, standalone.
+for software stack before we start building I want a full cost benefit anaylsis here.
