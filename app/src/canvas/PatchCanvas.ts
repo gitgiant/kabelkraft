@@ -182,6 +182,31 @@ export class PatchCanvas {
     return { x: cx, y: cy };
   }
 
+  /** World point under a client coord, or null if outside the canvas (AI drag-drop). */
+  worldFromClient(clientX: number, clientY: number): { x: number; y: number } | null {
+    const rect = this.app.canvas.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+      return null;
+    }
+    return {
+      x: (clientX - rect.left - this.world.position.x) / this.world.scale.x,
+      y: (clientY - rect.top - this.world.position.y) / this.world.scale.y,
+    };
+  }
+
+  /**
+   * Animate a freshly inserted AI patch popping in: the collapsed faced tile if
+   * the group has a face, otherwise each member module.
+   */
+  popInImport(moduleIds: Iterable<string>, groupId?: string): void {
+    const gv = groupId ? this.groupViews.get(groupId) : undefined;
+    if (gv) {
+      gv.popIn();
+      return;
+    }
+    for (const id of moduleIds) this.views.get(id)?.popIn();
+  }
+
   // -- view lifecycle -------------------------------------------------------
 
   private rebuildAll(): void {
@@ -359,6 +384,7 @@ export class PatchCanvas {
 
   private startModuleDrag(view: ModuleView, e: FederatedPointerEvent): void {
     e.stopPropagation();
+    view.cancelPop(); // grabbing a still-popping module settles it immediately
     appState.beginUndoable(); // whole drag = one undo step
     const p = this.world.toLocal(e.global);
     this.moduleDrag = { view, offsetX: p.x - view.position.x, offsetY: p.y - view.position.y };
@@ -372,6 +398,7 @@ export class PatchCanvas {
 
   private startGroupDrag(view: GroupView, e: FederatedPointerEvent): void {
     e.stopPropagation();
+    view.cancelPop();
     appState.beginUndoable();
     const p = this.world.toLocal(e.global);
     this.groupDrag = {
@@ -700,9 +727,14 @@ export class PatchCanvas {
     }
 
     for (const view of this.views.values()) {
-      if (view.visible) view.updateLive();
+      if (!view.visible) continue;
+      view.advancePop(now);
+      view.updateLive();
     }
-    for (const gv of this.groupViews.values()) gv.updateLive();
+    for (const gv of this.groupViews.values()) {
+      gv.advancePop(now);
+      gv.updateLive();
+    }
   }
 
   private strokePath(points: Array<{ x: number; y: number }>, width: number, color: number, alpha: number): void {

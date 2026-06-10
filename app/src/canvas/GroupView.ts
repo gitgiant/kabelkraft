@@ -58,6 +58,9 @@ export class GroupView extends Container {
   private portDots = new Map<string, Graphics>();
   tileWidth = 170;
   tileHeight = 80;
+  private popUntil = 0;
+  private popFrom = { x: 0, y: 0 };
+  private static readonly POP_MS = 340;
 
   constructor(
     readonly group: ModuleGroup,
@@ -564,6 +567,42 @@ export class GroupView extends Container {
     hit.on('pointerout', () => this.tooltip.hide());
     this.addChild(hit);
     this.addCaption(el, fx, fy + btnH + 2);
+  }
+
+  /** Pop a freshly inserted faced group tile into existence (AI import). */
+  popIn(): void {
+    this.popFrom = { x: this.position.x, y: this.position.y };
+    this.popUntil = performance.now() + GroupView.POP_MS;
+    this.scale.set(0.001);
+    this.alpha = 0;
+  }
+
+  cancelPop(): void {
+    if (this.popUntil === 0) return;
+    this.popUntil = 0;
+    this.scale.set(1);
+    this.alpha = 1;
+    this.position.set(this.popFrom.x, this.popFrom.y);
+  }
+
+  advancePop(now: number): void {
+    if (this.popUntil === 0) return;
+    const remaining = this.popUntil - now;
+    if (remaining <= 0) {
+      this.cancelPop();
+      return;
+    }
+    const t = 1 - remaining / GroupView.POP_MS;
+    const c1 = 1.70158;
+    const c3 = c1 + 1;
+    const u = t - 1;
+    const s = 1 + c3 * u * u * u + c1 * u * u;
+    this.scale.set(s);
+    this.alpha = Math.min(1, t * 3);
+    this.position.set(
+      this.popFrom.x + (1 - s) * (this.tileWidth / 2),
+      this.popFrom.y + (1 - s) * (this.tileHeight / 2),
+    );
   }
 
   /** Canvas ticker: refresh meters/readouts and externally-changed controls. */

@@ -105,13 +105,86 @@ describe('AI spec pack', () => {
   it('its own examples validate against the parser', () => {
     const spec = generateSpecPack();
     const blocks = [...spec.matchAll(/```json\s*([\s\S]*?)```/g)].map((m) => m[1]);
-    // First block is the format template (placeholder wire targets) — skip it.
-    const examples = blocks.slice(1);
+    // Keep full patches (the face-rules block is a fragment); the first such
+    // block is the format template (placeholder wire targets) — skip it.
+    const examples = blocks.filter((b) => b.includes('"modules"')).slice(1);
     expect(examples.length).toBeGreaterThanOrEqual(3);
     for (const ex of examples) {
       const r = parseKkGroup(ex, MODULE_DEFS);
       expect(r.errors).toEqual([]);
       expect(r.ok).toBe(true);
     }
+  });
+
+  it('documents the optional face format', () => {
+    const spec = generateSpecPack();
+    expect(spec).toContain('Optional module face');
+    expect(spec).toContain('"kind": "knob"');
+  });
+});
+
+describe('AI face parsing', () => {
+  const withFace = (face: unknown) =>
+    JSON.stringify({
+      kind: 'kkgroup',
+      modules: [
+        { id: 'a', type: 'synth' },
+        { id: 'b', type: 'audioOut' },
+      ],
+      wires: [{ from: { module: 'a', port: 'out' }, to: { module: 'b', port: 'in' } }],
+      face,
+    });
+
+  it('parses a face and keeps valid bindings', () => {
+    const r = parseKkGroup(
+      withFace({
+        width: 300,
+        height: 200,
+        elements: [
+          { kind: 'label', x: 10, y: 0, text: 'SYNTH' },
+          { kind: 'knob', x: 10, y: 24, label: 'Level', module: 'a', param: 'level' },
+          { kind: 'meter', x: 10, y: 150, module: 'b' },
+        ],
+      }),
+      MODULE_DEFS,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.patch!.face!.elements).toHaveLength(3);
+    const knob = r.patch!.face!.elements.find((e) => e.kind === 'knob')!;
+    expect(knob.moduleId).toBe('a');
+    expect(knob.paramId).toBe('level');
+    expect(r.patch!.face!.width).toBe(300);
+  });
+
+  it('warns and unbinds a knob whose param is unknown, but still imports', () => {
+    const r = parseKkGroup(
+      withFace({ elements: [{ kind: 'knob', x: 0, y: 0, module: 'a', param: 'nope' }] }),
+      MODULE_DEFS,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.warnings.some((w) => w.includes('nope'))).toBe(true);
+    expect(r.patch!.face!.elements[0].paramId).toBeUndefined();
+  });
+
+  it('drops elements with an unknown kind or an image kind', () => {
+    const r = parseKkGroup(
+      withFace({
+        elements: [
+          { kind: 'wobble', x: 0, y: 0 },
+          { kind: 'image', x: 0, y: 0 },
+          { kind: 'label', x: 0, y: 0, text: 'ok' },
+        ],
+      }),
+      MODULE_DEFS,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.patch!.face!.elements).toHaveLength(1);
+    expect(r.warnings.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('leaves out the face when none is supplied', () => {
+    const r = parseKkGroup(withFace(undefined), MODULE_DEFS);
+    expect(r.ok).toBe(true);
+    expect(r.patch!.face).toBeUndefined();
   });
 });

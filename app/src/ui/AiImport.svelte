@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
+  import { extractJson } from '../core/aiimport';
   import { generateSpecPack } from '../core/aispec';
   import {
     CLAUDE_MODELS,
@@ -30,16 +31,74 @@
   let generating = $state(false);
   let genStatus = $state('');
 
+  // A generated + validated patch waiting to be placed (drag onto canvas / Place).
+  let readyPatch = $state('');
+  let readyName = $state('');
+  let placing = $state(false);
+
   onMount(() => {
     const onToggle = () => {
       open = !open;
       errors = [];
       warnings = [];
       imported = false;
+      readyPatch = '';
+      placing = false;
     };
     window.addEventListener('kk-ai-import', onToggle);
-    return () => window.removeEventListener('kk-ai-import', onToggle);
+    // Drag the ready-patch chip anywhere over the canvas to place it there.
+    window.addEventListener('dragover', onWindowDragOver);
+    window.addEventListener('drop', onWindowDrop);
+    return () => {
+      window.removeEventListener('kk-ai-import', onToggle);
+      window.removeEventListener('dragover', onWindowDragOver);
+      window.removeEventListener('drop', onWindowDrop);
+    };
   });
+
+  function patchName(t: string): string {
+    try {
+      return (JSON.parse(extractJson(t)).name as string) || 'AI Patch';
+    } catch {
+      return 'AI Patch';
+    }
+  }
+
+  /** Validate + insert at a world point, then pop the new modules in. */
+  function insertAt(point: { x: number; y: number }) {
+    const result = appState.importAiPatch(readyPatch, point);
+    errors = result.errors;
+    warnings = result.warnings;
+    if (result.ok) {
+      patchCanvas.popInImport(result.moduleIds, result.groupId);
+      imported = true;
+      readyPatch = '';
+      text = '';
+      setTimeout(() => (open = false), 900);
+    }
+  }
+
+  function place() {
+    if (readyPatch) insertAt(patchCanvas.viewCenter());
+  }
+
+  function onChipDragStart(e: DragEvent) {
+    placing = true;
+    e.dataTransfer?.setData('text/plain', readyName);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy';
+  }
+
+  function onWindowDragOver(e: DragEvent) {
+    if (placing) e.preventDefault(); // mark the page as a valid drop surface
+  }
+
+  function onWindowDrop(e: DragEvent) {
+    if (!placing || !readyPatch) return;
+    e.preventDefault();
+    const point = patchCanvas.worldFromClient(e.clientX, e.clientY);
+    placing = false;
+    if (point) insertAt(point); // dropped outside the canvas → keep the chip
+  }
 
   let userPrompt = $state('');
 
@@ -55,10 +114,17 @@
     errors = [];
     warnings = [];
     imported = false;
+    readyPatch = '';
     try {
       const result = await generatePatch(prompt, settings, 3, (s) => (genStatus = s));
       text = result.text;
-      runImport(); // validate + insert (or surface errors) via the shared path
+      if (result.ok) {
+        // Hold it as a draggable chip instead of auto-inserting (PRD §10).
+        readyPatch = result.text;
+        readyName = patchName(result.text);
+      } else {
+        runImport(); // surface the validation errors (nothing is inserted)
+      }
     } catch (e) {
       errors = [(e as Error).message];
     } finally {
@@ -82,6 +148,7 @@
     errors = result.errors;
     warnings = result.warnings;
     if (result.ok) {
+      patchCanvas.popInImport(result.moduleIds, result.groupId);
       imported = true;
       text = '';
       setTimeout(() => {
@@ -104,7 +171,7 @@
 <svelte:window onkeydown={onKey} />
 
 {#if open}
-  <div class="ai-backdrop">
+  <div class="ai-backdrop" class:placing>
     <div class="ai-dialog" role="dialog" aria-label="Import AI Patch" tabindex="-1" ondragover={(e) => e.preventDefault()} ondrop={onDrop}>
       <div class="ai-header">
         <span class="ai-title">AI Patch</span>
@@ -154,13 +221,34 @@
       {/if}
 
       <p class="ai-help">
-        {#if providerReady(settings)}
-          Describe the sound you want and click <strong>Generate</strong> — it's built, validated, and inserted in one step.
+        {#if readyPatch}
+          Patch ready — <strong>drag it onto the canvas</strong> to place it where you drop, or <strong>Place</strong> it in the center.
+        {:else if providerReady(settings)}
+          Describe the sound you want and click <strong>Generate</strong> — it's built and validated, then drag it onto the canvas.
         {:else}
           1. Describe the sound you want, copy, and paste it into any chatbot.<br />
           2. Paste the JSON it answers with below (or drop a .kkgroup file here).
         {/if}
       </p>
+
+      {#if readyPatch}
+        <div class="ready">
+          <div
+            class="patch-chip"
+            role="button"
+            tabindex="0"
+            draggable="true"
+            ondragstart={onChipDragStart}
+            ondragend={() => (placing = false)}
+            title="Drag onto the canvas to drop it there"
+          >
+            <span class="chip-icon">🎛</span>
+            <span class="chip-name">{readyName}</span>
+            <span class="chip-hint">drag onto canvas</span>
+          </div>
+          <button class="place" onclick={place}>Place in center</button>
+        </div>
+      {/if}
 
       <div class="prompt-row">
         <input
@@ -218,6 +306,12 @@
     align-items: center;
     justify-content: center;
     z-index: 65;
+    transition: opacity 0.12s ease;
+  }
+  /* While dragging the ready chip, get out of the way so the canvas is the drop target. */
+  .ai-backdrop.placing {
+    opacity: 0;
+    pointer-events: none;
   }
   .ai-dialog {
     width: 640px;
@@ -312,6 +406,38 @@
     font-size: 11px;
     color: var(--text-dim);
     margin: 0;
+  }
+  .ready {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .patch-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #1a1a20;
+    font-weight: 600;
+    cursor: grab;
+    user-select: none;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+  .patch-chip:active {
+    cursor: grabbing;
+  }
+  .chip-icon {
+    font-size: 16px;
+  }
+  .chip-hint {
+    font-size: 11px;
+    font-weight: 500;
+    opacity: 0.75;
+  }
+  .place {
+    white-space: nowrap;
   }
   .prompt-row {
     display: flex;

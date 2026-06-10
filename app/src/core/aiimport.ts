@@ -5,6 +5,7 @@
  * (unknown param, out-of-range value) become warnings and are fixed up.
  */
 
+import { ELEMENT_DEFAULTS, type FaceElement, type FaceElementKind, type FaceSpec } from './face';
 import type { ModuleDef } from './module';
 
 export interface KkGroupWireEnd {
@@ -26,6 +27,8 @@ export interface ParsedKkGroup {
   name: string;
   modules: KkGroupModule[];
   wires: Array<{ from: KkGroupWireEnd; to: KkGroupWireEnd }>;
+  /** Optional designed front panel. Element bindings reference patch module ids. */
+  face?: FaceSpec;
 }
 
 export interface ParseResult {
@@ -88,6 +91,93 @@ export function suggestType(name: string, candidates: Iterable<string>): string 
 export function extractJson(text: string): string {
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   return (fence ? fence[1] : text).trim();
+}
+
+const FACE_KINDS = new Set<FaceElementKind>([
+  'knob', 'slider', 'xy', 'button', 'label', 'image', 'meter', 'readout',
+]);
+
+/**
+ * Parse an optional designed front panel (PRD §6/§10). Element bindings keep the
+ * patch's own module ids here; importAiPatch remaps them to real instance ids.
+ * Face problems are warnings (recoverable) — a bad face never blocks the import.
+ */
+function parseFace(
+  raw: unknown,
+  byId: Map<string, KkGroupModule>,
+  defs: Map<string, ModuleDef>,
+  warnings: string[],
+): FaceSpec | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const doc = raw as Record<string, unknown>;
+  const rawEls = Array.isArray(doc.elements) ? (doc.elements as Array<Record<string, unknown>>) : [];
+  if (rawEls.length === 0) return undefined;
+
+  const elements: FaceElement[] = [];
+  rawEls.forEach((e, i) => {
+    const kind = String(e.kind ?? '') as FaceElementKind;
+    if (!FACE_KINDS.has(kind)) {
+      warnings.push(`Face element ${i + 1}: unknown kind "${e.kind}" — dropped.`);
+      return;
+    }
+    if (kind === 'image') {
+      warnings.push('Face element: "image" needs an uploaded asset, which AI patches can\'t supply — dropped.');
+      return;
+    }
+    const size = ELEMENT_DEFAULTS[kind];
+    const el: FaceElement = {
+      id: typeof e.id === 'string' && e.id ? e.id : `e${elements.length + 1}`,
+      kind,
+      x: Number(e.x) || 0,
+      y: Number(e.y) || 0,
+      w: Number(e.w) || size.w,
+      h: Number(e.h) || size.h,
+    };
+
+    if (kind === 'label') {
+      el.text = typeof e.text === 'string' ? e.text : typeof e.label === 'string' ? e.label : 'Label';
+      if (Number.isFinite(Number(e.size))) el.size = Number(e.size);
+    } else {
+      // Bound elements reference a module (and, except meter, a param).
+      const moduleId = String(e.module ?? e.moduleId ?? '');
+      const mod = byId.get(moduleId);
+      if (!mod) {
+        warnings.push(`Face ${kind} ${i + 1}: module "${moduleId}" not in this patch — left unbound.`);
+      } else {
+        el.moduleId = moduleId;
+        const def = defs.get(mod.type)!;
+        if (kind !== 'meter') {
+          const paramId = String(e.param ?? e.paramId ?? '');
+          if (def.params.some((p) => p.id === paramId)) {
+            el.paramId = paramId;
+          } else {
+            const hint = closest(paramId, def.params.map((p) => p.id));
+            warnings.push(`Face ${kind} on "${mod.type}": param "${paramId}" unknown${hint ? ` (did you mean "${hint}"?)` : ''} — left unbound.`);
+          }
+        }
+      }
+      if (kind === 'xy') {
+        const moduleId2 = String(e.module2 ?? e.moduleId2 ?? '');
+        const mod2 = byId.get(moduleId2);
+        const paramId2 = String(e.param2 ?? e.paramId2 ?? '');
+        if (mod2 && defs.get(mod2.type)!.params.some((p) => p.id === paramId2)) {
+          el.moduleId2 = moduleId2;
+          el.paramId2 = paramId2;
+        }
+      }
+      if (typeof e.label === 'string') el.label = e.label;
+    }
+    elements.push(el);
+  });
+
+  if (elements.length === 0) return undefined;
+  return {
+    width: Number(doc.width) || 360,
+    height: Number(doc.height) || 240,
+    grid: Number(doc.grid) || 10,
+    snap: doc.snap !== false,
+    elements,
+  };
 }
 
 export function parseKkGroup(text: string, defs: Map<string, ModuleDef>): ParseResult {
@@ -189,10 +279,12 @@ export function parseKkGroup(text: string, defs: Map<string, ModuleDef>): ParseR
   });
 
   if (errors.length > 0) return { ok: false, errors, warnings };
+
+  const face = parseFace(doc.face, byId, defs, warnings);
   return {
     ok: true,
     errors,
     warnings,
-    patch: { name: typeof doc.name === 'string' && doc.name ? doc.name : 'AI Patch', modules, wires },
+    patch: { name: typeof doc.name === 'string' && doc.name ? doc.name : 'AI Patch', modules, wires, face },
   };
 }

@@ -35,6 +35,38 @@ Rules:
 - Tempo-aware modules sync to the Master Transport implicitly; you rarely need a \`transport\` module inside a group.
 `;
 
+const FACE_RULES = `
+## Optional module face (front panel)
+
+You MAY add a top-level \`face\` object to give the patch a designed control panel —
+knobs/sliders/etc. wired to inner module params. The patch is collapsed to this
+panel when imported, so it reads as one finished instrument. Omit \`face\` for a
+plain patch.
+
+\`\`\`json
+"face": {
+  "width": 360, "height": 230,
+  "elements": [
+    { "kind": "label", "x": 16, "y": 4, "text": "FILTER" },
+    { "kind": "knob", "x": 16, "y": 28, "label": "Cutoff", "module": "bass", "param": "cutoff" },
+    { "kind": "knob", "x": 96, "y": 28, "label": "Res", "module": "bass", "param": "res" },
+    { "kind": "meter", "x": 16, "y": 150, "label": "Out", "module": "out" }
+  ]
+}
+\`\`\`
+
+Rules:
+- \`kind\` is one of: \`knob\`, \`slider\`, \`button\`, \`readout\` (each binds to a \`module\` + \`param\`);
+  \`xy\` (binds two axes: \`module\`/\`param\` for X, \`module2\`/\`param2\` for Y); \`meter\` (binds a
+  \`module\` only — show its output level); \`label\` (static text via \`text\`). Do NOT use \`image\`.
+- \`module\` is an \`id\` from this patch's \`modules\`; \`param\` is one of that module's param ids.
+- \`x\`/\`y\` are pixels from the panel's top-left; \`w\`/\`h\` are optional (sensible defaults per
+  kind). Lay controls out on a grid that fits inside \`width\`/\`height\` without overlapping
+  (knobs ~70×86, sliders ~36×120, meters ~90×16). Group related controls and add \`label\`
+  captions for sections.
+- Bindings that don't resolve are dropped with a warning; the rest of the face still loads.
+`;
+
 const EXAMPLES = `
 ## Annotated examples
 
@@ -76,10 +108,22 @@ The kick drives the compressor's sidechain input, so the bass ducks on every hit
     { "from": { "module": "lfo", "port": "out" }, "to": { "module": "pad", "port": "posMod" } },
     { "from": { "module": "pad", "port": "out" }, "to": { "module": "verb", "port": "in" } },
     { "from": { "module": "verb", "port": "out" }, "to": { "module": "out", "port": "in" } }
-  ]
+  ],
+  "face": {
+    "width": 360, "height": 200,
+    "elements": [
+      { "kind": "label", "x": 16, "y": 4, "text": "FM PAD" },
+      { "kind": "knob", "x": 16, "y": 28, "label": "Attack", "module": "pad", "param": "attack" },
+      { "kind": "knob", "x": 96, "y": 28, "label": "Release", "module": "pad", "param": "release" },
+      { "kind": "knob", "x": 176, "y": 28, "label": "Voices", "module": "pad", "param": "voices" },
+      { "kind": "knob", "x": 256, "y": 28, "label": "Reverb", "module": "verb", "param": "mix" },
+      { "kind": "meter", "x": 16, "y": 150, "w": 320, "label": "Out", "module": "out" }
+    ]
+  }
 }
 \`\`\`
-The LFO on posMod slowly sweeps FM modulation depth; hall reverb glues it.
+The LFO on posMod slowly sweeps FM modulation depth; hall reverb glues it. The
+face exposes the four knobs that matter, so the whole patch collapses to one panel.
 
 ### 3. Generative bleeps
 \`\`\`json
@@ -131,6 +175,7 @@ export function generateSpecPack(): string {
     }
     lines.push('');
   }
+  lines.push(FACE_RULES);
   lines.push(EXAMPLES);
   return lines.join('\n');
 }
