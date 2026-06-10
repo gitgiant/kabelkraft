@@ -1,0 +1,372 @@
+/**
+ * One module's visual on the patch canvas: tile body, typed port dots
+ * (inputs left, outputs right — PRD §5), generic param rows (drag to change,
+ * click to cycle options), plus type-specific faces (keyboard keys,
+ * transport buttons, meter bars).
+ */
+
+import { Container, FederatedPointerEvent, Graphics, Text } from 'pixi.js';
+import type { ModuleDef, ParamSpec, PortSpec } from '../core/module';
+import type { ModuleInstance } from '../core/module';
+import { PORT_TYPE_COLORS } from '../core/types';
+import { WAVEFORMS } from '../core/registry';
+import { appState } from '../state';
+import type { Tooltip } from './Tooltip';
+
+export const PORT_RADIUS = 7;
+const TITLE_H = 24;
+const ROW_H = 20;
+const BODY_COLOR = 0x26262e;
+const BODY_SELECTED = 0x32323e;
+const TITLE_COLOR = 0x33333d;
+const TEXT_COLOR = 0xd8d8e0;
+const DIM_TEXT = 0x9090a0;
+
+export interface PortHandlers {
+  onPortDown(moduleId: string, portId: string, e: FederatedPointerEvent): void;
+  onPortUp(moduleId: string, portId: string, e: FederatedPointerEvent): void;
+  onBodyDown(view: ModuleView, e: FederatedPointerEvent): void;
+}
+
+interface KeySpec {
+  semitone: number;
+  black: boolean;
+}
+
+// One octave, C to B.
+const KEYS: KeySpec[] = [
+  { semitone: 0, black: false }, { semitone: 1, black: true },
+  { semitone: 2, black: false }, { semitone: 3, black: true },
+  { semitone: 4, black: false }, { semitone: 5, black: false },
+  { semitone: 6, black: true }, { semitone: 7, black: false },
+  { semitone: 8, black: true }, { semitone: 9, black: false },
+  { semitone: 10, black: true }, { semitone: 11, black: false },
+];
+
+export class ModuleView extends Container {
+  readonly portCenters = new Map<string, { x: number; y: number }>();
+  private body = new Graphics();
+  private paramTexts = new Map<string, Text>();
+  private meterBar: Graphics | null = null;
+  private clipDot: Graphics | null = null;
+  private portDots = new Map<string, Graphics>();
+  private flashTimers = new Map<string, number>();
+
+  constructor(
+    readonly instance: ModuleInstance,
+    readonly def: ModuleDef,
+    private handlers: PortHandlers,
+    private tooltip: Tooltip,
+  ) {
+    super();
+    this.position.set(instance.x, instance.y);
+    this.addChild(this.body);
+    this.drawBody(false);
+    this.buildTitle();
+    this.buildPorts();
+    this.buildFace();
+  }
+
+  // -- construction -------------------------------------------------------
+
+  private drawBody(selected: boolean): void {
+    const { width: w, height: h } = this.def;
+    this.body.clear();
+    this.body
+      .roundRect(0, 0, w, h, 8)
+      .fill(selected ? BODY_SELECTED : BODY_COLOR)
+      .stroke({ width: selected ? 2 : 1, color: selected ? 0xffffff : 0x4a4a58 });
+    this.body.roundRect(0, 0, w, TITLE_H, 8).fill(TITLE_COLOR);
+    this.body.rect(0, TITLE_H - 8, w, 8).fill(TITLE_COLOR);
+    if (this.instance.color !== undefined) {
+      this.body.rect(0, TITLE_H, w, 3).fill(this.instance.color);
+    }
+  }
+
+  private buildTitle(): void {
+    const title = new Text({
+      text: this.instance.label ?? this.def.name,
+      style: { fontSize: 12, fill: TEXT_COLOR, fontWeight: 'bold' },
+    });
+    title.position.set(8, 5);
+    this.addChild(title);
+
+    this.body.eventMode = 'static';
+    this.body.cursor = 'grab';
+    this.body.on('pointerdown', (e) => this.handlers.onBodyDown(this, e));
+    this.body.on('pointerover', (e) =>
+      this.tooltip.show(
+        [this.instance.label ?? this.def.name, this.def.description],
+        e.clientX,
+        e.clientY,
+      ),
+    );
+    this.body.on('pointerout', () => this.tooltip.hide());
+  }
+
+  private buildPorts(): void {
+    const inputs = this.def.ports.filter((p) => p.direction === 'in');
+    const outputs = this.def.ports.filter((p) => p.direction === 'out');
+    const place = (ports: PortSpec[], x: number) => {
+      ports.forEach((port, i) => {
+        const y = TITLE_H + 18 + i * 26;
+        this.portCenters.set(port.id, { x, y });
+        const dot = new Graphics();
+        this.drawPortDot(dot, port, false);
+        dot.position.set(x, y);
+        dot.eventMode = 'static';
+        dot.cursor = 'crosshair';
+        // Generous hit area — PRD §13 touch targets.
+        dot.hitArea = { contains: (px: number, py: number) => px * px + py * py < 20 * 20 };
+        dot.on('pointerdown', (e) => {
+          e.stopPropagation();
+          this.handlers.onPortDown(this.instance.id, port.id, e);
+        });
+        dot.on('pointerup', (e) => {
+          e.stopPropagation();
+          this.handlers.onPortUp(this.instance.id, port.id, e);
+        });
+        dot.on('pointerover', (e) => {
+          this.tooltip.show(
+            [`${port.label} — ${port.type} ${port.direction}`, port.description],
+            e.clientX,
+            e.clientY,
+          );
+        });
+        dot.on('pointerout', () => this.tooltip.hide());
+        this.addChild(dot);
+        this.portDots.set(port.id, dot);
+      });
+    };
+    place(inputs, 0);
+    place(outputs, this.def.width);
+  }
+
+  private drawPortDot(dot: Graphics, port: PortSpec, highlight: boolean): void {
+    dot.clear();
+    dot
+      .circle(0, 0, highlight ? PORT_RADIUS + 3 : PORT_RADIUS)
+      .fill(PORT_TYPE_COLORS[port.type])
+      .stroke({ width: 2, color: highlight ? 0xffffff : 0x16161c });
+  }
+
+  setPortHighlight(portId: string, on: boolean): void {
+    const dot = this.portDots.get(portId);
+    const port = this.def.ports.find((p) => p.id === portId);
+    if (dot && port) this.drawPortDot(dot, port, on);
+  }
+
+  /** Brief red flash on a port that rejected a wire (PRD §4.3). */
+  flashPortRejection(portId: string): void {
+    const dot = this.portDots.get(portId);
+    if (!dot) return;
+    const prev = this.flashTimers.get(portId);
+    if (prev !== undefined) clearTimeout(prev);
+    dot.clear().circle(0, 0, PORT_RADIUS + 3).fill(0xff3030).stroke({ width: 2, color: 0xffffff });
+    this.flashTimers.set(
+      portId,
+      window.setTimeout(() => this.setPortHighlight(portId, false), 350),
+    );
+  }
+
+  private buildFace(): void {
+    let y = TITLE_H + 8;
+    const x = 18;
+    const w = this.def.width - 36;
+
+    for (const param of this.def.params) {
+      this.buildParamRow(param, x, y, w);
+      y += ROW_H;
+    }
+
+    if (this.instance.type === 'keyboard') this.buildKeys(x, y + 2, w);
+    if (this.instance.type === 'transport') this.buildTransportButtons(x, y + 4);
+    if (this.instance.type === 'levels' || this.instance.type === 'audioOut') {
+      this.buildMeter(x, this.def.height - 18, w);
+    }
+  }
+
+  private buildParamRow(param: ParamSpec, x: number, y: number, w: number): void {
+    const label = new Text({ text: param.label, style: { fontSize: 11, fill: DIM_TEXT } });
+    label.position.set(x, y + 3);
+    this.addChild(label);
+
+    const value = new Text({
+      text: this.formatParam(param),
+      style: { fontSize: 11, fill: TEXT_COLOR },
+    });
+    value.anchor.set(1, 0);
+    value.position.set(x + w, y + 3);
+    this.addChild(value);
+    this.paramTexts.set(param.id, value);
+
+    const hit = new Graphics().rect(x - 4, y, w + 8, ROW_H).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'ew-resize';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      this.beginParamDrag(param, e);
+    });
+    hit.on('pointerover', (e) => {
+      const mod = appState.graph.modules.get(this.instance.id);
+      this.tooltip.show(
+        [`${param.label}: ${this.formatParam(param)}`,
+          param.options ? 'Click to cycle' : `Drag to change (${param.min}–${param.max}${param.unit ?? ''})`],
+        e.clientX,
+        e.clientY,
+      );
+      void mod;
+    });
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  private beginParamDrag(param: ParamSpec, e: FederatedPointerEvent): void {
+    const startX = e.clientX;
+    const startValue = this.instance.params[param.id];
+    let moved = false;
+
+    const onMove = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      if (Math.abs(dx) > 2) moved = true;
+      if (param.options) return; // options cycle on click, not drag
+      const range = param.max - param.min;
+      let v = startValue + (dx / 150) * range;
+      v = Math.min(param.max, Math.max(param.min, v));
+      appState.setParam(this.instance.id, param.id, v);
+      this.updateParamText(param);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      if (!moved && param.options) {
+        const next = (Math.round(this.instance.params[param.id]) + 1) % param.options.length;
+        appState.setParam(this.instance.id, param.id, next);
+        this.updateParamText(param);
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  private formatParam(param: ParamSpec): string {
+    const v = this.instance.params[param.id];
+    if (param.options) return param.options[Math.round(v)] ?? String(v);
+    const text = Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+    return param.unit ? `${text} ${param.unit}` : text;
+  }
+
+  private updateParamText(param: ParamSpec): void {
+    const t = this.paramTexts.get(param.id);
+    if (t) t.text = this.formatParam(param);
+  }
+
+  refreshParams(): void {
+    for (const p of this.def.params) this.updateParamText(p);
+  }
+
+  // -- type-specific faces --------------------------------------------------
+
+  private buildKeys(x: number, y: number, w: number): void {
+    const keyW = w / KEYS.length;
+    const keyH = this.def.height - y - 10;
+    KEYS.forEach((key, i) => {
+      const g = new Graphics()
+        .roundRect(0, 0, keyW - 2, key.black ? keyH * 0.6 : keyH, 3)
+        .fill(key.black ? 0x1a1a20 : 0xe8e8ee);
+      g.position.set(x + i * keyW, y);
+      g.eventMode = 'static';
+      g.cursor = 'pointer';
+      const id = `kbd:${key.semitone}`;
+      const pitch = () => 60 + key.semitone + Math.round(this.instance.params.octave ?? 0) * 12;
+      g.on('pointerdown', (e) => {
+        e.stopPropagation();
+        appState.noteOn(this.instance.id, id, pitch());
+      });
+      const off = () => appState.noteOff(this.instance.id, id);
+      g.on('pointerup', off);
+      g.on('pointerupoutside', off);
+      g.on('pointerout', off);
+      this.addChild(g);
+    });
+  }
+
+  private buildTransportButtons(x: number, y: number): void {
+    const buttons: Array<['⏮', 'rewind'] | ['▶', 'play'] | ['⏸', 'pause'] | ['⏹', 'stop']> = [
+      ['⏮', 'rewind'], ['▶', 'play'], ['⏸', 'pause'], ['⏹', 'stop'],
+    ];
+    buttons.forEach(([icon, cmd], i) => {
+      const g = new Graphics().roundRect(0, 0, 36, 26, 5).fill(0x3a3a48);
+      g.position.set(x + i * 42, y);
+      g.eventMode = 'static';
+      g.cursor = 'pointer';
+      g.on('pointerdown', (e) => {
+        e.stopPropagation();
+        appState.transportCommand(cmd);
+      });
+      this.addChild(g);
+      const t = new Text({ text: icon, style: { fontSize: 13, fill: TEXT_COLOR } });
+      t.anchor.set(0.5);
+      t.position.set(x + i * 42 + 18, y + 13);
+      t.eventMode = 'none';
+      this.addChild(t);
+    });
+  }
+
+  private buildMeter(x: number, y: number, w: number): void {
+    const bg = new Graphics().roundRect(x, y, w, 8, 3).fill(0x16161c);
+    this.addChild(bg);
+    this.meterBar = new Graphics();
+    this.addChild(this.meterBar);
+    this.clipDot = new Graphics();
+    this.clipDot.circle(x + w + 8, y + 4, 4).fill(0x550000);
+    this.clipDot.eventMode = 'static';
+    this.clipDot.cursor = 'pointer';
+    this.addChild(this.clipDot);
+    this.meterX = x;
+    this.meterY = y;
+    this.meterW = w;
+  }
+
+  private meterX = 0;
+  private meterY = 0;
+  private meterW = 0;
+  private clipped = false;
+
+  /** Called from the canvas ticker with live engine meters. */
+  updateMeter(): void {
+    if (!this.meterBar) return;
+    const reading = appState.meters[this.instance.id];
+    const peak = reading?.peak ?? 0;
+    if (reading?.clipped) this.clipped = true;
+    this.meterBar.clear();
+    const w = Math.min(1, peak) * this.meterW;
+    if (w > 0.5) {
+      this.meterBar
+        .roundRect(this.meterX, this.meterY, w, 8, 3)
+        .fill(peak > 1 ? 0xff3030 : peak > 0.85 ? 0xffb13d : 0x52e07a);
+    }
+    if (this.clipDot) {
+      this.clipDot.clear().circle(this.meterX + this.meterW + 8, this.meterY + 4, 4)
+        .fill(this.clipped ? 0xff2020 : 0x550000);
+      this.clipDot.off('pointerdown');
+      this.clipDot.on('pointerdown', (e) => {
+        e.stopPropagation();
+        this.clipped = false;
+      });
+    }
+  }
+
+  setSelected(on: boolean): void {
+    this.drawBody(on);
+  }
+
+  /** World-space center of a port. */
+  portWorldPosition(portId: string): { x: number; y: number } {
+    const local = this.portCenters.get(portId)!;
+    return { x: this.position.x + local.x, y: this.position.y + local.y };
+  }
+}
+
+// Re-export for QWERTY mapping in chrome code.
+export { KEYS, WAVEFORMS };
