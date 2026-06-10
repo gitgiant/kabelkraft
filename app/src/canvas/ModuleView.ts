@@ -20,7 +20,7 @@ import {
   type DrumStep,
   type SeqStep,
 } from '../core/registry';
-import { bandCoefs, chainResponseDb } from '../core/eqmath';
+import { bandCoefs, biquadResponseDb, chainResponseDb, vcfCoefs } from '../core/eqmath';
 import { sampleKey } from '../core/samples';
 import { appState } from '../state';
 import { theme } from '../theme';
@@ -265,6 +265,505 @@ export class ModuleView extends Container {
     }
     if (this.instance.type === 'visualizer') this.buildVisFace(x, y + 4, w);
     if (this.instance.type === 'composer') this.buildComposerFace(x, y + 4, w);
+    if (this.instance.type === 'vcf') this.buildVcfFace(x, y, w);
+    if (this.instance.type === 'knob') this.buildKnobFace();
+    if (this.instance.type === 'slider') this.buildSliderFace();
+    if (this.instance.type === 'xy') this.buildXyFace();
+    if (this.instance.type === 'button') this.buildButtonFace();
+  }
+
+  // -- filter (vcf) face: knobs + response curve -----------------------------
+
+  private vcfRedraws: Array<() => void> = [];
+  private vcfCurveG: Graphics | null = null;
+  private vcfCurveRect = { x: 0, y: 0, w: 0, h: 0 };
+
+  /** Normalized 0–1 position of a param value, honoring its display curve. */
+  private paramNorm(p: ParamSpec, v: number): number {
+    if (p.curve === 'exp' && p.min > 0) return Math.log(v / p.min) / Math.log(p.max / p.min);
+    return (v - p.min) / (p.max - p.min);
+  }
+
+  private paramFromNorm(p: ParamSpec, n: number): number {
+    const k = Math.min(1, Math.max(0, n));
+    if (p.curve === 'exp' && p.min > 0) return p.min * Math.pow(p.max / p.min, k);
+    return p.min + k * (p.max - p.min);
+  }
+
+  /** Rotary knob for one param (PRD: filters get cutoff/Q knobs). */
+  private buildMiniKnob(param: ParamSpec, cx: number, cy: number, r: number): void {
+    const g = new Graphics();
+    this.addChild(g);
+    const value = new Text({ text: '', style: { fontSize: 10, fill: theme.text } });
+    value.anchor.set(0.5, 0);
+    value.position.set(cx, cy + r + 4);
+    this.addChild(value);
+    const label = new Text({ text: param.label, style: { fontSize: 10, fill: theme.textDim } });
+    label.anchor.set(0.5, 1);
+    label.position.set(cx, cy - r - 4);
+    label.eventMode = 'none';
+    this.addChild(label);
+
+    const redraw = () => {
+      const v = this.instance.params[param.id] ?? param.default;
+      const n = Math.min(1, Math.max(0, this.paramNorm(param, v)));
+      const a0 = Math.PI * 0.75;
+      const a1 = Math.PI * 2.25;
+      const av = a0 + (a1 - a0) * n;
+      g.clear();
+      g.circle(cx, cy, r * 0.74).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
+      g.arc(cx, cy, r, a0, a1).stroke({ width: 3, color: theme.inset });
+      g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: PORT_TYPE_COLORS.audio });
+      g.moveTo(cx + Math.cos(av) * r * 0.25, cy + Math.sin(av) * r * 0.25)
+        .lineTo(cx + Math.cos(av) * r * 0.66, cy + Math.sin(av) * r * 0.66)
+        .stroke({ width: 2, color: theme.text });
+      value.text = this.formatParam(param);
+    };
+    redraw();
+    this.vcfRedraws.push(redraw);
+
+    const hit = new Graphics().circle(cx, cy, r + 6).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'ns-resize';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      if (e.altKey) {
+        appState.armMidiLearn(this.instance.id, param.id);
+        return;
+      }
+      appState.beginUndoable();
+      const start = this.paramNorm(param, this.instance.params[param.id] ?? param.default);
+      const startY = e.clientY;
+      const scale = this.worldTransform.a || 1;
+      const onMove = (ev: PointerEvent) => {
+        const n = start + (startY - ev.clientY) / scale / 120;
+        appState.setParam(this.instance.id, param.id, this.paramFromNorm(param, n));
+        this.refreshParams();
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    });
+    hit.on('pointerover', (ev) =>
+      this.tooltip.show(
+        [`${param.label}: ${this.formatParam(param)}`, 'Drag up/down. Alt-click: MIDI learn.'],
+        ev.clientX,
+        ev.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  private buildVcfFace(x: number, y: number, w: number): void {
+    this.vcfRedraws = [];
+    const spec = (id: string) => this.def.params.find((p) => p.id === id)!;
+    this.buildParamRow(spec('mode'), x, y, w);
+    const knobY = y + ROW_H + 44;
+    this.buildMiniKnob(spec('cutoff'), x + w * 0.28, knobY, 24);
+    this.buildMiniKnob(spec('res'), x + w * 0.72, knobY, 24);
+    this.buildParamRow(spec('amt'), x, knobY + 44, w);
+
+    const cy = knobY + 44 + ROW_H + 4;
+    this.vcfCurveRect = { x, y: cy, w, h: this.def.height - cy - 12 };
+    this.vcfCurveG = new Graphics();
+    this.addChild(this.vcfCurveG);
+    this.drawVcfCurve();
+
+    const r = this.vcfCurveRect;
+    const hit = new Graphics().rect(r.x, r.y, r.w, r.h).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'crosshair';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      appState.beginUndoable();
+      const cutoff = spec('cutoff');
+      const res = spec('res');
+      const apply = (lx: number, ly: number) => {
+        appState.setParam(this.instance.id, 'cutoff', this.paramFromNorm(cutoff, (lx - r.x) / r.w));
+        appState.setParam(this.instance.id, 'res', this.paramFromNorm(res, 1 - (ly - r.y) / r.h));
+        this.refreshParams();
+      };
+      const first = this.toLocal(e.global);
+      apply(first.x, first.y);
+      const scale = this.worldTransform.a || 1;
+      const sx = e.clientX;
+      const sy = e.clientY;
+      const onMove = (ev: PointerEvent) =>
+        apply(first.x + (ev.clientX - sx) / scale, first.y + (ev.clientY - sy) / scale);
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    });
+    hit.on('pointerover', (ev) =>
+      this.tooltip.show(
+        ['Filter response', 'Drag: horizontal = cutoff, vertical = Q.'],
+        ev.clientX,
+        ev.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  /** Visual indicator: log-frequency magnitude curve of the current settings. */
+  private drawVcfCurve(): void {
+    if (!this.vcfCurveG) return;
+    const g = this.vcfCurveG;
+    const r = this.vcfCurveRect;
+    const p = this.instance.params;
+    const sr = appState.engine.sampleRate;
+    const coefs = vcfCoefs(Math.round(p.mode ?? 0), p.cutoff ?? 1200, p.res ?? 0.2, sr);
+
+    const F_LO = 20;
+    const F_HI = 20000;
+    const DB_RANGE = 30; // ±30 dB
+    const yFor = (db: number) =>
+      r.y + r.h / 2 - (Math.max(-DB_RANGE, Math.min(DB_RANGE, db)) / DB_RANGE) * (r.h / 2);
+
+    g.clear();
+    g.roundRect(r.x, r.y, r.w, r.h, 4).fill(theme.inset);
+    g.moveTo(r.x, r.y + r.h / 2).lineTo(r.x + r.w, r.y + r.h / 2)
+      .stroke({ width: 1, color: theme.moduleStroke, alpha: 0.6 });
+
+    const N = 80;
+    const pts: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i <= N; i++) {
+      const f = F_LO * Math.pow(F_HI / F_LO, i / N);
+      pts.push({ x: r.x + (i / N) * r.w, y: yFor(biquadResponseDb(coefs, f, sr)) });
+    }
+    g.moveTo(pts[0].x, r.y + r.h);
+    for (const pt of pts) g.lineTo(pt.x, pt.y);
+    g.lineTo(pts[N].x, r.y + r.h);
+    g.closePath();
+    g.fill({ color: PORT_TYPE_COLORS.audio, alpha: 0.18 });
+    g.moveTo(pts[0].x, pts[0].y);
+    for (const pt of pts) g.lineTo(pt.x, pt.y);
+    g.stroke({ width: 2, color: PORT_TYPE_COLORS.audio });
+
+    // Cutoff handle.
+    const cutoff = Math.min(F_HI, Math.max(F_LO, p.cutoff ?? 1200));
+    const cx = r.x + (Math.log(cutoff / F_LO) / Math.log(F_HI / F_LO)) * r.w;
+    g.circle(cx, yFor(biquadResponseDb(coefs, cutoff, sr)), 5)
+      .fill(PORT_TYPE_COLORS.audio)
+      .stroke({ width: 2, color: theme.text });
+  }
+
+  // -- controller faces (PRD §8.6) -------------------------------------------
+
+  private ctrlG: Graphics | null = null;
+  private ctrlText: Text | null = null;
+
+  private ctrlSpec(id: string): ParamSpec {
+    return this.def.params.find((p) => p.id === id)!;
+  }
+
+  private setCtrl(paramId: string, v: number): void {
+    appState.setParam(this.instance.id, paramId, Math.min(1, Math.max(0, v)));
+  }
+
+  /** Relative drag shared by knob/slider/XY; one undo step per gesture. */
+  private beginCtrlDrag(
+    e: FederatedPointerEvent,
+    apply: (dxLocal: number, dyLocal: number) => void,
+    onDone?: () => void,
+  ): void {
+    appState.beginUndoable();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    // Client px → canvas-local px (canvas zoom lives in the world transform).
+    const scale = this.worldTransform.a || 1;
+    const onMove = (ev: PointerEvent) => {
+      apply((ev.clientX - startX) / scale, (ev.clientY - startY) / scale);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      onDone?.();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  /** Double-click value entry (PRD §8.6 "double-click to type a value"). */
+  private promptCtrl(paramId: string, redraw: () => void): void {
+    const cur = this.instance.params[paramId] ?? 0;
+    const raw = window.prompt(`${this.def.name} value (0–1)`, cur.toFixed(3));
+    if (raw === null) return;
+    const v = Number(raw);
+    if (!Number.isFinite(v)) return;
+    appState.beginUndoable();
+    this.setCtrl(paramId, v);
+    redraw();
+  }
+
+  private knobCenter(): { cx: number; cy: number } {
+    return { cx: this.def.width / 2, cy: TITLE_H + 56 };
+  }
+
+  private buildKnobFace(): void {
+    const { cx, cy } = this.knobCenter();
+    this.ctrlG = new Graphics();
+    this.addChild(this.ctrlG);
+    this.ctrlText = new Text({ text: '', style: { fontSize: 12, fill: theme.text } });
+    this.ctrlText.anchor.set(0.5, 0);
+    this.ctrlText.position.set(cx, cy + 44);
+    this.addChild(this.ctrlText);
+    this.drawKnob();
+
+    const hit = new Graphics().circle(cx, cy, 40).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'ns-resize';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      if (e.altKey) {
+        appState.armMidiLearn(this.instance.id, 'value');
+        return;
+      }
+      if (e.detail >= 2) {
+        this.promptCtrl('value', () => this.drawKnob());
+        return;
+      }
+      const start = this.instance.params.value ?? 0;
+      this.beginCtrlDrag(e, (_dx, dy) => {
+        this.setCtrl('value', start - dy / 120);
+        this.drawKnob();
+      });
+    });
+    hit.on('pointerover', (ev) =>
+      this.tooltip.show(
+        ['Knob: drag up/down. Double-click: type a value. Alt-click: MIDI learn.'],
+        ev.clientX,
+        ev.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  drawKnob(): void {
+    if (!this.ctrlG || this.instance.type !== 'knob') return;
+    const { cx, cy } = this.knobCenter();
+    const v = Math.min(1, Math.max(0, this.instance.params.value ?? 0));
+    const a0 = Math.PI * 0.75;
+    const a1 = Math.PI * 2.25;
+    const av = a0 + (a1 - a0) * v;
+    const g = this.ctrlG;
+    g.clear();
+    g.circle(cx, cy, 28).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
+    g.arc(cx, cy, 36, a0, a1).stroke({ width: 4, color: theme.inset });
+    g.arc(cx, cy, 36, a0, av).stroke({ width: 4, color: PORT_TYPE_COLORS.control });
+    g.moveTo(cx + Math.cos(av) * 10, cy + Math.sin(av) * 10)
+      .lineTo(cx + Math.cos(av) * 26, cy + Math.sin(av) * 26)
+      .stroke({ width: 3, color: theme.text });
+    if (this.ctrlText) this.ctrlText.text = v.toFixed(2);
+  }
+
+  private sliderTrack(): { x: number; y: number; w: number; h: number; horiz: boolean } {
+    const horiz = Math.round(this.instance.params.orient ?? 0) === 1;
+    const pad = 18;
+    if (horiz) {
+      return { x: pad, y: TITLE_H + 40, w: this.def.width - pad * 2, h: 12, horiz };
+    }
+    return { x: this.def.width / 2 - 6, y: TITLE_H + 14, w: 12, h: this.def.height - TITLE_H - 70, horiz };
+  }
+
+  private buildSliderFace(): void {
+    this.ctrlG = new Graphics();
+    this.addChild(this.ctrlG);
+    this.ctrlText = new Text({ text: '', style: { fontSize: 12, fill: theme.text } });
+    this.ctrlText.anchor.set(0.5, 0);
+    this.ctrlText.position.set(this.def.width / 2, this.def.height - 48);
+    this.addChild(this.ctrlText);
+    this.drawSlider();
+
+    // Hit area covers both orientations; drawing follows the orient param.
+    const hit = new Graphics()
+      .rect(8, TITLE_H + 6, this.def.width - 16, this.def.height - TITLE_H - 56)
+      .fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      if (e.altKey) {
+        appState.armMidiLearn(this.instance.id, 'value');
+        return;
+      }
+      if (e.detail >= 2) {
+        this.promptCtrl('value', () => this.drawSlider());
+        return;
+      }
+      const t = this.sliderTrack();
+      appState.beginUndoable();
+      // Jump to the click position, then track relatively.
+      const local = this.toLocal(e.global);
+      this.setCtrl('value', t.horiz ? (local.x - t.x) / t.w : 1 - (local.y - t.y) / t.h);
+      this.drawSlider();
+      const start = this.instance.params.value ?? 0;
+      this.beginCtrlDrag(e, (dx, dy) => {
+        this.setCtrl('value', start + (t.horiz ? dx / t.w : -dy / t.h));
+        this.drawSlider();
+      });
+    });
+    hit.on('pointerover', (ev) =>
+      this.tooltip.show(
+        ['Slider: click or drag. Double-click: type a value. Alt-click: MIDI learn.'],
+        ev.clientX,
+        ev.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+
+    this.buildParamRow(this.ctrlSpec('orient'), 18, this.def.height - 28, this.def.width - 36);
+  }
+
+  drawSlider(): void {
+    if (!this.ctrlG || this.instance.type !== 'slider') return;
+    const v = Math.min(1, Math.max(0, this.instance.params.value ?? 0));
+    const t = this.sliderTrack();
+    const g = this.ctrlG;
+    g.clear();
+    g.roundRect(t.x, t.y, t.w, t.h, 5).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
+    if (t.horiz) {
+      g.roundRect(t.x, t.y, t.w * v, t.h, 5).fill(PORT_TYPE_COLORS.control);
+      g.roundRect(t.x + t.w * v - 7, t.y - 6, 14, t.h + 12, 4)
+        .fill(theme.button)
+        .stroke({ width: 1, color: theme.text });
+    } else {
+      g.roundRect(t.x, t.y + t.h * (1 - v), t.w, t.h * v, 5).fill(PORT_TYPE_COLORS.control);
+      g.roundRect(t.x - 12, t.y + t.h * (1 - v) - 7, t.w + 24, 14, 4)
+        .fill(theme.button)
+        .stroke({ width: 1, color: theme.text });
+    }
+    if (this.ctrlText) this.ctrlText.text = v.toFixed(2);
+  }
+
+  private xyPad(): { x: number; y: number; w: number; h: number } {
+    return {
+      x: 18,
+      y: TITLE_H + 8,
+      w: this.def.width - 36,
+      h: this.def.height - TITLE_H - 8 - 34,
+    };
+  }
+
+  private buildXyFace(): void {
+    this.ctrlG = new Graphics();
+    this.addChild(this.ctrlG);
+    this.drawXy();
+
+    const r = this.xyPad();
+    const hit = new Graphics().rect(r.x, r.y, r.w, r.h).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'crosshair';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      appState.beginUndoable();
+      const local = this.toLocal(e.global);
+      this.setCtrl('x', (local.x - r.x) / r.w);
+      this.setCtrl('y', 1 - (local.y - r.y) / r.h);
+      this.drawXy();
+      const sx = this.instance.params.x ?? 0.5;
+      const sy = this.instance.params.y ?? 0.5;
+      this.beginCtrlDrag(
+        e,
+        (dx, dy) => {
+          this.setCtrl('x', sx + dx / r.w);
+          this.setCtrl('y', sy - dy / r.h);
+          this.drawXy();
+        },
+        () => {
+          if (Math.round(this.instance.params.spring ?? 0) === 1) {
+            this.setCtrl('x', 0.5);
+            this.setCtrl('y', 0.5);
+            this.drawXy();
+          }
+        },
+      );
+    });
+    hit.on('pointerover', (ev) =>
+      this.tooltip.show(['XY pad: drag the puck. X and Y are separate control outputs.'], ev.clientX, ev.clientY),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+
+    this.buildParamRow(this.ctrlSpec('spring'), 18, this.def.height - 26, this.def.width - 36);
+  }
+
+  drawXy(): void {
+    if (!this.ctrlG || this.instance.type !== 'xy') return;
+    const r = this.xyPad();
+    const vx = Math.min(1, Math.max(0, this.instance.params.x ?? 0.5));
+    const vy = Math.min(1, Math.max(0, this.instance.params.y ?? 0.5));
+    const px = r.x + vx * r.w;
+    const py = r.y + (1 - vy) * r.h;
+    const g = this.ctrlG;
+    g.clear();
+    g.roundRect(r.x, r.y, r.w, r.h, 6).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
+    g.moveTo(r.x + r.w / 2, r.y).lineTo(r.x + r.w / 2, r.y + r.h).stroke({ width: 1, color: theme.moduleStroke });
+    g.moveTo(r.x, r.y + r.h / 2).lineTo(r.x + r.w, r.y + r.h / 2).stroke({ width: 1, color: theme.moduleStroke });
+    g.moveTo(px, r.y).lineTo(px, r.y + r.h).stroke({ width: 1, color: theme.textDim, alpha: 0.4 });
+    g.moveTo(r.x, py).lineTo(r.x + r.w, py).stroke({ width: 1, color: theme.textDim, alpha: 0.4 });
+    g.circle(px, py, 9).fill(PORT_TYPE_COLORS.control).stroke({ width: 2, color: theme.text });
+  }
+
+  private buttonRect(): { x: number; y: number; w: number; h: number } {
+    return { x: 22, y: TITLE_H + 10, w: this.def.width - 44, h: this.def.height - TITLE_H - 48 };
+  }
+
+  private buildButtonFace(): void {
+    this.ctrlG = new Graphics();
+    this.addChild(this.ctrlG);
+    this.drawButton();
+
+    const r = this.buttonRect();
+    const hit = new Graphics().rect(r.x, r.y, r.w, r.h).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    const release = () => {
+      if (Math.round(this.instance.params.mode ?? 0) === 0 && (this.instance.params.value ?? 0) > 0.5) {
+        this.setCtrl('value', 0);
+        this.drawButton();
+      }
+    };
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      if (Math.round(this.instance.params.mode ?? 0) === 0) {
+        // Momentary presses are transient — not worth an undo step.
+        this.setCtrl('value', 1);
+      } else {
+        appState.beginUndoable();
+        this.setCtrl('value', (this.instance.params.value ?? 0) > 0.5 ? 0 : 1);
+      }
+      this.drawButton();
+    });
+    hit.on('pointerup', release);
+    hit.on('pointerupoutside', release);
+    hit.on('pointerover', (ev) =>
+      this.tooltip.show(['Button: hold (momentary) or click (toggle). Output is 0 or 1.'], ev.clientX, ev.clientY),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+
+    this.buildParamRow(this.ctrlSpec('mode'), 18, this.def.height - 28, this.def.width - 36);
+  }
+
+  drawButton(): void {
+    if (!this.ctrlG || this.instance.type !== 'button') return;
+    const r = this.buttonRect();
+    const on = (this.instance.params.value ?? 0) > 0.5;
+    const g = this.ctrlG;
+    g.clear();
+    g.roundRect(r.x, r.y, r.w, r.h, 10)
+      .fill(on ? PORT_TYPE_COLORS.control : theme.button)
+      .stroke({ width: 2, color: on ? theme.text : theme.moduleStroke });
   }
 
   // -- composer face (PRD §8.3) --------------------------------------------------
@@ -1459,6 +1958,8 @@ export class ModuleView extends Container {
   }
 
   private beginParamDrag(param: ParamSpec, e: FederatedPointerEvent): void {
+    // Face-learn (PRD §6 macro controls): armed editor captures this param.
+    if (appState.faceLearn && appState.completeFaceLearn(this.instance.id, param.id)) return;
     appState.beginUndoable(); // whole drag (or option cycle) = one undo step
     const startX = e.clientX;
     const startValue = this.instance.params[param.id];
@@ -1502,6 +2003,14 @@ export class ModuleView extends Container {
   refreshParams(): void {
     for (const p of this.def.params) this.updateParamText(p);
     if (this.instance.type === 'peq') this.drawPeqCurve();
+    if (this.instance.type === 'vcf') {
+      for (const fn of this.vcfRedraws) fn();
+      this.drawVcfCurve();
+    }
+    if (this.instance.type === 'knob') this.drawKnob();
+    if (this.instance.type === 'slider') this.drawSlider();
+    if (this.instance.type === 'xy') this.drawXy();
+    if (this.instance.type === 'button') this.drawButton();
   }
 
   // -- type-specific faces --------------------------------------------------

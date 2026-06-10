@@ -594,16 +594,67 @@ class LfoModule {
   }
 }
 
-/** Note-gated control envelope (monophonic; any held note keeps the gate open). */
+// ---------------------------------------------------------------------------
+// Polyphonic component plumbing (build-your-own-synth chains, PRD §8.2/§8.6)
+//
+// A control wire value is a scalar (mono) or a Float32Array — one value per
+// voice lane, produced by a Voice module. Audio between poly-aware components
+// flows as per-lane stereo buffers (polyL/polyR + polyLanes on the source,
+// polyIn on the destination). Poly sources always also fill the summed
+// outL/outR, so any plain stereo input collapses the lanes to a mix and the
+// 28 pre-poly modules need no changes.
+// ---------------------------------------------------------------------------
+
+const SILENT_BLOCK = new Float32Array(128);
+
+/** Block-rate (control) modules: rendered then skipped by the audio dispatch. */
+const CONTROL_RATE_TYPES = new Set([
+  'lfo', 'adsr', 'random',
+  'voice', 'knob', 'slider', 'xy', 'button', 'quantizer', 'sah', 'slew', 'cmath',
+]);
+
+/** Read a control value for one lane; scalars apply to every lane. */
+function cval(v, lane) {
+  if (v === undefined) return undefined;
+  if (typeof v === 'number') return v;
+  return v[lane < v.length ? lane : v.length - 1];
+}
+
+/** Lane count of a control value: 0 = mono scalar. */
+function cwidth(v) {
+  return v !== undefined && typeof v !== 'number' ? v.length : 0;
+}
+
+function makePolyIn() {
+  return { lanes: 0, L: [], R: [] };
+}
+
+function ensureLanes(mod, n) {
+  while (mod.polyL.length < n) {
+    mod.polyL.push(new Float32Array(128));
+    mod.polyR.push(new Float32Array(128));
+  }
+}
+
+/**
+ * Control envelope with two gate sources:
+ * - note input: any held note keeps the gate open (monophonic, original path);
+ * - 'gate' control input: when polyphonic (from a Voice module) one envelope
+ *   runs per lane, so every voice gets its own contour.
+ */
 class AdsrModule {
   constructor(id, params) {
     this.id = id;
     this.type = 'adsr';
     this.params = params;
+    this.controlIn = {};
     this.held = new Set();
     this.stage = 'off'; // attack | decay | sustain | release | off
     this.env = 0;
     this.value = 0;
+    this.controlOut = { out: 0 };
+    this.lanes = []; // per-lane { stage, env } for gate mode
+    this.gateOut = null;
   }
 
   noteOn(voiceId) {
@@ -616,21 +667,507 @@ class AdsrModule {
     if (this.held.size === 0 && this.stage !== 'off') this.stage = 'release';
   }
 
+  /** Advance one envelope state (`{stage, env}`) by `step` seconds. */
+  advance(st, step) {
+    const p = this.params;
+    if (st.stage === 'attack') {
+      st.env += step / Math.max(0.001, p.attack ?? 0.05);
+      if (st.env >= 1) { st.env = 1; st.stage = 'decay'; }
+    } else if (st.stage === 'decay') {
+      const sustain = p.sustain ?? 0.6;
+      st.env -= step / Math.max(0.001, p.decay ?? 0.2);
+      if (st.env <= sustain) { st.env = sustain; st.stage = 'sustain'; }
+    } else if (st.stage === 'release') {
+      st.env -= step / Math.max(0.001, p.release ?? 0.3);
+      if (st.env <= 0) { st.env = 0; st.stage = 'off'; }
+    }
+    return st.env;
+  }
+
+  gateLane(st, open) {
+    if (open && (st.stage === 'off' || st.stage === 'release')) st.stage = 'attack';
+    else if (!open && st.stage !== 'off' && st.stage !== 'release') st.stage = 'release';
+  }
+
+  render(blockSize) {
+    const step = blockSize / sampleRate;
+    const gate = this.controlIn.gate;
+
+    if (gate !== undefined) {
+      const width = cwidth(gate);
+      const n = Math.max(1, width);
+      while (this.lanes.length < n) this.lanes.push({ stage: 'off', env: 0 });
+      if (width > 0) {
+        if (!this.gateOut || this.gateOut.length !== width) this.gateOut = new Float32Array(width);
+        for (let v = 0; v < width; v++) {
+          const st = this.lanes[v];
+          this.gateLane(st, gate[v] > 0.5);
+          this.gateOut[v] = this.advance(st, step);
+        }
+        this.controlOut.out = this.gateOut;
+        this.value = this.gateOut[0];
+      } else {
+        const st = this.lanes[0];
+        this.gateLane(st, gate > 0.5);
+        this.value = this.advance(st, step);
+        this.controlOut.out = this.value;
+      }
+      return;
+    }
+
+    this.value = this.advance(this, step); // note-gated path: `this` carries stage/env
+    this.controlOut.out = this.value;
+  }
+}
+
+/**
+ * Voice allocator — root of a component synth chain: polyphonic note stream
+ * in, per-voice pitch/gate/velocity control lanes out. Pitch is MIDI/127.
+ */
+class VoiceModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'voice';
+    this.params = params;
+    this.controlIn = {};
+    this.slots = [];
+    for (let i = 0; i < MAX_VOICES; i++) {
+      this.slots.push({ active: false, voiceId: -1, pitch: 60, curPitch: 60, vel: 0, age: 0, retrig: false });
+    }
+    this.controlOut = { pitch: new Float32Array(0), gate: new Float32Array(0), vel: new Float32Array(0) };
+    this.lastPitch = undefined;
+  }
+
+  count() {
+    return Math.min(MAX_VOICES, Math.max(1, Math.round(this.params.voices ?? 4)));
+  }
+
+  noteOn(voiceId, pitch, velocity) {
+    const usable = this.slots.slice(0, this.count());
+    let slot = usable.find((s) => !s.active);
+    if (!slot) slot = usable.reduce((a, b) => (a.age > b.age ? a : b)); // steal oldest
+    // A stolen voice dips its gate for one block so envelopes retrigger;
+    // its pitch glides from where it was. Fresh voices glide from the last note.
+    slot.retrig = slot.active;
+    slot.active = true;
+    slot.voiceId = voiceId;
+    slot.vel = velocity;
+    slot.age = 0;
+    const glide = this.params.glide ?? 0;
+    if (!(glide > 0.001)) slot.curPitch = pitch;
+    else if (!slot.retrig && this.lastPitch !== undefined) slot.curPitch = this.lastPitch;
+    slot.pitch = pitch;
+    this.lastPitch = pitch;
+  }
+
+  noteOff(voiceId) {
+    for (const s of this.slots) {
+      if (s.active && s.voiceId === voiceId) s.active = false;
+    }
+  }
+
+  render(blockSize) {
+    const n = this.count();
+    let out = this.controlOut;
+    if (out.pitch.length !== n) {
+      out = this.controlOut = {
+        pitch: new Float32Array(n),
+        gate: new Float32Array(n),
+        vel: new Float32Array(n),
+      };
+    }
+    const glide = this.params.glide ?? 0;
+    const k = glide > 0.001 ? 1 - Math.exp((-(blockSize / sampleRate) * 4) / glide) : 1;
+    for (let i = 0; i < n; i++) {
+      const s = this.slots[i];
+      s.curPitch += (s.pitch - s.curPitch) * k;
+      out.pitch[i] = Math.min(1, Math.max(0, s.curPitch / 127));
+      out.gate[i] = s.active && !s.retrig ? 1 : 0;
+      out.vel[i] = s.vel;
+      if (s.active) {
+        s.age++;
+        s.retrig = false;
+      }
+    }
+  }
+}
+
+/** Oscillator component: pitch control in (MIDI/127, poly-aware), audio out. */
+class OscModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'osc';
+    this.params = params;
+    this.controlIn = {};
+    this.polyIn = { fm: makePolyIn() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.polyL = [];
+    this.polyR = [];
+    this.polyLanes = 0;
+    this.phases = new Float64Array(MAX_VOICES);
+  }
+
   render(blockSize) {
     const p = this.params;
-    const step = blockSize / sampleRate;
-    if (this.stage === 'attack') {
-      this.env += step / Math.max(0.001, p.attack ?? 0.05);
-      if (this.env >= 1) { this.env = 1; this.stage = 'decay'; }
-    } else if (this.stage === 'decay') {
-      const sustain = p.sustain ?? 0.6;
-      this.env -= step / Math.max(0.001, p.decay ?? 0.2);
-      if (this.env <= sustain) { this.env = sustain; this.stage = 'sustain'; }
-    } else if (this.stage === 'release') {
-      this.env -= step / Math.max(0.001, p.release ?? 0.3);
-      if (this.env <= 0) { this.env = 0; this.stage = 'off'; }
+    const wave = Math.round(p.wave ?? WAVE_SAW);
+    const offs = Math.round(p.octave ?? 0) * 12 + Math.round(p.semi ?? 0) + (p.fine ?? 0) / 100;
+    const pwm = p.pwm ?? 0.5;
+    const fmAmt = p.fmAmt ?? 0;
+    const level = p.level ?? 0.8;
+
+    const pitchIn = this.controlIn.pitch;
+    const lanes = Math.min(MAX_VOICES, cwidth(pitchIn));
+    this.polyLanes = lanes;
+    const n = Math.max(1, lanes);
+    ensureLanes(this, n);
+    this.outL.fill(0);
+
+    const fm = this.polyIn.fm;
+    for (let v = 0; v < n; v++) {
+      const base = lanes > 0 ? pitchIn[v] * 127 : pitchIn !== undefined ? pitchIn * 127 : 60;
+      const freq = 440 * Math.pow(2, (base + offs - 69) / 12);
+      const phaseStep = freq / sampleRate;
+      const fmBuf = fm.lanes > 0 ? fm.L[Math.min(v, fm.lanes - 1)] : SILENT_BLOCK;
+      const L = this.polyL[v];
+      let ph = this.phases[v];
+      for (let i = 0; i < blockSize; i++) {
+        let pp = ph;
+        if (fmAmt > 0) {
+          pp += fmAmt * fmBuf[i];
+          pp -= Math.floor(pp);
+        }
+        let s;
+        switch (wave) {
+          case WAVE_SINE: s = Math.sin(2 * Math.PI * pp); break;
+          case WAVE_TRIANGLE: s = 4 * Math.abs(pp - 0.5) - 1; break;
+          case WAVE_SQUARE: s = pp < pwm ? 1 : -1; break;
+          case WAVE_NOISE: s = Math.random() * 2 - 1; break;
+          case WAVE_SAW:
+          default: s = 2 * pp - 1; break;
+        }
+        s *= level;
+        L[i] = s;
+        this.outL[i] += s;
+        ph += phaseStep;
+        if (ph >= 1) ph -= 1;
+      }
+      this.polyR[v].set(L);
+      this.phases[v] = ph;
     }
-    this.value = this.env;
+    this.outR.set(this.outL);
+  }
+}
+
+/** Multimode filter component: Chamberlin SVF per voice lane (mirrors the Synth's). */
+class VcfModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'vcf';
+    this.params = params;
+    this.controlIn = {};
+    this.polyIn = { in: makePolyIn() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.polyL = [];
+    this.polyR = [];
+    this.polyLanes = 0;
+    this.state = [];
+    for (let i = 0; i < MAX_VOICES; i++) this.state.push({ lpL: 0, bpL: 0, lpR: 0, bpR: 0 });
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const mode = Math.round(p.mode ?? 0); // lowpass | highpass | bandpass | notch
+    const cutoff = p.cutoff ?? 1200;
+    const amt = p.amt ?? 0;
+    const damp = 2 * (1 - Math.min(0.95, p.res ?? 0.2));
+    const modIn = this.controlIn.mod;
+
+    const pin = this.polyIn.in;
+    this.polyLanes = pin.lanes;
+    const n = Math.max(1, pin.lanes);
+    ensureLanes(this, n);
+    this.outL.fill(0);
+    this.outR.fill(0);
+
+    // Double-sampled SVF raises the stable cutoff ceiling; the clamp keeps
+    // f² + 2·damp·f < 4 (discrete SVF stability bound) with margin.
+    const fMax = -damp + Math.sqrt(damp * damp + 3.6);
+
+    for (let v = 0; v < n; v++) {
+      const srcL = pin.lanes > 0 ? pin.L[v] : SILENT_BLOCK;
+      const srcR = pin.lanes > 0 ? pin.R[v] : SILENT_BLOCK;
+      const m = cval(modIn, v);
+      const cutEff = Math.min(18000, Math.max(20, cutoff * (m !== undefined ? Math.pow(2, m * amt) : 1)));
+      const f = Math.min(fMax, 2 * Math.sin((Math.PI * cutEff) / (2 * sampleRate)));
+      const st = this.state[v];
+      const L = this.polyL[v];
+      const R = this.polyR[v];
+      for (let i = 0; i < blockSize; i++) {
+        let hpL = 0;
+        let hpR = 0;
+        for (let k = 0; k < 2; k++) {
+          st.lpL += f * st.bpL;
+          hpL = srcL[i] - st.lpL - damp * st.bpL;
+          st.bpL += f * hpL;
+          st.lpR += f * st.bpR;
+          hpR = srcR[i] - st.lpR - damp * st.bpR;
+          st.bpR += f * hpR;
+        }
+        L[i] = mode === 0 ? st.lpL : mode === 1 ? hpL : mode === 2 ? st.bpL : hpL + st.lpL;
+        R[i] = mode === 0 ? st.lpR : mode === 1 ? hpR : mode === 2 ? st.bpR : hpR + st.lpR;
+        this.outL[i] += L[i];
+        this.outR[i] += R[i];
+      }
+    }
+  }
+}
+
+/** VCA component: audio × CV × level, per voice lane. */
+class VcaModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'vca';
+    this.params = params;
+    this.controlIn = {};
+    this.polyIn = { in: makePolyIn() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.polyL = [];
+    this.polyR = [];
+    this.polyLanes = 0;
+  }
+
+  render(blockSize) {
+    const level = this.params.level ?? 1;
+    const cvIn = this.controlIn.cv;
+    const pin = this.polyIn.in;
+    this.polyLanes = pin.lanes;
+    const n = Math.max(1, pin.lanes);
+    ensureLanes(this, n);
+    this.outL.fill(0);
+    this.outR.fill(0);
+
+    for (let v = 0; v < n; v++) {
+      const srcL = pin.lanes > 0 ? pin.L[v] : SILENT_BLOCK;
+      const srcR = pin.lanes > 0 ? pin.R[v] : SILENT_BLOCK;
+      const cv = cval(cvIn, v);
+      const g = level * (cv !== undefined ? Math.min(1, Math.max(0, cv)) : 1);
+      const L = this.polyL[v];
+      const R = this.polyR[v];
+      for (let i = 0; i < blockSize; i++) {
+        L[i] = srcL[i] * g;
+        R[i] = srcR[i] * g;
+        this.outL[i] += L[i];
+        this.outR[i] += R[i];
+      }
+    }
+  }
+}
+
+/** Knob / Slider / Button (PRD §8.6): the UI writes the 'value' param; emit it. */
+class ControlSourceModule {
+  constructor(id, params, type) {
+    this.id = id;
+    this.type = type;
+    this.params = params;
+    this.value = 0;
+  }
+
+  render() {
+    this.value = Math.min(1, Math.max(0, this.params.value ?? 0));
+  }
+}
+
+/** XY pad (PRD §8.6): two control outputs from one puck. */
+class XyModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'xy';
+    this.params = params;
+    this.controlOut = { x: 0.5, y: 0.5 };
+    this.value = 0.5;
+  }
+
+  render() {
+    this.controlOut.x = Math.min(1, Math.max(0, this.params.x ?? 0.5));
+    this.controlOut.y = Math.min(1, Math.max(0, this.params.y ?? 0.5));
+    this.value = this.controlOut.x;
+  }
+}
+
+/** Scale tables — keep in sync with src/core/scales.ts (same pattern as eqmath). */
+const QUANT_SCALES = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+  [0, 2, 4, 5, 7, 9, 11],
+  [0, 2, 3, 5, 7, 8, 10],
+  [0, 2, 4, 7, 9],
+  [0, 3, 5, 7, 10],
+  [0, 3, 5, 6, 7, 10],
+  [0, 2, 3, 5, 7, 9, 10],
+  [0, 2, 4, 5, 7, 9, 10],
+];
+
+function quantizePitch(midi, scaleIdx, root) {
+  const table = QUANT_SCALES[scaleIdx] || QUANT_SCALES[0];
+  const rounded = Math.round(midi);
+  let best = rounded;
+  let bestDist = Infinity;
+  for (let off = -11; off <= 11; off++) {
+    const cand = rounded + off;
+    if (cand < 0 || cand > 127) continue;
+    const pc = (((cand - root) % 12) + 12) % 12;
+    if (!table.includes(pc)) continue;
+    const dist = Math.abs(midi - cand);
+    if (dist < bestDist - 1e-9 || (Math.abs(dist - bestDist) < 1e-9 && cand < best)) {
+      best = cand;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+/** Snaps a pitch control (MIDI/127) to the nearest scale note, per lane. */
+class QuantizerModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'quantizer';
+    this.params = params;
+    this.controlIn = {};
+    this.controlOut = { out: 60 / 127 };
+    this.value = 60 / 127;
+    this.buf = null;
+  }
+
+  render() {
+    const scale = Math.round(this.params.scale ?? 1);
+    const root = Math.round(this.params.root ?? 0);
+    const inV = this.controlIn.in;
+    const width = cwidth(inV);
+    if (width > 0) {
+      if (!this.buf || this.buf.length !== width) this.buf = new Float32Array(width);
+      for (let v = 0; v < width; v++) this.buf[v] = quantizePitch(inV[v] * 127, scale, root) / 127;
+      this.controlOut.out = this.buf;
+      this.value = this.buf[0];
+    } else {
+      const x = inV !== undefined ? inV : 60 / 127;
+      this.value = quantizePitch(x * 127, scale, root) / 127;
+      this.controlOut.out = this.value;
+    }
+  }
+}
+
+/** Sample & Hold: captures the input on each rising trig edge (>0.5), per lane. */
+class SahModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'sah';
+    this.params = params;
+    this.controlIn = {};
+    this.held = new Float32Array(MAX_VOICES);
+    this.prev = new Float32Array(MAX_VOICES);
+    this.controlOut = { out: 0 };
+    this.value = 0;
+    this.buf = null;
+  }
+
+  render() {
+    const inV = this.controlIn.in;
+    const trig = this.controlIn.trig;
+    const width = Math.max(cwidth(inV), cwidth(trig));
+    const n = Math.max(1, width);
+    for (let v = 0; v < n; v++) {
+      const t = cval(trig, v) ?? 0;
+      if (t > 0.5 && this.prev[v] <= 0.5) {
+        const x = cval(inV, v);
+        if (x !== undefined) this.held[v] = Math.min(1, Math.max(0, x));
+      }
+      this.prev[v] = t;
+    }
+    if (width > 0) {
+      if (!this.buf || this.buf.length !== width) this.buf = new Float32Array(width);
+      this.buf.set(this.held.subarray(0, width));
+      this.controlOut.out = this.buf;
+    } else {
+      this.controlOut.out = this.held[0];
+    }
+    this.value = this.held[0];
+  }
+}
+
+/** Slew limiter: full 0–1 range takes Rise/Fall seconds, per lane. */
+class SlewModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'slew';
+    this.params = params;
+    this.controlIn = {};
+    this.cur = new Float32Array(MAX_VOICES);
+    this.controlOut = { out: 0 };
+    this.value = 0;
+    this.buf = null;
+  }
+
+  render(blockSize) {
+    const dt = blockSize / sampleRate;
+    const rise = this.params.rise ?? 0.1;
+    const fall = this.params.fall ?? 0.1;
+    const up = rise > 0.001 ? dt / rise : 2; // >1 = effectively instant
+    const down = fall > 0.001 ? dt / fall : 2;
+    const inV = this.controlIn.in;
+    const width = cwidth(inV);
+    const n = Math.max(1, width);
+    for (let v = 0; v < n; v++) {
+      const target = cval(inV, v);
+      if (target === undefined) continue;
+      const d = target - this.cur[v];
+      this.cur[v] += Math.max(-down, Math.min(up, d));
+    }
+    if (width > 0) {
+      if (!this.buf || this.buf.length !== width) this.buf = new Float32Array(width);
+      this.buf.set(this.cur.subarray(0, width));
+      this.controlOut.out = this.buf;
+    } else {
+      this.controlOut.out = this.cur[0];
+    }
+    this.value = this.cur[0];
+  }
+}
+
+/** Control math: attenuvert A and B, combine, offset, clamp — per lane. */
+class CmathModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'cmath';
+    this.params = params;
+    this.controlIn = {};
+    this.controlOut = { out: 0 };
+    this.value = 0;
+    this.buf = null;
+  }
+
+  render() {
+    const p = this.params;
+    const mode = Math.round(p.mode ?? 0); // a+b | a×b | min | max
+    const gA = p.gainA ?? 1;
+    const gB = p.gainB ?? 1;
+    const off = p.offset ?? 0;
+    const a = this.controlIn.a;
+    const b = this.controlIn.b;
+    const width = Math.max(cwidth(a), cwidth(b));
+    const n = Math.max(1, width);
+    if (width > 0 && (!this.buf || this.buf.length !== width)) this.buf = new Float32Array(width);
+    for (let v = 0; v < n; v++) {
+      const av = (cval(a, v) ?? 0) * gA;
+      const bv = (cval(b, v) ?? 0) * gB;
+      const y = mode === 0 ? av + bv : mode === 1 ? av * bv : mode === 2 ? Math.min(av, bv) : Math.max(av, bv);
+      const clamped = Math.min(1, Math.max(0, y + off));
+      if (width > 0) this.buf[v] = clamped;
+      else this.value = clamped;
+    }
+    this.controlOut.out = width > 0 ? this.buf : this.value;
+    if (width > 0) this.value = this.buf[0];
   }
 }
 
@@ -1923,6 +2460,26 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new RandomModule(m.id, m.params));
           } else if (m.type === 'recorder') {
             next.set(m.id, new RecorderModule(m.id, m.params));
+          } else if (m.type === 'voice') {
+            next.set(m.id, new VoiceModule(m.id, m.params));
+          } else if (m.type === 'osc') {
+            next.set(m.id, new OscModule(m.id, m.params));
+          } else if (m.type === 'vcf') {
+            next.set(m.id, new VcfModule(m.id, m.params));
+          } else if (m.type === 'vca') {
+            next.set(m.id, new VcaModule(m.id, m.params));
+          } else if (m.type === 'knob' || m.type === 'slider' || m.type === 'button') {
+            next.set(m.id, new ControlSourceModule(m.id, m.params, m.type));
+          } else if (m.type === 'xy') {
+            next.set(m.id, new XyModule(m.id, m.params));
+          } else if (m.type === 'quantizer') {
+            next.set(m.id, new QuantizerModule(m.id, m.params));
+          } else if (m.type === 'sah') {
+            next.set(m.id, new SahModule(m.id, m.params));
+          } else if (m.type === 'slew') {
+            next.set(m.id, new SlewModule(m.id, m.params));
+          } else if (m.type === 'cmath') {
+            next.set(m.id, new CmathModule(m.id, m.params));
           }
         }
         this.modules = next;
@@ -1930,6 +2487,11 @@ class EngineProcessor extends AudioWorkletProcessor {
         this.audioWires = msg.wires.filter((w) => w.type === 'audio' && valid(w));
         this.noteWires = msg.wires.filter((w) => w.type === 'note' && valid(w));
         this.controlWires = msg.wires.filter((w) => w.type === 'control' && valid(w));
+        // Drop stale control values so unwiring stops the modulation
+        // (inputs fall back to their manual values, PRD §9.5).
+        for (const mod of this.modules.values()) {
+          if (mod.controlIn) mod.controlIn = {};
+        }
         // Sidechain-style inputs fall back to the main input when unwired.
         for (const mod of this.modules.values()) {
           if (mod.type === 'compressor') {
@@ -2026,20 +2588,22 @@ class EngineProcessor extends AudioWorkletProcessor {
   }
 
   /**
-   * Kahn's algorithm over audio wires. Cycles can't be built yet in Phase 0;
-   * if one appears, remaining modules append in arbitrary order and read the
-   * previous block's buffers — the one-block feedback delay of PRD §9.3.
+   * Kahn's algorithm over audio + control wires, so control chains
+   * (LFO → Slew → Quantizer → Osc) settle within one block. On a cycle the
+   * remaining modules append in arbitrary order and read the previous
+   * block's values — the one-block feedback delay of PRD §9.3.
    */
   topoSort() {
+    const edges = [...this.audioWires, ...this.controlWires];
     const inDegree = new Map();
     for (const id of this.modules.keys()) inDegree.set(id, 0);
-    for (const w of this.audioWires) inDegree.set(w.toModuleId, inDegree.get(w.toModuleId) + 1);
+    for (const w of edges) inDegree.set(w.toModuleId, inDegree.get(w.toModuleId) + 1);
     const queue = [...inDegree.entries()].filter(([, d]) => d === 0).map(([id]) => id);
     const order = [];
     while (queue.length) {
       const id = queue.shift();
       order.push(id);
-      for (const w of this.audioWires) {
+      for (const w of edges) {
         if (w.fromModuleId !== id) continue;
         const d = inDegree.get(w.toModuleId) - 1;
         inDegree.set(w.toModuleId, d);
@@ -2234,13 +2798,22 @@ class EngineProcessor extends AudioWorkletProcessor {
     }
   }
 
-  /** Push LFO values along control wires into target modules' control inputs. */
-  applyControlWires() {
+  /**
+   * Pull control wire values into one module. Runs per module in topo order,
+   * so chained control modules see this block's upstream values. Sources with
+   * multiple/polyphonic outputs expose controlOut[portId]; plain sources
+   * expose .value.
+   */
+  pullControls(mod) {
+    if (!mod.controlIn) return;
     for (const w of this.controlWires) {
+      if (w.toModuleId !== mod.id) continue;
       const src = this.modules.get(w.fromModuleId);
-      const dst = this.modules.get(w.toModuleId);
-      if (!src || !dst || src.value === undefined || !dst.controlIn) continue;
-      dst.controlIn[w.toPortId] = src.value;
+      if (!src) continue;
+      const v = src.controlOut && src.controlOut[w.fromPortId] !== undefined
+        ? src.controlOut[w.fromPortId]
+        : src.value;
+      if (v !== undefined) mod.controlIn[w.toPortId] = v;
     }
   }
 
@@ -2251,24 +2824,59 @@ class EngineProcessor extends AudioWorkletProcessor {
     if (out[1]) out[1].fill(0);
 
     this.runSequencers(blockSize);
-    // Control wires once per block: synth mod inputs, MIDI Out CC, etc.
-    this.applyControlWires();
 
     for (const id of this.order) {
       const mod = this.modules.get(id);
       if (!mod) continue;
 
-      // Sum incoming audio wires into the module's per-port input buffers.
-      if (mod.inputs) {
-        for (const key in mod.inputs) {
-          mod.inputs[key].L.fill(0);
-          mod.inputs[key].R.fill(0);
+      this.pullControls(mod);
+
+      // Sum incoming audio wires into the module's input buffers: plain
+      // stereo ports get the lane-collapsed mix (src.outL/outR), poly-aware
+      // ports (polyIn) keep per-voice lanes.
+      if (mod.inputs || mod.polyIn) {
+        if (mod.inputs) {
+          for (const key in mod.inputs) {
+            mod.inputs[key].L.fill(0);
+            mod.inputs[key].R.fill(0);
+          }
+        }
+        if (mod.polyIn) {
+          for (const key in mod.polyIn) {
+            const pi = mod.polyIn[key];
+            for (let v = 0; v < pi.L.length; v++) {
+              pi.L[v].fill(0);
+              pi.R[v].fill(0);
+            }
+            pi.lanes = 0;
+          }
         }
         for (const w of this.audioWires) {
           if (w.toModuleId !== id) continue;
           const src = this.modules.get(w.fromModuleId);
-          const dst = mod.inputs[w.toPortId];
-          if (!src || !src.outL || !dst) continue;
+          if (!src || !src.outL) continue;
+          const pi = mod.polyIn && mod.polyIn[w.toPortId];
+          if (pi) {
+            const lanes = src.polyLanes > 0 ? src.polyLanes : 1;
+            while (pi.L.length < lanes) {
+              pi.L.push(new Float32Array(128));
+              pi.R.push(new Float32Array(128));
+            }
+            for (let v = 0; v < lanes; v++) {
+              const sL = src.polyLanes > 0 ? src.polyL[v] : src.outL;
+              const sR = src.polyLanes > 0 ? src.polyR[v] : src.outR;
+              const dL = pi.L[v];
+              const dR = pi.R[v];
+              for (let i = 0; i < blockSize; i++) {
+                dL[i] += sL[i];
+                dR[i] += sR[i];
+              }
+            }
+            pi.lanes = Math.max(pi.lanes, lanes);
+            continue;
+          }
+          const dst = mod.inputs && mod.inputs[w.toPortId];
+          if (!dst) continue;
           for (let i = 0; i < blockSize; i++) {
             dst.L[i] += src.outL[i];
             dst.R[i] += src.outR[i];
@@ -2276,7 +2884,7 @@ class EngineProcessor extends AudioWorkletProcessor {
         }
       }
 
-      if (mod.type === 'lfo' || mod.type === 'adsr' || mod.type === 'random') {
+      if (CONTROL_RATE_TYPES.has(mod.type)) {
         mod.render(blockSize);
         continue;
       }

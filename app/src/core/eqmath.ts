@@ -66,6 +66,34 @@ export function bandCoefs(
   return norm((1 - cos) / 2, 1 - cos, (1 - cos) / 2, 1 + alpha, -2 * cos, 1 - alpha);
 }
 
+/**
+ * RBJ coefficients matching the Filter (vcf) component's modes, for its
+ * response-curve display. The worklet runs a Chamberlin SVF, not a biquad —
+ * close enough visually; res maps to Q via the SVF damping (q = 1/(2(1-res))).
+ */
+export function vcfCoefs(
+  mode: number, // 0 lowpass, 1 highpass, 2 bandpass, 3 notch
+  freq: number,
+  res: number,
+  sampleRate: number,
+): BiquadCoefs {
+  const w0 = (2 * Math.PI * Math.min(freq, sampleRate * 0.49)) / sampleRate;
+  const cos = Math.cos(w0);
+  const sin = Math.sin(w0);
+  const q = 1 / (2 * (1 - Math.min(0.95, Math.max(0, res))));
+  const alpha = sin / (2 * q);
+  if (mode === 0) {
+    return norm((1 - cos) / 2, 1 - cos, (1 - cos) / 2, 1 + alpha, -2 * cos, 1 - alpha);
+  }
+  if (mode === 1) {
+    return norm((1 + cos) / 2, -(1 + cos), (1 + cos) / 2, 1 + alpha, -2 * cos, 1 - alpha);
+  }
+  if (mode === 2) {
+    return norm(alpha, 0, -alpha, 1 + alpha, -2 * cos, 1 - alpha);
+  }
+  return norm(1, -2 * cos, 1, 1 + alpha, -2 * cos, 1 - alpha);
+}
+
 /** Magnitude (dB) of one biquad at frequency f. */
 export function biquadResponseDb(c: BiquadCoefs, f: number, sampleRate: number): number {
   const w = (2 * Math.PI * f) / sampleRate;

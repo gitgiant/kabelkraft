@@ -12,6 +12,13 @@ import { DRUM_BASE_NOTE, renderDefaultKit } from './core/drumkit';
 import { decodeSample, encodeSample, parseSampleKey, sampleKey, type SampleData } from './core/samples';
 import { deserializeProject, serializeProject } from './core/serialize';
 import { parseKkGroup } from './core/aiimport';
+import {
+  defaultFace,
+  exportKkmod,
+  importKkmod,
+  pruneFaceBindings,
+  type FaceSpec,
+} from './core/face';
 import { MidiManager } from './core/midi';
 import { DEFAULT_TRANSPORT, type TransportState } from './core/types';
 import { Engine } from './engine/engine';
@@ -27,7 +34,9 @@ export type StateEvent =
   | 'sampleLoaded'
   | 'editorChanged' // sample editor opened/closed
   | 'midiChanged' // MIDI-learn armed/disarmed or mapping changed
-  | 'visualizerChanged'; // big visualizer overlay opened/closed
+  | 'visualizerChanged' // big visualizer overlay opened/closed
+  | 'faceEditorChanged' // face editor opened/closed
+  | 'faceLearnChanged'; // face learn armed/canceled/completed
 
 type Listener = () => void;
 
@@ -491,6 +500,180 @@ export class AppState {
     this.emit('graphChanged');
   }
 
+  // -- Module faces (design framework over groups) ---------------------------
+
+  /**
+   * Face image pixels (assetId → data URL) — outside the graph so undo
+   * snapshots stay small (samples pattern); embedded in explicit saves.
+   */
+  readonly faceAssets = new Map<string, string>();
+  private nextAssetId = 1;
+
+  /** Group whose face is open in the editor; null = closed. */
+  editingFaceGroupId: string | null = null;
+
+  /** Armed face-learn: the next param row clicked inside the group binds. */
+  faceLearn: { groupId: string } | null = null;
+  /** Captured learn target, consumed by the editor. */
+  faceLearnResult: { moduleId: string; paramId: string } | null = null;
+
+  addFaceAsset(dataUrl: string): string {
+    const id = `fa${this.nextAssetId++}`;
+    this.faceAssets.set(id, dataUrl);
+    return id;
+  }
+
+  /** Blank designable module (user flow: New Face → design → fill with modules). */
+  newFaceModule(x: number, y: number): string {
+    this.beginUndoable();
+    const group = this.graph.createGroup(`Face ${this.graph.groups.size + 1}`, [], [], x, y);
+    group.face = defaultFace();
+    this.clearSelection();
+    this.selectedGroupIds.add(group.id);
+    this.emit('graphChanged');
+    this.emit('selectionChanged');
+    return group.id;
+  }
+
+  setGroupFace(groupId: string, face: FaceSpec): void {
+    const group = this.graph.groups.get(groupId);
+    if (!group) return;
+    this.beginUndoable();
+    pruneFaceBindings(this.graph, groupId, face);
+    group.face = face;
+    this.emit('graphChanged');
+  }
+
+  openFaceEditor(groupId: string): void {
+    if (!this.graph.groups.has(groupId)) return;
+    this.editingFaceGroupId = groupId;
+    this.emit('faceEditorChanged');
+  }
+
+  closeFaceEditor(): void {
+    this.editingFaceGroupId = null;
+    this.faceLearn = null;
+    this.emit('faceEditorChanged');
+  }
+
+  /** Editor learn mode: expands the group so its param rows are clickable. */
+  armFaceLearn(groupId: string): void {
+    const group = this.graph.groups.get(groupId);
+    if (!group) return;
+    if (group.collapsed) {
+      group.collapsed = false;
+      this.emit('graphChanged');
+    }
+    this.faceLearn = { groupId };
+    this.faceLearnResult = null;
+    this.emit('faceLearnChanged');
+  }
+
+  cancelFaceLearn(): void {
+    this.faceLearn = null;
+    this.emit('faceLearnChanged');
+  }
+
+  /** Called by param rows on click while learn is armed. True = consumed. */
+  completeFaceLearn(moduleId: string, paramId: string): boolean {
+    if (!this.faceLearn) return false;
+    if (!this.graph.modulesInGroup(this.faceLearn.groupId).has(moduleId)) return false;
+    this.faceLearn = null;
+    this.faceLearnResult = { moduleId, paramId };
+    this.emit('faceLearnChanged');
+    return true;
+  }
+
+  /** Export a faced group as a reusable .kkmod custom module. */
+  exportFaceGroup(groupId: string): string {
+    return exportKkmod(this.graph, groupId, this.faceAssets);
+  }
+
+  /** Insert a .kkmod as a collapsed faced group. One undo step. */
+  importFaceGroup(text: string, origin: { x: number; y: number } = { x: 0, y: 0 }): {
+    ok: boolean;
+    errors: string[];
+    warnings: string[];
+    groupId?: string;
+  } {
+    let imported;
+    try {
+      imported = importKkmod(text, MODULE_DEFS);
+    } catch (err) {
+      return { ok: false, errors: [String(err instanceof Error ? err.message : err)], warnings: [] };
+    }
+    this.beginUndoable();
+
+    // Re-key assets into this project's store.
+    const assetMap = new Map<string, string>();
+    for (const [oldId, dataUrl] of Object.entries(imported.assets)) {
+      assetMap.set(oldId, this.addFaceAsset(dataUrl));
+    }
+
+    const xs = imported.modules.map((m) => m.x);
+    const ys = imported.modules.map((m) => m.y);
+    const minX = xs.length ? Math.min(...xs) : 0;
+    const minY = ys.length ? Math.min(...ys) : 0;
+    const drumIds: string[] = [];
+    for (const inst of imported.modules) {
+      inst.x = origin.x + (inst.x - minX) - 200;
+      inst.y = origin.y + (inst.y - minY) - 150;
+      this.graph.addModule(inst);
+      if (inst.type === 'drum') drumIds.push(inst.id);
+    }
+    const warnings = [...imported.warnings];
+    for (const w of imported.wires) {
+      const res = this.graph.connect(w.from, w.to);
+      if (!res.ok) warnings.push(`Wire dropped: ${res.reason}`);
+    }
+    for (const g of imported.groups) {
+      if (g.face) {
+        if (g.face.bgAssetId) g.face.bgAssetId = assetMap.get(g.face.bgAssetId);
+        for (const el of g.face.elements) {
+          if (el.assetId) el.assetId = assetMap.get(el.assetId);
+        }
+      }
+      if (g.id === imported.rootGroupId) {
+        g.x = origin.x;
+        g.y = origin.y;
+      }
+      this.graph.groups.set(g.id, g);
+    }
+
+    this.engine.syncGraph(this.graph);
+    for (const id of drumIds) this.installDefaultKit(id);
+    this.clearSelection();
+    this.selectedGroupIds.add(imported.rootGroupId);
+    this.emit('graphChanged');
+    this.emit('selectionChanged');
+    return { ok: true, errors: [], warnings, groupId: imported.rootGroupId };
+  }
+
+  /** Group a selected module belongs to, for the toolbar Shrink button. */
+  shrinkableGroupId(): string | null {
+    for (const id of this.selectedGroupIds) {
+      const g = this.graph.groups.get(id);
+      if (g && !g.collapsed) return id;
+    }
+    if (this.selectedModuleId) {
+      const g = this.graph.groupOfModule(this.selectedModuleId);
+      if (g && !g.collapsed) return g.id;
+    }
+    return null;
+  }
+
+  /** Pull an expanded group back into its (faced) tile. */
+  shrinkSelection(): void {
+    const id = this.shrinkableGroupId();
+    if (!id) return;
+    const group = this.graph.groups.get(id)!;
+    group.collapsed = true;
+    this.clearSelection();
+    this.selectedGroupIds.add(id);
+    this.emit('graphChanged');
+    this.emit('selectionChanged');
+  }
+
   setParam(moduleId: string, paramId: string, value: number): void {
     const mod = this.graph.modules.get(moduleId);
     if (!mod) return;
@@ -757,13 +940,28 @@ export class AppState {
     return serializeProject(this.projectName, this.graph, this.transport, undefined, this.midiMapObject());
   }
 
-  /** Explicit project save: embeds sample PCM for portability (PRD §15). */
+  /** Explicit project save: embeds sample PCM + face assets for portability (PRD §15). */
   serializeWithSamples(): string {
     const samples = [...this.samples.entries()]
       .map(([key, sample]) => ({ ...parseSampleKey(key), sample }))
       .filter(({ moduleId }) => this.graph.modules.has(moduleId))
       .map(({ moduleId, pad, sample }) => encodeSample(moduleId, sample, pad));
-    return serializeProject(this.projectName, this.graph, this.transport, samples, this.midiMapObject());
+    // Only assets still referenced by some face.
+    const referenced = new Set<string>();
+    for (const g of this.graph.groups.values()) {
+      if (g.face?.bgAssetId) referenced.add(g.face.bgAssetId);
+      for (const el of g.face?.elements ?? []) {
+        if (el.assetId) referenced.add(el.assetId);
+      }
+    }
+    const faceAssets: Record<string, string> = {};
+    for (const id of referenced) {
+      const url = this.faceAssets.get(id);
+      if (url) faceAssets[id] = url;
+    }
+    return serializeProject(
+      this.projectName, this.graph, this.transport, samples, this.midiMapObject(), faceAssets,
+    );
   }
 
   loadProject(json: string): string[] {
@@ -777,6 +975,12 @@ export class AppState {
     this.selectedWireId = null;
     this.heldVoices.clear();
     this.samples.clear();
+    this.faceAssets.clear();
+    for (const [id, url] of Object.entries(result.faceAssets)) {
+      this.faceAssets.set(id, url);
+      const n = Number(id.replace(/^fa/, ''));
+      if (Number.isFinite(n) && n >= this.nextAssetId) this.nextAssetId = n + 1;
+    }
     this.restoreMidiMap(result.midiMap);
     if ([...this.graph.modules.values()].some((m) => m.type === 'midiIn' || m.type === 'midiOut')) {
       void this.midi.init();

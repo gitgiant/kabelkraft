@@ -41,7 +41,7 @@ export interface ModuleDef {
   /** Stable type id used in patch JSON, e.g. "synth". */
   type: string;
   name: string;
-  category: 'generator' | 'data' | 'effect' | 'visual' | 'controller' | 'io' | 'misc';
+  category: 'generator' | 'component' | 'data' | 'effect' | 'visual' | 'controller' | 'io' | 'misc';
   description: string;
   ports: PortSpec[];
   params: ParamSpec[];

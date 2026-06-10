@@ -21,6 +21,8 @@ export interface ProjectFile {
   samples?: SerializedSample[];
   /** MIDI-learn mappings: "channel:cc" → target param. */
   midiMap?: Record<string, { moduleId: string; paramId: string }>;
+  /** Face image assets (assetId → data URL) — explicit saves only, like samples. */
+  faceAssets?: Record<string, string>;
 }
 
 export function serializeProject(
@@ -29,6 +31,7 @@ export function serializeProject(
   transport: TransportState,
   samples?: SerializedSample[],
   midiMap?: Record<string, { moduleId: string; paramId: string }>,
+  faceAssets?: Record<string, string>,
 ): string {
   const file: ProjectFile = {
     formatVersion: FORMAT_VERSION,
@@ -39,6 +42,7 @@ export function serializeProject(
     groups: [...graph.groups.values()],
     samples,
     midiMap,
+    faceAssets,
   };
   return JSON.stringify(file, null, 2);
 }
@@ -50,6 +54,7 @@ export interface LoadResult {
   warnings: string[];
   samples: SerializedSample[];
   midiMap: Record<string, { moduleId: string; paramId: string }>;
+  faceAssets: Record<string, string>;
 }
 
 export function deserializeProject(json: string, defs: Map<string, ModuleDef>): LoadResult {
@@ -110,5 +115,6 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
     warnings,
     samples: (raw.samples ?? []).filter((s) => graph.modules.has(s.moduleId)),
     midiMap,
+    faceAssets: raw.faceAssets ?? {},
   };
 }

@@ -48,6 +48,18 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'eq',
   'mixer',
   'recorder',
+  'voice',
+  'osc',
+  'vcf',
+  'vca',
+  'knob',
+  'slider',
+  'xy',
+  'button',
+  'quantizer',
+  'sah',
+  'slew',
+  'cmath',
 ]);
 
 export type StatusListener = (status: StatusMessage) => void;

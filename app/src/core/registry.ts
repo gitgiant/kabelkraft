@@ -5,6 +5,7 @@
 
 import type { ModuleDef } from './module';
 import { defaultDrumPads, defaultDrumPattern } from './drumkit';
+import { ROOT_NAMES, SCALE_NAMES } from './scales';
 
 export {
   DRUM_BASE_NOTE,
@@ -397,10 +398,12 @@ const adsr: ModuleDef = {
   name: 'ADSR',
   category: 'data',
   description:
-    'Envelope as a control signal: gated by incoming notes, modulates anything with a control input.',
+    'Envelope as a control signal: gated by incoming notes or by a Gate control (e.g. from a ' +
+    'Voice module — then the envelope runs per-voice). Modulates anything with a control input.',
   ports: [
-    { id: 'notes', label: 'Gate', type: 'note', direction: 'in', description: 'Notes gate the envelope (note on = attack, note off = release).' },
-    { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Envelope value 0.0–1.0.' },
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Notes gate the envelope (note on = attack, note off = release).' },
+    { id: 'gate', label: 'Gate', type: 'control', direction: 'in', description: 'Control gate (>0.5 = open). A polyphonic gate from a Voice module runs one envelope per voice.' },
+    { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Envelope value 0.0–1.0 (polyphonic when gated per-voice).' },
   ],
   params: [
     { id: 'attack', label: 'Attack', min: 0.001, max: 4, default: 0.05, unit: 's', curve: 'exp', randomizable: true },
@@ -757,9 +760,280 @@ const mixer: ModuleDef = {
   height: 230,
 };
 
+// ---------------------------------------------------------------------------
+// Synth components (build-your-own-synth chain; polyphonic via Voice lanes)
+// ---------------------------------------------------------------------------
+
+/** Pitch over control wires: value 0–1 maps linearly to MIDI note 0–127. */
+export const PITCH_CONTROL_SCALE = 127;
+
+const voice: ModuleDef = {
+  type: 'voice',
+  name: 'Voice',
+  category: 'component',
+  description:
+    'Voice allocator: turns a note stream into per-voice Pitch/Gate/Velocity control lanes ' +
+    '(pitch = MIDI/127). Downstream components (Osc, Filter, Amp, ADSR via Gate) process each ' +
+    'voice separately; lanes collapse to a mix wherever a normal stereo input is reached.',
+  ports: [
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Polyphonic note stream to allocate across voices.' },
+    { id: 'pitch', label: 'Pitch', type: 'control', direction: 'out', description: 'Per-voice pitch, MIDI/127 (0.0–1.0).' },
+    { id: 'gate', label: 'Gate', type: 'control', direction: 'out', description: 'Per-voice gate: 1 while the note is held, else 0.' },
+    { id: 'vel', label: 'Vel', type: 'control', direction: 'out', description: 'Per-voice velocity of the most recent note-on (0.0–1.0).' },
+  ],
+  params: [
+    { id: 'voices', label: 'Voices', min: 1, max: 16, default: 4, randomizable: false },
+    { id: 'glide', label: 'Glide', min: 0, max: 0.5, default: 0, unit: 's', randomizable: true },
+  ],
+  width: 180,
+  height: 110,
+};
+
+export const OSC_WAVES = ['sine', 'triangle', 'square', 'sawtooth', 'noise'] as const;
+
+const osc: ModuleDef = {
+  type: 'osc',
+  name: 'Oscillator',
+  category: 'component',
+  description:
+    'Single oscillator voice component. Pitch input (MIDI/127) sets the frequency — wire a ' +
+    'Voice module for polyphony or any control source for drones; unwired it plays C4. ' +
+    'FM input phase-modulates from another audio signal.',
+  ports: [
+    { id: 'pitch', label: 'Pitch', type: 'control', direction: 'in', description: 'Pitch as MIDI/127. Polyphonic from a Voice module.' },
+    { id: 'fm', label: 'FM', type: 'audio', direction: 'in', description: 'Phase modulation input; depth set by the FM parameter.' },
+    audioOutPort('Oscillator output (per-voice lanes when the pitch input is polyphonic).'),
+  ],
+  params: [
+    { id: 'wave', label: 'Wave', min: 0, max: OSC_WAVES.length - 1, default: 3, options: [...OSC_WAVES], randomizable: true },
+    { id: 'octave', label: 'Octave', min: -3, max: 3, default: 0, randomizable: true },
+    { id: 'semi', label: 'Semi', min: -12, max: 12, default: 0, unit: 'st', randomizable: true },
+    { id: 'fine', label: 'Fine', min: -100, max: 100, default: 0, unit: 'ct', randomizable: true },
+    { id: 'pwm', label: 'PWM', min: 0.05, max: 0.95, default: 0.5, randomizable: true },
+    { id: 'fmAmt', label: 'FM Amt', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
+  ],
+  width: 190,
+  height: 200,
+};
+
+export const VCF_MODES = ['lowpass', 'highpass', 'bandpass', 'notch'] as const;
+
+const vcf: ModuleDef = {
+  type: 'vcf',
+  name: 'Filter',
+  category: 'component',
+  description:
+    'Multimode filter (state-variable): cutoff and Q knobs, live response curve (drag the dot: ' +
+    'cutoff/Q). The Mod input shifts the cutoff by up to ±6 octaves (Amt) — wire an ADSR or LFO. ' +
+    'Processes per-voice lanes from upstream components.',
+  ports: [
+    audioIn('Audio to filter (keeps per-voice lanes).'),
+    { id: 'mod', label: 'Mod', type: 'control', direction: 'in', description: 'Cutoff modulation, scaled by Amt (octaves). Polyphonic-aware.' },
+    audioOutPort('Filtered audio.'),
+  ],
+  params: [
+    { id: 'mode', label: 'Mode', min: 0, max: VCF_MODES.length - 1, default: 0, options: [...VCF_MODES], randomizable: true },
+    { id: 'cutoff', label: 'Cutoff', min: 40, max: 18000, default: 1200, unit: 'Hz', curve: 'exp', randomizable: true },
+    { id: 'res', label: 'Q', min: 0, max: 0.95, default: 0.2, randomizable: true },
+    { id: 'amt', label: 'Amt', min: -6, max: 6, default: 0, unit: 'oct', randomizable: true },
+  ],
+  width: 230,
+  height: 290,
+  customFace: true,
+};
+
+const vca: ModuleDef = {
+  type: 'vca',
+  name: 'Amp',
+  category: 'component',
+  description:
+    'Voltage-controlled amplifier: audio × CV × level. Wire an ADSR (gated per-voice) into CV ' +
+    'for envelopes; unwired CV passes audio at the Level setting.',
+  ports: [
+    audioIn('Audio to attenuate (keeps per-voice lanes).'),
+    { id: 'cv', label: 'CV', type: 'control', direction: 'in', description: 'Gain control 0.0–1.0, per-voice when polyphonic.' },
+    audioOutPort('Attenuated audio.'),
+  ],
+  params: [
+    { id: 'level', label: 'Level', min: 0, max: 1, default: 1, randomizable: false },
+  ],
+  width: 170,
+  height: 100,
+};
+
+// ---------------------------------------------------------------------------
+// Controller modules (PRD §8.6) — values are params so undo/AI/save just work
+// ---------------------------------------------------------------------------
+
+const knob: ModuleDef = {
+  type: 'knob',
+  name: 'Knob',
+  category: 'controller',
+  description:
+    'A knob on the canvas (PRD §8.6): drag vertically to turn, double-click to type a value. ' +
+    'Wire its Control output anywhere a control input exists.',
+  ports: [
+    { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Knob value 0.0–1.0.' },
+  ],
+  params: [
+    { id: 'value', label: 'Value', min: 0, max: 1, default: 0.5, randomizable: true },
+  ],
+  width: 130,
+  height: 150,
+  customFace: true,
+};
+
+export const SLIDER_ORIENTS = ['vertical', 'horizontal'] as const;
+
+const slider: ModuleDef = {
+  type: 'slider',
+  name: 'Slider',
+  category: 'controller',
+  description: 'A fader on the canvas (PRD §8.6), vertical or horizontal. Double-click to type a value.',
+  ports: [
+    { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Slider value 0.0–1.0.' },
+  ],
+  params: [
+    { id: 'value', label: 'Value', min: 0, max: 1, default: 0.5, randomizable: true },
+    { id: 'orient', label: 'Orient', min: 0, max: SLIDER_ORIENTS.length - 1, default: 0, options: [...SLIDER_ORIENTS], randomizable: false },
+  ],
+  width: 120,
+  height: 190,
+  customFace: true,
+};
+
+export const XY_SPRINGS = ['off', 'on'] as const;
+
+const xy: ModuleDef = {
+  type: 'xy',
+  name: 'XY Pad',
+  category: 'controller',
+  description:
+    'Two controls in one gesture (PRD §8.6): drag the puck, X and Y are separate Control ' +
+    'outputs. Spring mode snaps the puck back to center on release.',
+  ports: [
+    { id: 'x', label: 'X', type: 'control', direction: 'out', description: 'Horizontal puck position 0.0–1.0.' },
+    { id: 'y', label: 'Y', type: 'control', direction: 'out', description: 'Vertical puck position 0.0–1.0 (up = 1).' },
+  ],
+  params: [
+    { id: 'x', label: 'X', min: 0, max: 1, default: 0.5, randomizable: true },
+    { id: 'y', label: 'Y', min: 0, max: 1, default: 0.5, randomizable: true },
+    { id: 'spring', label: 'Spring', min: 0, max: 1, default: 0, options: [...XY_SPRINGS], randomizable: false },
+  ],
+  width: 190,
+  height: 210,
+  customFace: true,
+};
+
+export const BUTTON_MODES = ['momentary', 'toggle'] as const;
+
+const button: ModuleDef = {
+  type: 'button',
+  name: 'Button',
+  category: 'controller',
+  description:
+    'Momentary or latching button (PRD §8.6). Control output is 1 while pressed/latched, else 0 ' +
+    '— gate an ADSR, mute a mixer channel, trigger a Sample & Hold.',
+  ports: [
+    { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Button state: 0 or 1.' },
+  ],
+  params: [
+    { id: 'value', label: 'State', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
+    { id: 'mode', label: 'Mode', min: 0, max: BUTTON_MODES.length - 1, default: 0, options: [...BUTTON_MODES], randomizable: false },
+  ],
+  width: 140,
+  height: 130,
+  customFace: true,
+};
+
+// ---------------------------------------------------------------------------
+// Control utilities
+// ---------------------------------------------------------------------------
+
+const quantizer: ModuleDef = {
+  type: 'quantizer',
+  name: 'Quantizer',
+  category: 'data',
+  description:
+    'Snaps a pitch control (MIDI/127) to the nearest note of a scale — turns an LFO or Random ' +
+    'into melody when wired to an Oscillator pitch input.',
+  ports: [
+    { id: 'in', label: 'In', type: 'control', direction: 'in', description: 'Pitch control to quantize (MIDI/127).' },
+    { id: 'out', label: 'Out', type: 'control', direction: 'out', description: 'Quantized pitch control.' },
+  ],
+  params: [
+    { id: 'scale', label: 'Scale', min: 0, max: SCALE_NAMES.length - 1, default: 1, options: [...SCALE_NAMES], randomizable: true },
+    { id: 'root', label: 'Root', min: 0, max: ROOT_NAMES.length - 1, default: 0, options: [...ROOT_NAMES], randomizable: true },
+  ],
+  width: 170,
+  height: 110,
+};
+
+const sah: ModuleDef = {
+  type: 'sah',
+  name: 'Sample & Hold',
+  category: 'data',
+  description:
+    'Captures the input control on each rising edge of the Trig input (>0.5) and holds it — ' +
+    'classic stepped modulation from an LFO square or a Button.',
+  ports: [
+    { id: 'in', label: 'In', type: 'control', direction: 'in', description: 'Control to sample.' },
+    { id: 'trig', label: 'Trig', type: 'control', direction: 'in', description: 'Rising edge above 0.5 captures the input.' },
+    { id: 'out', label: 'Out', type: 'control', direction: 'out', description: 'Held control value.' },
+  ],
+  params: [],
+  width: 170,
+  height: 100,
+};
+
+const slew: ModuleDef = {
+  type: 'slew',
+  name: 'Slew',
+  category: 'data',
+  description:
+    'Limits how fast a control signal may rise or fall (full range per Rise/Fall seconds) — ' +
+    'smooths steps from a Sample & Hold or sequencer-style sources, portamento for pitch controls.',
+  ports: [
+    { id: 'in', label: 'In', type: 'control', direction: 'in', description: 'Control to smooth.' },
+    { id: 'out', label: 'Out', type: 'control', direction: 'out', description: 'Slew-limited control.' },
+  ],
+  params: [
+    { id: 'rise', label: 'Rise', min: 0, max: 2, default: 0.1, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'fall', label: 'Fall', min: 0, max: 2, default: 0.1, unit: 's', curve: 'exp', randomizable: true },
+  ],
+  width: 170,
+  height: 110,
+};
+
+export const CMATH_MODES = ['a+b', 'a×b', 'min', 'max'] as const;
+
+const cmath: ModuleDef = {
+  type: 'cmath',
+  name: 'Control Math',
+  category: 'data',
+  description:
+    'Combines two control signals: attenuvert each input (±1), add an offset, pick the blend ' +
+    'mode. The glue for modulation routing (e.g. LFO depth controlled by a Knob).',
+  ports: [
+    { id: 'a', label: 'A', type: 'control', direction: 'in', description: 'Control input A.' },
+    { id: 'b', label: 'B', type: 'control', direction: 'in', description: 'Control input B.' },
+    { id: 'out', label: 'Out', type: 'control', direction: 'out', description: 'Combined control, clamped 0.0–1.0.' },
+  ],
+  params: [
+    { id: 'mode', label: 'Mode', min: 0, max: CMATH_MODES.length - 1, default: 0, options: [...CMATH_MODES], randomizable: true },
+    { id: 'gainA', label: 'Gain A', min: -1, max: 1, default: 1, randomizable: true },
+    { id: 'gainB', label: 'Gain B', min: -1, max: 1, default: 1, randomizable: true },
+    { id: 'offset', label: 'Offset', min: -1, max: 1, default: 0, randomizable: true },
+  ],
+  width: 180,
+  height: 150,
+};
+
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
     transport, sequencer, arp, composer, lfo, adsr, random, synth, sampler, drum, keyboard, midiIn, midiOut,
+    voice, osc, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
     mixer, recorder, audioOut, levels, visualizer,
   ].map((d) => [d.type, d]),

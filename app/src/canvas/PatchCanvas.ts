@@ -164,6 +164,17 @@ export class PatchCanvas {
     };
   }
 
+  /** Client position of a collapsed group tile's top-left corner (e2e + tools). */
+  clientPointForGroup(groupId: string): { x: number; y: number } | null {
+    const view = this.groupViews.get(groupId);
+    if (!view) return null;
+    const rect = this.app.canvas.getBoundingClientRect();
+    return {
+      x: rect.left + this.world.position.x + view.position.x * this.world.scale.x,
+      y: rect.top + this.world.position.y + view.position.y * this.world.scale.y,
+    };
+  }
+
   /** World coordinates of the current view center — used to place new modules. */
   viewCenter(): { x: number; y: number } {
     const cx = (this.app.screen.width / 2 - this.world.position.x) / this.world.scale.x;
@@ -691,6 +702,7 @@ export class PatchCanvas {
     for (const view of this.views.values()) {
       if (view.visible) view.updateLive();
     }
+    for (const gv of this.groupViews.values()) gv.updateLive();
   }
 
   private strokePath(points: Array<{ x: number; y: number }>, width: number, color: number, alpha: number): void {

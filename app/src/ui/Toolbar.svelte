@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { patchCanvas } from '../canvas/PatchCanvas';
   import { appState } from '../state';
   import { setTheme, theme } from '../theme';
 
@@ -11,13 +12,16 @@
   let canRedo = $state(false);
   let canGroup = $state(false);
   let selectedGroup = $state<string | null>(null);
+  let canShrink = $state(false);
   let fileInput: HTMLInputElement;
+  let kkmodInput: HTMLInputElement;
 
   function refreshEditState() {
     canUndo = appState.canUndo;
     canRedo = appState.canRedo;
     canGroup = appState.selectedModuleIds.size + appState.selectedGroupIds.size >= 2;
     selectedGroup = [...appState.selectedGroupIds][0] ?? null;
+    canShrink = appState.shrinkableGroupId() !== null;
   }
 
   let midiLearnArmed = $state(false);
@@ -82,8 +86,47 @@
     setTheme(themeName);
   }
 
+  // Tutorial may rearrange the patch — offer to save first.
+  let tutorialPrompt = $state(false);
+
   function startTutorial() {
+    tutorialPrompt = true;
+  }
+
+  function launchTutorial(saveFirst: boolean) {
+    if (saveFirst) saveProject();
+    tutorialPrompt = false;
     window.dispatchEvent(new CustomEvent('kk-start-tutorial'));
+  }
+
+  // -- Module faces (design framework over groups) --------------------------
+
+  function newFace() {
+    const c = patchCanvas.viewCenter();
+    const id = appState.newFaceModule(c.x, c.y);
+    appState.openFaceEditor(id);
+  }
+
+  function exportKkmod() {
+    if (!selectedGroup) return;
+    const group = appState.graph.groups.get(selectedGroup);
+    if (!group) return;
+    const blob = new Blob([appState.exportFaceGroup(selectedGroup)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${group.name}.kkmod`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  async function importKkmod(e: Event) {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    const c = patchCanvas.viewCenter();
+    const result = appState.importFaceGroup(await file.text(), c);
+    if (!result.ok) alert(`Import failed:\n${result.errors.join('\n')}`);
+    else if (result.warnings.length) alert(`Imported with warnings:\n${result.warnings.join('\n')}`);
+    kkmodInput.value = '';
   }
 </script>
 
@@ -104,6 +147,33 @@
   <button disabled={!selectedGroup} onclick={() => selectedGroup && appState.ungroup(selectedGroup)} title="Ungroup (Cmd/Ctrl+Shift+G)">
     Ungroup
   </button>
+
+  <span class="divider"></span>
+
+  <button class="new-face" onclick={newFace} title="New blank module face: design a control panel, then fill the group with modules">
+    ✚ Face
+  </button>
+  <button
+    class="edit-face"
+    disabled={!selectedGroup}
+    onclick={() => selectedGroup && appState.openFaceEditor(selectedGroup)}
+    title="Design this group's module face: knobs, sliders, XY pads bound to inner params"
+  >
+    🎛 Edit Face
+  </button>
+  <button
+    class="shrink"
+    disabled={!canShrink}
+    onclick={() => appState.shrinkSelection()}
+    title="Pull the expanded group back into its module face"
+  >
+    ⤡ Shrink
+  </button>
+  <button class="export-kkmod" disabled={!selectedGroup} onclick={exportKkmod} title="Export the selected group (modules + wires + face) as a reusable .kkmod">
+    ⬇ .kkmod
+  </button>
+  <button class="import-kkmod" onclick={() => kkmodInput.click()} title="Import a .kkmod custom module">⬆ .kkmod</button>
+  <input bind:this={kkmodInput} type="file" accept=".kkmod,application/json" hidden onchange={importKkmod} />
 
   <span class="spacer"></span>
 
@@ -157,6 +227,19 @@
     <span class="audio-on" title="Audio engine running">🔊</span>
   {/if}
 </div>
+
+{#if tutorialPrompt}
+  <div class="tutorial-backdrop">
+    <div class="tutorial-dialog" role="dialog" aria-label="Start tutorial">
+      <p>Start the tutorial? You can save your project first.</p>
+      <div class="tutorial-actions">
+        <button class="save-start" onclick={() => launchTutorial(true)}>💾 Save & start</button>
+        <button class="just-start" onclick={() => launchTutorial(false)}>Start without saving</button>
+        <button class="cancel-tutorial" onclick={() => (tutorialPrompt = false)}>Cancel</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .toolbar {
@@ -230,5 +313,36 @@
   }
   .audio-on {
     padding: 0 6px;
+  }
+  .tutorial-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 70;
+  }
+  .tutorial-dialog {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 18px 22px;
+    max-width: 360px;
+  }
+  .tutorial-dialog p {
+    margin: 0 0 14px;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .tutorial-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .save-start {
+    background: var(--accent);
+    color: #1a1a20;
+    font-weight: 600;
   }
 </style>

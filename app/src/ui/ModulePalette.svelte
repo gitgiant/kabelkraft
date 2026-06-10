@@ -4,7 +4,22 @@
   import { appState } from '../state';
 
   const defs = [...MODULE_DEFS.values()];
-  const categories = [...new Set(defs.map((d) => d.category))];
+
+  let query = $state('');
+
+  const visible = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return defs;
+    return defs.filter(
+      (d) =>
+        d.name.toLowerCase().includes(q) ||
+        d.type.toLowerCase().includes(q) ||
+        d.category.toLowerCase().includes(q) ||
+        d.description.toLowerCase().includes(q),
+    );
+  });
+
+  const categories = $derived([...new Set(visible.map((d) => d.category))]);
 
   function addModule(type: string) {
     const c = patchCanvas.viewCenter();
@@ -16,14 +31,24 @@
 
 <div class="palette">
   <div class="palette-title">Modules</div>
+  <input
+    class="palette-search"
+    type="search"
+    placeholder="Search…"
+    bind:value={query}
+    spellcheck="false"
+  />
   {#each categories as cat}
     <div class="category">{cat}</div>
-    {#each defs.filter((d) => d.category === cat) as def}
+    {#each visible.filter((d) => d.category === cat) as def}
       <button class="module-entry" title={def.description} onclick={() => addModule(def.type)}>
         {def.name}
       </button>
     {/each}
   {/each}
+  {#if visible.length === 0}
+    <div class="no-match">No modules match “{query}”.</div>
+  {/if}
 </div>
 
 <style>
@@ -40,6 +65,11 @@
     font-size: 13px;
     color: var(--text);
     margin-bottom: 8px;
+  }
+  .palette-search {
+    width: 100%;
+    margin-bottom: 4px;
+    font-size: 12px;
   }
   .category {
     font-size: 10px;
@@ -60,5 +90,10 @@
   .module-entry:hover {
     background: var(--panel-border);
     border-color: var(--accent);
+  }
+  .no-match {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 8px;
   }
 </style>

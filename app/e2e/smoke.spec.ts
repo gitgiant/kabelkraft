@@ -10,7 +10,7 @@ test('app loads with starter patch, no console errors', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('.toolbar .logo')).toHaveText('KabelKraft');
   await expect(page.locator('.canvas-container canvas')).toBeVisible();
-  await expect(page.locator('.palette .module-entry')).toHaveCount(30);
+  await expect(page.locator('.palette .module-entry')).toHaveCount(42);
 
   // Starter patch seeds 5 modules + 3 wires; give the canvas a beat to mount.
   await page.waitForTimeout(500);
@@ -182,6 +182,7 @@ test('theme toggle switches to light and persists', async ({ page }) => {
 test('tutorial steps auto-advance and complete', async ({ page }) => {
   await page.goto('/');
   await page.locator('button[title="Start the tutorial"]').click();
+  await page.locator('button.just-start').click(); // save prompt → skip saving
   await expect(page.locator('.tutorial-title')).toHaveText('Add a Synth');
 
   // Tutorial resets to a minimal patch (transport + audioOut only).

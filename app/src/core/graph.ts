@@ -10,6 +10,7 @@
  *  - No duplicate wires, no output-to-output / input-to-input, no self-port.
  */
 
+import type { FaceSpec } from './face';
 import type { ModuleDef, ModuleInstance, PortSpec } from './module';
 import type { PortType } from './types';
 
@@ -47,6 +48,8 @@ export interface ModuleGroup {
   moduleIds: string[];
   /** Nested child groups (PRD §6: layers of abstraction). */
   groupIds: string[];
+  /** Designed front panel rendered on the collapsed tile (core/face.ts). */
+  face?: FaceSpec;
 }
 
 let nextGroupId = 1;

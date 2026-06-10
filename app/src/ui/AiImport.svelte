@@ -25,8 +25,13 @@
     return () => window.removeEventListener('kk-ai-import', onToggle);
   });
 
+  let userPrompt = $state('');
+
   async function copySpec() {
-    await navigator.clipboard.writeText(generateSpecPack());
+    // Spec + the user's request in one paste-able block.
+    const prompt = userPrompt.trim();
+    const payload = prompt ? `${generateSpecPack()}\n\nUSER PROMPT: ${prompt}` : generateSpecPack();
+    await navigator.clipboard.writeText(payload);
     copied = true;
     setTimeout(() => (copied = false), 2000);
   }
@@ -68,10 +73,22 @@
       </div>
 
       <p class="ai-help">
-        1. <button class="copy-spec" onclick={copySpec}>{copied ? '✓ Copied!' : '📋 Copy AI Spec'}</button>
-        and paste it into any chatbot with a description of the sound you want.<br />
+        1. Describe the sound you want, copy, and paste it into any chatbot.<br />
         2. Paste the JSON it answers with below (or drop a .kkgroup file here).
       </p>
+
+      <div class="prompt-row">
+        <input
+          class="ai-prompt"
+          type="text"
+          bind:value={userPrompt}
+          placeholder="e.g. a warm dub bassline with tape delay"
+          spellcheck="false"
+        />
+        <button class="copy-spec" onclick={copySpec} title="Copies the AI spec followed by USER PROMPT: your text">
+          {copied ? '✓ Copied!' : '📋 Copy Spec + Prompt'}
+        </button>
+      </div>
 
       <textarea
         bind:value={text}
@@ -141,6 +158,15 @@
   }
   .copy-spec {
     font-weight: 600;
+    white-space: nowrap;
+  }
+  .prompt-row {
+    display: flex;
+    gap: 8px;
+  }
+  .ai-prompt {
+    flex: 1;
+    font-size: 12px;
   }
   textarea {
     min-height: 180px;

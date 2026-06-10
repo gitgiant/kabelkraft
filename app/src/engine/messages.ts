@@ -32,7 +32,19 @@ export type EngineModuleType =
   | 'limiter'
   | 'modulator'
   | 'mixer'
-  | 'recorder';
+  | 'recorder'
+  | 'voice'
+  | 'osc'
+  | 'vcf'
+  | 'vca'
+  | 'knob'
+  | 'slider'
+  | 'xy'
+  | 'button'
+  | 'quantizer'
+  | 'sah'
+  | 'slew'
+  | 'cmath';
 
 export interface EngineModuleSnapshot {
   id: string;
