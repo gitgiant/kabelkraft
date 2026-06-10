@@ -10,7 +10,7 @@ test('app loads with starter patch, no console errors', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('.toolbar .logo')).toHaveText('KabelKraft');
   await expect(page.locator('.canvas-container canvas')).toBeVisible();
-  await expect(page.locator('.palette .module-entry')).toHaveCount(12);
+  await expect(page.locator('.palette .module-entry')).toHaveCount(13);
 
   // Starter patch seeds 5 modules + 3 wires; give the canvas a beat to mount.
   await page.waitForTimeout(500);
@@ -106,6 +106,56 @@ test('grouping keeps audio flowing and undo restores the graph', async ({ page }
   expect(after.modulesSame).toBe(true);
   expect(after.wiresSame).toBe(true);
   expect(after.canRedo).toBe(true);
+});
+
+test('sampler plays injected PCM pitched by the sequencer', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('.enable-audio').click();
+  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+
+  const samplerId = await page.evaluate(() => {
+    const s = window.__kk;
+    const mods = [...s.graph.modules.values()];
+    const sequencer = mods.find((m) => m.type === 'sequencer')!;
+    const audioOut = mods.find((m) => m.type === 'audioOut')!;
+    const sampler = s.addModule('sampler', 0, 500);
+    // 0.5 s 440 Hz sine with a fade-out tail.
+    const n = 22050;
+    const pcm = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      pcm[i] = Math.sin((2 * Math.PI * 440 * i) / 44100) * (1 - i / n) * 0.8;
+    }
+    s.setSample(sampler.id, { name: 'test-sine.wav', sampleRate: 44100, channels: [pcm] });
+    s.connect({ moduleId: sequencer.id, portId: 'notes' }, { moduleId: sampler.id, portId: 'notes' });
+    s.connect({ moduleId: sampler.id, portId: 'out' }, { moduleId: audioOut.id, portId: 'in' });
+    return sampler.id;
+  });
+
+  await page.locator('.transport button[title="Play"]').click();
+  await expect
+    .poll(
+      () => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, samplerId),
+      { timeout: 5000 },
+    )
+    .toBeGreaterThan(0.01);
+
+  // Save embeds the sample; loading the saved JSON restores PCM to the store.
+  const roundTrip = await page.evaluate((id) => {
+    const s = window.__kk;
+    const json = s.serializeWithSamples();
+    const parsed = JSON.parse(json);
+    const embedded = (parsed.samples ?? []).length;
+    s.loadProject(json);
+    const restored = s.samples.get(id);
+    return {
+      embedded,
+      restoredName: restored?.name,
+      restoredLength: restored?.channels[0]?.length ?? 0,
+    };
+  }, samplerId);
+  expect(roundTrip.embedded).toBe(1);
+  expect(roundTrip.restoredName).toBe('test-sine.wav');
+  expect(roundTrip.restoredLength).toBe(22050);
 });
 
 test('effect inserted into the chain passes audio through', async ({ page }) => {

@@ -6,6 +6,7 @@
 
 export type EngineModuleType =
   | 'synth'
+  | 'sampler'
   | 'audioOut'
   | 'levels'
   | 'sequencer'
@@ -75,13 +76,22 @@ export interface NoteOffMessage {
   voiceId: number;
 }
 
+/** Deliver sample PCM to a sampler module (channel buffers are copies). */
+export interface SampleMessage {
+  type: 'sample';
+  moduleId: string;
+  sampleRate: number;
+  channels: Float32Array[];
+}
+
 export type EngineMessage =
   | GraphMessage
   | ParamMessage
   | DataMessage
   | TransportMessage
   | NoteOnMessage
-  | NoteOffMessage;
+  | NoteOffMessage
+  | SampleMessage;
 
 /** Worklet → main thread, ~30 Hz. */
 export interface MeterReading {

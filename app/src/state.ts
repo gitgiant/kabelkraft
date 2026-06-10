@@ -7,6 +7,7 @@
 import { Graph, type PortRef, type Wire } from './core/graph';
 import { createInstance, type ModuleInstance } from './core/module';
 import { MODULE_DEFS } from './core/registry';
+import { decodeSample, encodeSample, type SampleData } from './core/samples';
 import { deserializeProject, serializeProject } from './core/serialize';
 import { DEFAULT_TRANSPORT, type TransportState } from './core/types';
 import { Engine } from './engine/engine';
@@ -17,7 +18,8 @@ export type StateEvent =
   | 'paramChanged'
   | 'transportChanged'
   | 'selectionChanged'
-  | 'projectLoaded';
+  | 'projectLoaded'
+  | 'sampleLoaded';
 
 type Listener = () => void;
 
@@ -37,6 +39,11 @@ export class AppState {
   noteFlash = new Map<string, number>();
   /** Per-keyboard-module held voices: moduleId → (key → voiceId). */
   private heldVoices = new Map<string, Map<string, number>>();
+  /**
+   * Sample PCM keyed by owning module id — deliberately outside the graph
+   * so undo snapshots stay small (see core/samples.ts).
+   */
+  readonly samples = new Map<string, SampleData>();
 
   selectedWireId: string | null = null;
   selectedModuleId: string | null = null;
@@ -67,7 +74,35 @@ export class AppState {
     if (!wasRunning) {
       this.engine.syncGraph(this.graph);
       this.engine.sendTransport(this.transport, this.transport.songPosition);
+      for (const [moduleId, sample] of this.samples) {
+        this.engine.sendSample(moduleId, sample.sampleRate, sample.channels);
+      }
     }
+  }
+
+  // -- Samples ------------------------------------------------------------
+
+  /** Install PCM into a sampler module (UI file loads and tests both land here). */
+  setSample(moduleId: string, sample: SampleData): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (!mod) return;
+    this.samples.set(moduleId, sample);
+    mod.data = { ...mod.data, sampleName: sample.name };
+    if (this.engine.running) {
+      this.engine.sendSample(moduleId, sample.sampleRate, sample.channels);
+    }
+    this.emit('sampleLoaded');
+  }
+
+  /** Decode a user-picked audio file and load it into a sampler. */
+  async loadSampleFile(moduleId: string, file: File): Promise<void> {
+    await this.ensureEngine(); // file picker click is the user gesture
+    const decoded = await this.engine.decode(await file.arrayBuffer());
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < Math.min(2, decoded.numberOfChannels); c++) {
+      channels.push(decoded.getChannelData(c).slice());
+    }
+    this.setSample(moduleId, { name: file.name, sampleRate: decoded.sampleRate, channels });
   }
 
   on(event: StateEvent, fn: Listener): () => void {
@@ -360,8 +395,17 @@ export class AppState {
 
   // -- Project -----------------------------------------------------------
 
+  /** Undo snapshots: graph only, no sample PCM. */
   serialize(): string {
     return serializeProject(this.projectName, this.graph, this.transport);
+  }
+
+  /** Explicit project save: embeds sample PCM for portability (PRD §15). */
+  serializeWithSamples(): string {
+    const samples = [...this.samples.entries()]
+      .filter(([moduleId]) => this.graph.modules.has(moduleId))
+      .map(([moduleId, sample]) => encodeSample(moduleId, sample));
+    return serializeProject(this.projectName, this.graph, this.transport, samples);
   }
 
   loadProject(json: string): string[] {
@@ -374,11 +418,20 @@ export class AppState {
     this.selectedModuleId = null;
     this.selectedWireId = null;
     this.heldVoices.clear();
+    this.samples.clear();
     this.engine.syncGraph(this.graph);
     this.engine.sendTransport(this.transport, 0);
+    for (const raw of result.samples) {
+      const sample = decodeSample(raw);
+      this.samples.set(raw.moduleId, sample);
+      if (this.engine.running) {
+        this.engine.sendSample(raw.moduleId, sample.sampleRate, sample.channels);
+      }
+    }
     this.emit('projectLoaded');
     this.emit('graphChanged');
     this.emit('transportChanged');
+    this.emit('sampleLoaded');
     return result.warnings;
   }
 }

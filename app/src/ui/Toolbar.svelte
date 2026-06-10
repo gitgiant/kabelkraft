@@ -46,7 +46,7 @@
 
   function saveProject() {
     appState.projectName = projectName || 'Untitled';
-    const blob = new Blob([appState.serialize()], { type: 'application/json' });
+    const blob = new Blob([appState.serializeWithSamples()], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${appState.projectName}.kkproj`;

@@ -5,6 +5,7 @@
 
 import { Graph, bumpGroupId, bumpWireId, type ModuleGroup, type Wire } from './graph';
 import { bumpModuleId, type ModuleDef, type ModuleInstance } from './module';
+import type { SerializedSample } from './samples';
 import { DEFAULT_TRANSPORT, type TransportState } from './types';
 
 export const FORMAT_VERSION = 1;
@@ -16,9 +17,16 @@ export interface ProjectFile {
   modules: ModuleInstance[];
   wires: Wire[];
   groups?: ModuleGroup[];
+  /** Embedded sample PCM — present only in explicit project saves, never in undo snapshots. */
+  samples?: SerializedSample[];
 }
 
-export function serializeProject(name: string, graph: Graph, transport: TransportState): string {
+export function serializeProject(
+  name: string,
+  graph: Graph,
+  transport: TransportState,
+  samples?: SerializedSample[],
+): string {
   const file: ProjectFile = {
     formatVersion: FORMAT_VERSION,
     name,
@@ -26,6 +34,7 @@ export function serializeProject(name: string, graph: Graph, transport: Transpor
     modules: [...graph.modules.values()],
     wires: [...graph.wires.values()],
     groups: [...graph.groups.values()],
+    samples,
   };
   return JSON.stringify(file, null, 2);
 }
@@ -35,6 +44,7 @@ export interface LoadResult {
   name: string;
   transport: TransportState;
   warnings: string[];
+  samples: SerializedSample[];
 }
 
 export function deserializeProject(json: string, defs: Map<string, ModuleDef>): LoadResult {
@@ -88,5 +98,6 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
     name: raw.name ?? 'Untitled',
     transport: { ...DEFAULT_TRANSPORT, ...raw.transport, playing: false },
     warnings,
+    samples: (raw.samples ?? []).filter((s) => graph.modules.has(s.moduleId)),
   };
 }

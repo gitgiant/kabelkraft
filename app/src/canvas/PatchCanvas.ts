@@ -80,6 +80,9 @@ export class PatchCanvas {
     appState.on('paramChanged', () => {
       for (const v of this.views.values()) v.refreshParams();
     });
+    appState.on('sampleLoaded', () => {
+      for (const v of this.views.values()) v.refreshSample();
+    });
     appState.on('selectionChanged', () => {
       for (const [id, v] of this.views) v.setSelected(appState.selectedModuleIds.has(id));
     });

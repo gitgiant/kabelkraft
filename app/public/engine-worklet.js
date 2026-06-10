@@ -134,6 +134,100 @@ class SynthModule {
   }
 }
 
+class SamplerModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'sampler';
+    this.params = params;
+    this.controlIn = {};
+    this.sample = null; // { sampleRate, chL, chR }
+    this.voices = []; // { active, voiceId, pos, rate, velocity, stage, env, age }
+    for (let i = 0; i < MAX_VOICES; i++) {
+      this.voices.push({ active: false, voiceId: -1, pos: 0, rate: 1, velocity: 1, stage: 'off', env: 0, age: 0 });
+    }
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+  }
+
+  setSample(sampleRate, channels) {
+    this.sample = {
+      sampleRate,
+      chL: channels[0],
+      chR: channels[1] || channels[0],
+    };
+    for (const v of this.voices) v.active = false;
+  }
+
+  noteOn(voiceId, pitch, velocity) {
+    if (!this.sample) return;
+    let voice = this.voices.find((v) => !v.active);
+    if (!voice) voice = this.voices.reduce((a, b) => (a.age > b.age ? a : b));
+    const root = this.params.root ?? 60;
+    voice.active = true;
+    voice.voiceId = voiceId;
+    voice.pos = 0;
+    // Pitch tracking + source/engine sample-rate compensation.
+    voice.rate = Math.pow(2, (pitch - root) / 12) * (this.sample.sampleRate / sampleRate);
+    voice.velocity = velocity;
+    voice.stage = 'attack';
+    voice.env = 0;
+    voice.age = 0;
+  }
+
+  noteOff(voiceId) {
+    for (const v of this.voices) {
+      if (v.active && v.voiceId === voiceId) v.stage = 'release';
+    }
+  }
+
+  render(blockSize) {
+    this.outL.fill(0);
+    this.outR.fill(0);
+    if (!this.sample) return;
+    const p = this.params;
+    const loop = Math.round(p.mode ?? 0) === 1;
+    const level = p.level ?? 0.8;
+    const atkStep = 1 / (Math.max(0.001, p.attack ?? 0.005) * sampleRate);
+    const decStep = 1 / (Math.max(0.001, p.decay ?? 0.1) * sampleRate);
+    const sustain = p.sustain ?? 1;
+    const relStep = 1 / (Math.max(0.001, p.release ?? 0.2) * sampleRate);
+    const { chL, chR } = this.sample;
+    const len = chL.length;
+
+    for (const v of this.voices) {
+      if (!v.active) continue;
+      for (let i = 0; i < blockSize; i++) {
+        if (v.stage === 'attack') {
+          v.env += atkStep;
+          if (v.env >= 1) { v.env = 1; v.stage = 'decay'; }
+        } else if (v.stage === 'decay') {
+          v.env -= decStep;
+          if (v.env <= sustain) { v.env = sustain; v.stage = 'sustain'; }
+        } else if (v.stage === 'release') {
+          v.env -= relStep;
+          if (v.env <= 0) { v.env = 0; v.stage = 'off'; v.active = false; break; }
+        }
+
+        const i0 = Math.floor(v.pos);
+        if (i0 >= len - 1) {
+          if (loop && len > 1) {
+            v.pos -= len - 1;
+            continue;
+          }
+          v.active = false;
+          break;
+        }
+        const frac = v.pos - i0;
+        const g = v.env * v.velocity * level;
+        this.outL[i] += (chL[i0] * (1 - frac) + chL[i0 + 1] * frac) * g;
+        this.outR[i] += (chR[i0] * (1 - frac) + chR[i0 + 1] * frac) * g;
+        v.pos += v.rate;
+      }
+      v.age++;
+    }
+  }
+}
+
 const LFO_SINE = 0;
 const LFO_TRIANGLE = 1;
 const LFO_SQUARE = 2;
@@ -579,6 +673,8 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, existing);
           } else if (m.type === 'synth') {
             next.set(m.id, new SynthModule(m.id, m.params));
+          } else if (m.type === 'sampler') {
+            next.set(m.id, new SamplerModule(m.id, m.params));
           } else if (m.type === 'levels') {
             next.set(m.id, new LevelsModule(m.id, m.params));
           } else if (m.type === 'audioOut') {
@@ -633,12 +729,17 @@ class EngineProcessor extends AudioWorkletProcessor {
       }
       case 'noteOn': {
         const mod = this.modules.get(msg.moduleId);
-        if (mod && mod.type === 'synth') mod.noteOn(msg.voiceId, msg.pitch, msg.velocity);
+        if (mod && mod.noteOn) mod.noteOn(msg.voiceId, msg.pitch, msg.velocity);
         break;
       }
       case 'noteOff': {
         const mod = this.modules.get(msg.moduleId);
-        if (mod && mod.type === 'synth') mod.noteOff(msg.voiceId);
+        if (mod && mod.noteOff) mod.noteOff(msg.voiceId);
+        break;
+      }
+      case 'sample': {
+        const mod = this.modules.get(msg.moduleId);
+        if (mod && mod.type === 'sampler') mod.setSample(msg.sampleRate, msg.channels);
         break;
       }
     }
@@ -648,7 +749,7 @@ class EngineProcessor extends AudioWorkletProcessor {
     for (const w of this.noteWires) {
       if (w.fromModuleId !== srcId) continue;
       const target = this.modules.get(w.toModuleId);
-      if (target && target.type === 'synth') target.noteOn(voiceId, pitch, velocity);
+      if (target && target.noteOn) target.noteOn(voiceId, pitch, velocity);
     }
     this.noteActivity.add(srcId);
   }
@@ -657,7 +758,7 @@ class EngineProcessor extends AudioWorkletProcessor {
     for (const w of this.noteWires) {
       if (w.fromModuleId !== srcId) continue;
       const target = this.modules.get(w.toModuleId);
-      if (target && target.type === 'synth') target.noteOff(voiceId);
+      if (target && target.noteOff) target.noteOff(voiceId);
     }
   }
 

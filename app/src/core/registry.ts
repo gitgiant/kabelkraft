@@ -53,6 +53,30 @@ const synth: ModuleDef = {
   height: 200,
 };
 
+const sampler: ModuleDef = {
+  type: 'sampler',
+  name: 'Sampler',
+  category: 'generator',
+  description:
+    'Plays a loaded sample pitched by incoming notes. Root note maps the sample to the keyboard; one-shot or loop.',
+  ports: [
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note input controlling sample playback.' },
+    { id: 'out', label: 'Audio', type: 'audio', direction: 'out', description: 'Sample audio output (stereo).' },
+  ],
+  params: [
+    { id: 'root', label: 'Root', min: 24, max: 96, default: 60, randomizable: false },
+    { id: 'mode', label: 'Mode', min: 0, max: 1, default: 0, options: ['one-shot', 'loop'], randomizable: false },
+    { id: 'attack', label: 'Attack', min: 0.001, max: 4, default: 0.005, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'decay', label: 'Decay', min: 0.001, max: 4, default: 0.1, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'sustain', label: 'Sustain', min: 0, max: 1, default: 1, randomizable: true },
+    { id: 'release', label: 'Release', min: 0.001, max: 8, default: 0.2, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
+  ],
+  width: 230,
+  height: 260,
+  defaultData: () => ({ sampleName: '' }),
+};
+
 export const LFO_SHAPES = ['sine', 'triangle', 'square', 'sawtooth', 's&h'] as const;
 
 const lfo: ModuleDef = {
@@ -255,7 +279,7 @@ const mixer: ModuleDef = {
 
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
-    transport, sequencer, lfo, synth, keyboard,
+    transport, sequencer, lfo, synth, sampler, keyboard,
     delay, reverb, distortion, eq,
     mixer, audioOut, levels,
   ].map((d) => [d.type, d]),

@@ -18,6 +18,7 @@ import type {
 
 const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'synth',
+  'sampler',
   'audioOut',
   'levels',
   'sequencer',
@@ -105,6 +106,21 @@ export class Engine {
 
   setData(moduleId: string, key: string, value: unknown): void {
     this.send({ type: 'data', moduleId, key, value });
+  }
+
+  /** Decode an audio file using the engine's AudioContext. */
+  async decode(buffer: ArrayBuffer): Promise<AudioBuffer> {
+    if (!this.ctx) throw new Error('Engine not started');
+    return this.ctx.decodeAudioData(buffer);
+  }
+
+  sendSample(moduleId: string, sampleRate: number, channels: Float32Array[]): void {
+    // Copies, so the main-thread store keeps its data (waveform UI, saving).
+    const copies = channels.map((c) => c.slice());
+    this.node?.port.postMessage(
+      { type: 'sample', moduleId, sampleRate, channels: copies },
+      copies.map((c) => c.buffer),
+    );
   }
 
   sendTransport(t: TransportState, jumpTo?: number): void {

@@ -196,6 +196,89 @@ export class ModuleView extends Container {
       this.buildMeter(x, this.def.height - 18, w);
     }
     if (this.instance.type === 'sequencer') this.buildStepGrid(x, y + 4, w);
+    if (this.instance.type === 'sampler') this.buildSamplerFace(x, y + 4, w);
+  }
+
+  // -- sampler face ----------------------------------------------------------
+
+  private waveform: Graphics | null = null;
+  private sampleNameText: Text | null = null;
+  private waveRect = { x: 0, y: 0, w: 0, h: 0 };
+
+  private buildSamplerFace(x: number, y: number, w: number): void {
+    const h = this.def.height - y - 28;
+    this.waveRect = { x, y, w, h };
+    this.waveform = new Graphics();
+    this.addChild(this.waveform);
+
+    this.sampleNameText = new Text({
+      text: '',
+      style: { fontSize: 10, fill: DIM_TEXT },
+    });
+    this.sampleNameText.position.set(x, y + h + 6);
+    this.addChild(this.sampleNameText);
+
+    const hit = new Graphics().rect(x, y, w, h).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'audio/*';
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (file) void appState.loadSampleFile(this.instance.id, file);
+      };
+      input.click();
+    });
+    hit.on('pointerover', (e) =>
+      this.tooltip.show(
+        ['Sample', appState.samples.has(this.instance.id) ? 'Click to load a different file.' : 'Click to load an audio file.'],
+        e.clientX,
+        e.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+    this.refreshSample();
+  }
+
+  refreshSample(): void {
+    if (!this.waveform) return;
+    const { x, y, w, h } = this.waveRect;
+    const g = this.waveform;
+    g.clear();
+    g.roundRect(x, y, w, h, 4).fill(0x16161c);
+    const sample = appState.samples.get(this.instance.id);
+    if (this.sampleNameText) {
+      this.sampleNameText.text = sample
+        ? sample.name
+        : 'no sample — click waveform area to load';
+    }
+    if (!sample) return;
+    const pcm = sample.channels[0];
+    const mid = y + h / 2;
+    const cols = Math.floor(w) - 8;
+    const step = pcm.length / cols;
+    for (let c = 0; c < cols; c++) {
+      let min = 1;
+      let max = -1;
+      const start = Math.floor(c * step);
+      const end = Math.min(pcm.length, Math.ceil((c + 1) * step));
+      // Sparse scan keeps long samples cheap; thumbnails don't need exactness.
+      const stride = Math.max(1, Math.floor((end - start) / 16));
+      for (let i = start; i < end; i += stride) {
+        const v = pcm[i];
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      if (max < min) continue;
+      const x0 = x + 4 + c;
+      g.moveTo(x0, mid + min * (h / 2 - 3));
+      g.lineTo(x0, mid + max * (h / 2 - 3));
+    }
+    g.stroke({ width: 1, color: 0xffb13d, alpha: 0.9 });
   }
 
   // -- sequencer step grid ---------------------------------------------------
