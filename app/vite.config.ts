@@ -8,6 +8,7 @@ export default defineConfig({
   server: {
     port: 8080,
     host: '0.0.0.0',
+    allowedHosts: ['giantbook'],
   },
   test: {
     include: ['src/**/*.test.ts'], // e2e/ belongs to Playwright
