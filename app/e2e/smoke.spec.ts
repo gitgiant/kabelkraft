@@ -10,7 +10,7 @@ test('app loads with starter patch, no console errors', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('.toolbar .logo')).toHaveText('KabelKraft');
   await expect(page.locator('.canvas-container canvas')).toBeVisible();
-  await expect(page.locator('.palette .module-entry')).toHaveCount(16);
+  await expect(page.locator('.palette .module-entry')).toHaveCount(30);
 
   // Starter patch seeds 5 modules + 3 wires; give the canvas a beat to mount.
   await page.waitForTimeout(500);

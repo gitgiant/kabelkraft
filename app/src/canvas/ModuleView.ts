@@ -10,16 +10,33 @@ import type { ModuleDef, ParamSpec, PortSpec } from '../core/module';
 import type { ModuleInstance } from '../core/module';
 import { PORT_TYPE_COLORS } from '../core/types';
 import {
+  DRUM_DECAY_MAX,
+  DRUM_PADS,
   SEQ_PITCH_MAX,
   SEQ_PITCH_MIN,
+  SYNTH_MODES,
   WAVEFORMS,
+  type DrumPad,
+  type DrumStep,
   type SeqStep,
 } from '../core/registry';
+import { bandCoefs, chainResponseDb } from '../core/eqmath';
+import { sampleKey } from '../core/samples';
 import { appState } from '../state';
 import { theme } from '../theme';
 import type { Tooltip } from './Tooltip';
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+/** Minimal HSL→hex for particle colors. */
+export function hslToHex(h: number, s: number, l: number): number {
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  return (Math.round(f(0) * 255) << 16) | (Math.round(f(8) * 255) << 8) | Math.round(f(4) * 255);
+}
 
 function noteName(pitch: number): string {
   return `${NOTE_NAMES[((pitch % 12) + 12) % 12]}${Math.floor(pitch / 12) - 1}`;
@@ -176,16 +193,60 @@ export class ModuleView extends Container {
     );
   }
 
+  /** Synth mode the face was built for — mode switch rebuilds the view. */
+  private builtSynthMode = -1;
+
+  /** Mode-scoped params (ParamSpec.group) filtered by the synth's mode. */
+  private visibleParams(): ParamSpec[] {
+    if (this.instance.type !== 'synth') return this.def.params;
+    const mode = SYNTH_MODES[Math.round(this.instance.params.mode ?? 0)] ?? 'classic';
+    return this.def.params.filter((p) => !p.group || p.group === mode);
+  }
+
+  /** True when the built face no longer matches the instance (synth mode switch). */
+  faceStale(): boolean {
+    return (
+      this.instance.type === 'synth' &&
+      Math.round(this.instance.params.mode ?? 0) !== this.builtSynthMode
+    );
+  }
+
   private buildFace(): void {
     let y = TITLE_H + 8;
     const x = 18;
     const w = this.def.width - 36;
 
-    for (const param of this.def.params) {
+    const params = this.def.customFace ? [] : this.visibleParams();
+    if (this.instance.type === 'synth' || this.def.twoColumn) {
+      if (this.instance.type === 'synth') {
+        this.builtSynthMode = Math.round(this.instance.params.mode ?? 0);
+      }
+      // Two columns — too many params for one.
+      const colW = (this.def.width - 48) / 2;
+      const half = Math.ceil(params.length / 2);
+      params.forEach((param, i) => {
+        const col = i < half ? 0 : 1;
+        const row = col === 0 ? i : i - half;
+        this.buildParamRow(param, 18 + col * (colW + 12), y + row * ROW_H, colW);
+      });
+      if (this.instance.type === 'synth' && this.builtSynthMode === 1) {
+        this.buildWavetableRow(x, this.def.height - 22, w);
+      }
+      if (this.instance.type === 'mbcomp') {
+        this.buildGrMeter(x, this.def.height - 16, w);
+      }
+      return;
+    }
+
+    for (const param of params) {
       this.buildParamRow(param, x, y, w);
       y += ROW_H;
     }
 
+    if (this.instance.type === 'peq') this.buildPeqFace(x, y + 2, w);
+    if (this.instance.type === 'midiIn' || this.instance.type === 'midiOut') {
+      this.buildMidiDeviceRow(x, this.def.height - 22, w);
+    }
     if (this.instance.type === 'keyboard') this.buildKeys(x, y + 2, w);
     if (this.instance.type === 'transport') this.buildTransportButtons(x, y + 4);
     if (
@@ -198,6 +259,910 @@ export class ModuleView extends Container {
     if (this.instance.type === 'sequencer') this.buildStepGrid(x, y + 4, w);
     if (this.instance.type === 'sampler') this.buildSamplerFace(x, y + 4, w);
     if (this.instance.type === 'recorder') this.buildRecorderFace(x, y + 4, w);
+    if (this.instance.type === 'drum') this.buildDrumFace(x, y + 4, w);
+    if (this.instance.type === 'compressor' || this.instance.type === 'limiter') {
+      this.buildGrMeter(x, this.def.height - 16, w);
+    }
+    if (this.instance.type === 'visualizer') this.buildVisFace(x, y + 4, w);
+    if (this.instance.type === 'composer') this.buildComposerFace(x, y + 4, w);
+  }
+
+  // -- composer face (PRD §8.3) --------------------------------------------------
+
+  private compSelPattern = 0;
+  private compSelTrack = 0;
+  private compG: Graphics | null = null;
+  private compRect = { x: 0, y: 0, w: 0 };
+  private compPatTexts: Text[] = [];
+  private compTrkTexts: Text[] = [];
+  private compSongTexts: Text[] = [];
+  private lastCompStep = -1;
+  private lastCompSlot = -1;
+
+  private static readonly COMP_ROWS = { pat: 0, trk: 26, step: 52, stepH: 70, song: 128, songH: 26 };
+
+  private compPatterns(): SeqStep[][][] {
+    return (this.instance.data?.patterns as SeqStep[][][]) ?? [];
+  }
+
+  private compSong(): number[] {
+    return (this.instance.data?.song as number[]) ?? [];
+  }
+
+  private buildComposerFace(x: number, y: number, w: number): void {
+    this.compRect = { x, y, w };
+    this.compG = new Graphics();
+    this.addChild(this.compG);
+
+    const R = ModuleView.COMP_ROWS;
+    const mkText = (text: string, cx: number, cy: number, list: Text[]) => {
+      const t = new Text({ text, style: { fontSize: 10, fill: theme.text } });
+      t.anchor.set(0.5);
+      t.position.set(cx, cy);
+      t.eventMode = 'none';
+      this.addChild(t);
+      list.push(t);
+    };
+    const patW = w / 8;
+    for (let i = 0; i < 8; i++) {
+      mkText('ABCDEFGH'[i], x + i * patW + patW / 2, y + R.pat + 11, this.compPatTexts);
+    }
+    const trkW = w / 4;
+    for (let i = 0; i < 4; i++) {
+      mkText(`T${i + 1}`, x + i * trkW + trkW / 2, y + R.trk + 11, this.compTrkTexts);
+    }
+    const slotW = w / 16;
+    for (let i = 0; i < 16; i++) {
+      mkText('·', x + i * slotW + slotW / 2, y + R.song + 13, this.compSongTexts);
+    }
+
+    const faceH = R.song + R.songH;
+    const hit = new Graphics().rect(x, y, w, faceH).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      const local = this.toLocal(e.global);
+      const ly = local.y - y;
+      const lx = Math.min(w - 1, Math.max(0, local.x - x));
+      if (ly < R.trk) {
+        this.compSelPattern = Math.min(7, Math.floor(lx / patW));
+        this.drawComposer();
+      } else if (ly < R.step) {
+        this.compSelTrack = Math.min(3, Math.floor(lx / trkW));
+        this.drawComposer();
+      } else if (ly < R.song) {
+        this.beginCompStepEdit(e);
+      } else {
+        // Song row: cycle empty → A…H → empty (one undo step per click).
+        const slot = Math.min(15, Math.floor(lx / slotW));
+        const song = [...this.compSong()];
+        song[slot] = song[slot] >= 7 ? -1 : (song[slot] ?? -1) + 1;
+        appState.beginUndoable();
+        appState.setModuleData(this.instance.id, 'song', song);
+        this.drawComposer();
+      }
+    });
+    hit.on('pointerover', (e) =>
+      this.tooltip.show(
+        ['Composer', 'Rows: pattern bank, track, step grid (drag = pitch), song slots (click to cycle).'],
+        e.clientX,
+        e.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+    this.drawComposer();
+  }
+
+  private beginCompStepEdit(e: FederatedPointerEvent): void {
+    const patterns = this.compPatterns();
+    const row = patterns[this.compSelPattern]?.[this.compSelTrack];
+    if (!row || row.length === 0) return;
+    appState.beginUndoable();
+    const { x, w } = this.compRect;
+    const local = this.toLocal(e.global);
+    const idx = Math.min(row.length - 1, Math.max(0, Math.floor(((local.x - x) / w) * row.length)));
+    const step = row[idx];
+    const startY = e.clientY;
+    const startPitch = step.pitch;
+    let moved = false;
+
+    const commit = () => {
+      appState.setModuleData(this.instance.id, 'patterns', [...patterns]);
+      this.drawComposer();
+    };
+    const onMove = (ev: PointerEvent) => {
+      const dy = startY - ev.clientY;
+      if (Math.abs(dy) > 3) moved = true;
+      if (!moved) return;
+      step.on = true;
+      step.pitch = Math.round(Math.min(SEQ_PITCH_MAX, Math.max(SEQ_PITCH_MIN, startPitch + dy / 4)));
+      this.tooltip.showNow([noteName(step.pitch)], ev.clientX, ev.clientY);
+      commit();
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      this.tooltip.hide();
+      if (!moved) {
+        step.on = !step.on;
+        commit();
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  private drawComposer(playStep = -1, playSlot = -1): void {
+    if (!this.compG) return;
+    const { x, y, w } = this.compRect;
+    const R = ModuleView.COMP_ROWS;
+    const g = this.compG;
+    g.clear();
+
+    const patW = w / 8;
+    for (let i = 0; i < 8; i++) {
+      const selected = i === this.compSelPattern;
+      g.roundRect(x + i * patW + 1, y + R.pat, patW - 2, 22, 3)
+        .fill(theme.inset)
+        .stroke({ width: selected ? 2 : 1, color: selected ? theme.selectedStroke : theme.moduleStroke });
+    }
+    const trkW = w / 4;
+    for (let i = 0; i < 4; i++) {
+      const selected = i === this.compSelTrack;
+      g.roundRect(x + i * trkW + 1, y + R.trk, trkW - 2, 22, 3)
+        .fill(theme.inset)
+        .stroke({ width: selected ? 2 : 1, color: selected ? theme.selectedStroke : theme.moduleStroke });
+    }
+
+    const row = this.compPatterns()[this.compSelPattern]?.[this.compSelTrack] ?? [];
+    const cellW = w / Math.max(1, row.length);
+    for (let i = 0; i < row.length; i++) {
+      const cx = x + i * cellW;
+      g.roundRect(cx + 1, y + R.step, cellW - 2, R.stepH, 2).fill(theme.inset);
+      if (i === playStep) {
+        g.roundRect(cx + 1, y + R.step, cellW - 2, R.stepH, 2).fill({ color: 0xffffff, alpha: 0.12 });
+      }
+      const step = row[i];
+      if (step?.on) {
+        const norm = (step.pitch - SEQ_PITCH_MIN) / (SEQ_PITCH_MAX - SEQ_PITCH_MIN);
+        const barH = 4 + norm * (R.stepH - 8);
+        g.roundRect(cx + 2, y + R.step + R.stepH - barH - 2, cellW - 4, barH, 2)
+          .fill(i === playStep ? 0x7fe9ff : 0x3dd9ff);
+      }
+    }
+
+    const song = this.compSong();
+    const slotW = w / 16;
+    for (let i = 0; i < 16; i++) {
+      g.roundRect(x + i * slotW + 1, y + R.song, slotW - 2, R.songH, 3)
+        .fill(i === playSlot ? theme.button : theme.inset);
+      const t = this.compSongTexts[i];
+      if (t) {
+        const v = song[i] ?? -1;
+        t.text = v >= 0 ? 'ABCDEFGH'[v] : '·';
+        t.style.fill = v >= 0 ? theme.text : theme.textDim;
+      }
+    }
+  }
+
+  // -- visualizer face (PRD §8.5) ----------------------------------------------
+
+  private visG: Graphics | null = null;
+  private visRect = { x: 0, y: 0, w: 0, h: 0 };
+  private visParticles: Array<{ x: number; y: number; vx: number; vy: number; life: number; hue: number }> = [];
+
+  private buildVisFace(x: number, y: number, w: number): void {
+    const h = this.def.height - y - 12;
+    this.visRect = { x, y, w, h };
+    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(0x0c0c12);
+    this.addChild(bg);
+    this.visG = new Graphics();
+    this.visG.eventMode = 'none';
+    this.addChild(this.visG);
+
+    const big = new Text({ text: '⛶', style: { fontSize: 14, fill: theme.textDim } });
+    big.anchor.set(1, 0);
+    big.position.set(x + w - 4, y + 4);
+    big.eventMode = 'static';
+    big.cursor = 'pointer';
+    big.on('pointerdown', (e) => {
+      e.stopPropagation();
+      appState.openVisualizer(this.instance.id);
+    });
+    big.on('pointerover', (e) =>
+      this.tooltip.show(['Big view', 'Opens the resizable visualizer window (fullscreen button inside).'], e.clientX, e.clientY),
+    );
+    big.on('pointerout', () => this.tooltip.hide());
+    this.addChild(big);
+  }
+
+  /** Shared scene renderer — the overlay duplicates this on a 2D canvas. */
+  private drawVisScene(): void {
+    if (!this.visG) return;
+    const data = appState.visData[this.instance.id];
+    const { x, y, w, h } = this.visRect;
+    const g = this.visG;
+    const scene = Math.round(this.instance.params.scene ?? 0);
+    const ctrl = data && data.ctrl >= 0 ? data.ctrl : 1;
+    const gain = (this.instance.params.gain ?? 1.5) * (0.3 + 0.7 * ctrl);
+    g.clear();
+    if (!data) return;
+
+    if (scene === 0) {
+      // Oscilloscope.
+      const mid = y + h / 2;
+      data.wave.forEach((v, i) => {
+        const px = x + (i / (data.wave.length - 1)) * w;
+        const py = mid - Math.max(-1, Math.min(1, v * gain)) * (h / 2 - 4);
+        if (i === 0) g.moveTo(px, py);
+        else g.lineTo(px, py);
+      });
+      g.stroke({ width: 1.5, color: 0x3dd9ff, alpha: 0.95 });
+    } else if (scene === 1) {
+      // Spectrum bars.
+      const n = data.spectrum.length;
+      const bw = w / n;
+      for (let b = 0; b < n; b++) {
+        const frac = Math.min(1, Math.max(0, (data.spectrum[b] + 80) / 80)) * Math.min(1, gain);
+        if (frac <= 0.01) continue;
+        g.roundRect(x + b * bw + 1, y + h - frac * (h - 6), bw - 2, frac * (h - 6), 1)
+          .fill({ color: 0xffb13d, alpha: 0.9 });
+      }
+    } else {
+      // Particles: notes spawn bursts, audio energy feeds drift speed.
+      let energy = 0;
+      for (const db of data.spectrum) energy = Math.max(energy, (db + 80) / 80);
+      for (const pitch of data.notes) {
+        const hue = ((pitch % 12) / 12) * 360;
+        for (let i = 0; i < 6; i++) {
+          this.visParticles.push({
+            x: x + w * ((pitch % 36) / 36),
+            y: y + h * 0.7,
+            vx: (Math.random() - 0.5) * 3,
+            vy: -1 - Math.random() * 2.5,
+            life: 1,
+            hue,
+          });
+        }
+      }
+      if (this.visParticles.length > 200) this.visParticles.splice(0, this.visParticles.length - 200);
+      const speed = 0.5 + energy * 2 * gain;
+      this.visParticles = this.visParticles.filter((p) => {
+        p.x += p.vx * speed;
+        p.y += p.vy * speed;
+        p.vy += 0.04;
+        p.life -= 0.02;
+        if (p.life <= 0 || p.x < x || p.x > x + w || p.y > y + h) return false;
+        const c = hslToHex(p.hue, 0.8, 0.6);
+        g.circle(p.x, p.y, 1.5 + p.life * 2.5).fill({ color: c, alpha: p.life });
+        return true;
+      });
+    }
+  }
+
+  // -- MIDI device row (midiIn/midiOut) ----------------------------------------
+
+  private midiDeviceText: Text | null = null;
+
+  private buildMidiDeviceRow(x: number, y: number, w: number): void {
+    this.midiDeviceText = new Text({ text: '', style: { fontSize: 10, fill: theme.textDim } });
+    this.midiDeviceText.position.set(x, y);
+    this.addChild(this.midiDeviceText);
+    this.updateMidiDeviceText();
+
+    const hit = new Graphics().rect(x - 4, y - 4, w + 8, 18).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      void appState.midi.init().then(() => {
+        const isIn = this.instance.type === 'midiIn';
+        const fallback = isIn ? 'all inputs' : 'first output';
+        const devices = [
+          { id: '', name: fallback },
+          ...(isIn ? appState.midi.inputs() : appState.midi.outputs()),
+        ];
+        const current = (this.instance.data?.deviceId as string) || '';
+        const idx = devices.findIndex((d) => d.id === current);
+        const next = devices[(idx + 1) % devices.length];
+        appState.setModuleData(this.instance.id, 'deviceId', next.id);
+        appState.setModuleData(this.instance.id, 'deviceName', next.name);
+        this.updateMidiDeviceText();
+      });
+    });
+    hit.on('pointerover', (e) =>
+      this.tooltip.show(
+        ['MIDI device', appState.midi.supported ? 'Click to cycle through available ports.' : 'WebMIDI not supported in this browser.'],
+        e.clientX,
+        e.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  private updateMidiDeviceText(): void {
+    if (!this.midiDeviceText) return;
+    const name = (this.instance.data?.deviceName as string) || 'default';
+    this.midiDeviceText.text = `dev: ${name}`;
+  }
+
+  // -- parametric EQ face (PRD §8.4: curve + dots + live spectrum) -------------
+
+  private static readonly PEQ_COLORS = [0xff5050, 0xffb13d, 0x52e07a, 0x3dd9ff, 0xb070ff, 0xff3dd0];
+
+  private peqPlot: Graphics | null = null;
+  private peqSpectrumG: Graphics | null = null;
+  private peqDots: Graphics[] = [];
+  private peqRect = { x: 0, y: 0, w: 0, h: 0 };
+  private lastSpectrum: number[] | null = null;
+
+  private peqFreqToX(f: number): number {
+    const { x, w } = this.peqRect;
+    return x + (Math.log10(Math.max(20, f) / 20) / 3) * w;
+  }
+
+  private peqGainToY(db: number): number {
+    const { y, h } = this.peqRect;
+    return y + h / 2 - (db / 18) * (h / 2);
+  }
+
+  private buildPeqFace(x: number, y: number, w: number): void {
+    const h = this.def.height - y - 14;
+    this.peqRect = { x, y, w, h };
+
+    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(theme.inset);
+    this.addChild(bg);
+    this.peqSpectrumG = new Graphics();
+    this.addChild(this.peqSpectrumG);
+    this.peqPlot = new Graphics();
+    this.peqPlot.eventMode = 'none';
+    this.addChild(this.peqPlot);
+
+    for (let n = 1; n <= 6; n++) {
+      const dot = new Graphics();
+      dot.circle(0, 0, 6).fill(ModuleView.PEQ_COLORS[n - 1]).stroke({ width: 1.5, color: 0x16161c });
+      dot.eventMode = 'static';
+      dot.cursor = 'move';
+      dot.hitArea = { contains: (px: number, py: number) => px * px + py * py < 14 * 14 };
+      dot.on('pointerdown', (e) => {
+        e.stopPropagation();
+        this.beginPeqBandDrag(n, e);
+      });
+      dot.on('pointerover', (e) => {
+        const p = this.instance.params;
+        this.tooltip.show(
+          [`Band ${n}: ${this.peqBandLabel(n)}`,
+            `${Math.round(p[`b${n}freq`])} Hz, ${p[`b${n}gain`].toFixed(1)} dB, Q ${p[`b${n}q`].toFixed(2)}. Drag: freq/gain. Shift-drag: Q. Click: type.`],
+          e.clientX,
+          e.clientY,
+        );
+      });
+      dot.on('pointerout', () => this.tooltip.hide());
+      this.addChild(dot);
+      this.peqDots.push(dot);
+    }
+    this.drawPeqCurve();
+  }
+
+  private peqBandLabel(n: number): string {
+    const types = ['peak', 'lo-shelf', 'hi-shelf', 'lo-cut', 'hi-cut'];
+    return types[Math.round(this.instance.params[`b${n}type`] ?? 0)] ?? 'peak';
+  }
+
+  private beginPeqBandDrag(n: number, e: FederatedPointerEvent): void {
+    appState.beginUndoable();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const p = this.instance.params;
+    const startFreq = p[`b${n}freq`] ?? 1000;
+    const startGain = p[`b${n}gain`] ?? 0;
+    const startQ = p[`b${n}q`] ?? 0.9;
+    let moved = false;
+
+    const onMove = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+      if (!moved) return;
+      if (ev.shiftKey) {
+        const q = Math.min(8, Math.max(0.3, startQ * Math.pow(2, -dy / 60)));
+        appState.setParam(this.instance.id, `b${n}q`, q);
+        this.tooltip.showNow([`Q ${q.toFixed(2)}`], ev.clientX, ev.clientY);
+      } else {
+        const freq = Math.min(20000, Math.max(20, startFreq * Math.pow(10, (dx / this.peqRect.w) * 3)));
+        const gain = Math.min(18, Math.max(-18, startGain - (dy / (this.peqRect.h / 2)) * 18));
+        appState.setParam(this.instance.id, `b${n}freq`, freq);
+        appState.setParam(this.instance.id, `b${n}gain`, gain);
+        this.tooltip.showNow([`${Math.round(freq)} Hz  ${gain.toFixed(1)} dB`], ev.clientX, ev.clientY);
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      this.tooltip.hide();
+      if (!moved) {
+        const next = (Math.round(this.instance.params[`b${n}type`] ?? 0) + 1) % 5;
+        appState.setParam(this.instance.id, `b${n}type`, next);
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  /** Grid + combined response curve + dot positions. Called on param changes. */
+  private drawPeqCurve(): void {
+    if (!this.peqPlot) return;
+    const { x, y, w, h } = this.peqRect;
+    const g = this.peqPlot;
+    const sr = appState.engine.sampleRate;
+    g.clear();
+
+    for (const f of [100, 1000, 10000]) {
+      const gx = this.peqFreqToX(f);
+      g.moveTo(gx, y).lineTo(gx, y + h);
+    }
+    g.moveTo(x, y + h / 2).lineTo(x + w, y + h / 2);
+    g.stroke({ width: 1, color: 0xffffff, alpha: 0.08 });
+
+    const p = this.instance.params;
+    const bands = [];
+    for (let n = 1; n <= 6; n++) {
+      bands.push(
+        bandCoefs(
+          Math.round(p[`b${n}type`] ?? 0) as 0 | 1 | 2 | 3 | 4,
+          p[`b${n}freq`] ?? 1000,
+          p[`b${n}gain`] ?? 0,
+          p[`b${n}q`] ?? 0.9,
+          sr,
+        ),
+      );
+    }
+    let first = true;
+    for (let px = 0; px <= w; px += 3) {
+      const f = 20 * Math.pow(10, (3 * px) / w);
+      const db = Math.min(18, Math.max(-18, chainResponseDb(bands, f, sr)));
+      const gy = this.peqGainToY(db);
+      if (first) {
+        g.moveTo(x + px, gy);
+        first = false;
+      } else {
+        g.lineTo(x + px, gy);
+      }
+    }
+    g.stroke({ width: 2, color: 0xffb13d, alpha: 0.95 });
+
+    this.peqDots.forEach((dot, i) => {
+      const n = i + 1;
+      dot.position.set(
+        this.peqFreqToX(p[`b${n}freq`] ?? 1000),
+        this.peqGainToY(Math.min(18, Math.max(-18, p[`b${n}gain`] ?? 0))),
+      );
+    });
+  }
+
+  private drawPeqSpectrum(spectrum: number[]): void {
+    if (!this.peqSpectrumG) return;
+    const { x, y, w, h } = this.peqRect;
+    const g = this.peqSpectrumG;
+    g.clear();
+    g.moveTo(x, y + h);
+    spectrum.forEach((db, b) => {
+      const frac = Math.min(1, Math.max(0, (db + 80) / 80));
+      g.lineTo(x + ((b + 0.5) / spectrum.length) * w, y + h - frac * h);
+    });
+    g.lineTo(x + w, y + h);
+    g.closePath();
+    g.fill({ color: 0x3dd9ff, alpha: 0.16 });
+  }
+
+  // -- gain-reduction meter (compressor/limiter, PRD §8.4) ---------------------
+
+  private grBar: Graphics | null = null;
+  private grRect = { x: 0, y: 0, w: 0 };
+
+  private buildGrMeter(x: number, y: number, w: number): void {
+    const label = new Text({ text: 'GR', style: { fontSize: 9, fill: theme.textDim } });
+    label.position.set(x, y - 1);
+    this.addChild(label);
+    const bg = new Graphics().roundRect(x + 20, y, w - 20, 8, 3).fill(theme.inset);
+    this.addChild(bg);
+    this.grBar = new Graphics();
+    this.addChild(this.grBar);
+    this.grRect = { x: x + 20, y, w: w - 20 };
+  }
+
+  // -- drum machine face -----------------------------------------------------
+
+  private drumSel = 0;
+  private drumPadsG: Graphics | null = null;
+  private drumStepsG: Graphics | null = null;
+  private drumPadLabels: Text[] = [];
+  private drumNameText: Text | null = null;
+  private drumRowTexts = new Map<string, Text>();
+  private drumPadGridRect = { x: 0, y: 0, cell: 0, gap: 0 };
+  private drumStepRect = { x: 0, y: 0, w: 0, h: 0 };
+  private lastDrumStep = -1;
+
+  private static readonly DRUM_PAD_FIELDS: Array<{
+    id: string;
+    label: string;
+    min: number;
+    max: number;
+    options?: string[];
+  }> = [
+    { id: 'level', label: 'Level', min: 0, max: 1 },
+    { id: 'pan', label: 'Pan', min: -1, max: 1 },
+    { id: 'pitch', label: 'Pitch', min: -12, max: 12 },
+    { id: 'choke', label: 'Choke', min: 0, max: 4, options: ['off', '1', '2', '3', '4'] },
+    { id: 'attack', label: 'Attack', min: 0.0005, max: 0.1 },
+    { id: 'decay', label: 'Decay', min: 0.02, max: DRUM_DECAY_MAX },
+  ];
+
+  private drumPads(): DrumPad[] {
+    return (this.instance.data?.pads as DrumPad[]) ?? [];
+  }
+
+  private drumPattern(): DrumStep[][] {
+    return (this.instance.data?.pattern as DrumStep[][]) ?? [];
+  }
+
+  private buildDrumFace(x: number, y: number, w: number): void {
+    const cell = 35;
+    const gap = 3;
+    const gridSize = 4 * cell + 3 * gap;
+    this.drumPadGridRect = { x, y, cell, gap };
+
+    this.drumPadsG = new Graphics();
+    this.addChild(this.drumPadsG);
+    for (let i = 0; i < DRUM_PADS; i++) {
+      const t = new Text({ text: '', style: { fontSize: 8, fill: theme.text } });
+      t.anchor.set(0.5);
+      t.position.set(
+        x + (i % 4) * (cell + gap) + cell / 2,
+        y + Math.floor(i / 4) * (cell + gap) + cell / 2,
+      );
+      t.eventMode = 'none';
+      this.addChild(t);
+      this.drumPadLabels.push(t);
+    }
+    const padHit = new Graphics().rect(x, y, gridSize, gridSize).fill({ color: 0xffffff, alpha: 0.001 });
+    padHit.eventMode = 'static';
+    padHit.cursor = 'pointer';
+    padHit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      const local = this.toLocal(e.global);
+      const col = Math.min(3, Math.max(0, Math.floor((local.x - x) / (cell + gap))));
+      const row = Math.min(3, Math.max(0, Math.floor((local.y - y) / (cell + gap))));
+      this.drumSel = row * 4 + col;
+      appState.padTrigger(this.instance.id, this.drumSel);
+      this.refreshDrumFace();
+    });
+    padHit.on('pointerover', (e) =>
+      this.tooltip.show(['Pads', 'Click: select + audition. Steps and pad controls follow the selected pad.'], e.clientX, e.clientY),
+    );
+    padHit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(padHit);
+
+    // Right column: selected pad name (click to load a sample) + pad controls.
+    const colX = x + gridSize + 8;
+    const colW = w - gridSize - 8;
+    this.drumNameText = new Text({ text: '', style: { fontSize: 11, fill: theme.text, fontWeight: 'bold' } });
+    this.drumNameText.position.set(colX, y);
+    this.addChild(this.drumNameText);
+    const loadHit = new Graphics().rect(colX - 2, y - 2, colW + 4, 18).fill({ color: 0xffffff, alpha: 0.001 });
+    loadHit.eventMode = 'static';
+    loadHit.cursor = 'pointer';
+    loadHit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'audio/*';
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (file) void appState.loadSampleFile(this.instance.id, file, this.drumSel);
+      };
+      input.click();
+    });
+    loadHit.on('pointerover', (e) =>
+      this.tooltip.show(['Pad sample', 'Click to load an audio file onto the selected pad.'], e.clientX, e.clientY),
+    );
+    loadHit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(loadHit);
+
+    // ✎ opens the Sample Editor for the selected pad (sits above loadHit).
+    const editBtn = new Text({ text: '✎', style: { fontSize: 12, fill: theme.textDim } });
+    editBtn.anchor.set(1, 0);
+    editBtn.position.set(colX + colW, y);
+    editBtn.eventMode = 'static';
+    editBtn.cursor = 'pointer';
+    editBtn.on('pointerdown', (e) => {
+      e.stopPropagation();
+      appState.openSampleEditor(this.instance.id, this.drumSel);
+    });
+    editBtn.on('pointerover', (e) =>
+      this.tooltip.show(['Sample Editor', 'Edit the selected pad: trim, normalize, fades…'], e.clientX, e.clientY),
+    );
+    editBtn.on('pointerout', () => this.tooltip.hide());
+    this.addChild(editBtn);
+
+    let rowY = y + 22;
+    for (const field of ModuleView.DRUM_PAD_FIELDS) {
+      this.buildDrumPadRow(field, colX, rowY, colW);
+      rowY += ROW_H;
+    }
+
+    // Step row for the selected pad.
+    const stepY = y + gridSize + 6;
+    this.drumStepRect = { x, y: stepY, w, h: 32 };
+    this.drumStepsG = new Graphics();
+    this.addChild(this.drumStepsG);
+    const stepHit = new Graphics().rect(x, stepY, w, 32).fill({ color: 0xffffff, alpha: 0.001 });
+    stepHit.eventMode = 'static';
+    stepHit.cursor = 'pointer';
+    stepHit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      this.beginDrumStepEdit(e);
+    });
+    stepHit.on('pointerover', (e) =>
+      this.tooltip.show(['Steps (selected pad)', 'Click: toggle step. Drag up/down: set velocity.'], e.clientX, e.clientY),
+    );
+    stepHit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(stepHit);
+
+    this.refreshDrumFace();
+  }
+
+  private buildDrumPadRow(
+    field: { id: string; label: string; min: number; max: number; options?: string[] },
+    x: number,
+    y: number,
+    w: number,
+  ): void {
+    const label = new Text({ text: field.label, style: { fontSize: 11, fill: theme.textDim } });
+    label.position.set(x, y + 3);
+    this.addChild(label);
+
+    const value = new Text({ text: '', style: { fontSize: 11, fill: theme.text } });
+    value.anchor.set(1, 0);
+    value.position.set(x + w, y + 3);
+    this.addChild(value);
+    this.drumRowTexts.set(field.id, value);
+
+    const hit = new Graphics().rect(x - 4, y, w + 8, ROW_H).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'ew-resize';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      this.beginDrumPadRowDrag(field, e);
+    });
+    hit.on('pointerover', (e) =>
+      this.tooltip.show(
+        [`${field.label}: ${this.formatDrumField(field)}`,
+          field.options ? 'Click to cycle' : `Drag to change (${field.min}–${field.max})`],
+        e.clientX,
+        e.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  private drumFieldValue(id: string): number {
+    const pad = this.drumPads()[this.drumSel] as unknown as Record<string, number> | undefined;
+    return pad?.[id] ?? 0;
+  }
+
+  private commitDrumField(id: string, v: number): void {
+    const pads = [...this.drumPads()];
+    const cur = pads[this.drumSel];
+    if (!cur) return;
+    pads[this.drumSel] = { ...cur, [id]: v };
+    appState.setModuleData(this.instance.id, 'pads', pads);
+  }
+
+  private beginDrumPadRowDrag(
+    field: { id: string; label: string; min: number; max: number; options?: string[] },
+    e: FederatedPointerEvent,
+  ): void {
+    appState.beginUndoable();
+    const startX = e.clientX;
+    const startValue = this.drumFieldValue(field.id);
+    let moved = false;
+
+    const onMove = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      if (Math.abs(dx) > 2) moved = true;
+      if (field.options) return;
+      const range = field.max - field.min;
+      let v = startValue + (dx / 150) * range;
+      v = Math.min(field.max, Math.max(field.min, v));
+      if (field.id === 'pitch') v = Math.round(v);
+      this.commitDrumField(field.id, v);
+      this.updateDrumRowText(field);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      if (!moved && field.options) {
+        const next = (Math.round(this.drumFieldValue(field.id)) + 1) % field.options.length;
+        this.commitDrumField(field.id, next);
+        this.updateDrumRowText(field);
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  private formatDrumField(field: { id: string; min: number; max: number; options?: string[] }): string {
+    const v = this.drumFieldValue(field.id);
+    if (field.options) return field.options[Math.round(v)] ?? String(v);
+    if (field.id === 'pitch') return `${v > 0 ? '+' : ''}${Math.round(v)} st`;
+    if (field.id === 'decay' && v >= DRUM_DECAY_MAX) return 'full';
+    return Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+  }
+
+  private updateDrumRowText(field: { id: string; min: number; max: number; options?: string[] }): void {
+    const t = this.drumRowTexts.get(field.id);
+    if (t) t.text = this.formatDrumField(field);
+  }
+
+  private beginDrumStepEdit(e: FederatedPointerEvent): void {
+    const pattern = this.drumPattern();
+    const row = pattern[this.drumSel];
+    if (!row || row.length === 0) return;
+    appState.beginUndoable();
+    const local = this.toLocal(e.global);
+    const { x, w } = this.drumStepRect;
+    const idx = Math.min(row.length - 1, Math.max(0, Math.floor(((local.x - x) / w) * row.length)));
+    const step = row[idx];
+    const startY = e.clientY;
+    const startVel = step.vel;
+    let moved = false;
+
+    const commit = () => {
+      appState.setModuleData(this.instance.id, 'pattern', [...pattern]);
+      this.drawDrumSteps(this.lastDrumStep);
+    };
+    const onMove = (ev: PointerEvent) => {
+      const dy = startY - ev.clientY;
+      if (Math.abs(dy) > 3) moved = true;
+      if (!moved) return;
+      step.on = true;
+      step.vel = Math.min(1, Math.max(0.05, startVel + dy / 60));
+      this.tooltip.showNow([`vel ${Math.round(step.vel * 100)}%`], ev.clientX, ev.clientY);
+      commit();
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      this.tooltip.hide();
+      if (!moved) {
+        step.on = !step.on;
+        commit();
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  private drawDrumPads(): void {
+    if (!this.drumPadsG) return;
+    const { x, y, cell, gap } = this.drumPadGridRect;
+    const pads = this.drumPads();
+    const g = this.drumPadsG;
+    g.clear();
+    for (let i = 0; i < DRUM_PADS; i++) {
+      const cx = x + (i % 4) * (cell + gap);
+      const cy = y + Math.floor(i / 4) * (cell + gap);
+      const loaded = appState.samples.has(sampleKey(this.instance.id, i));
+      const selected = i === this.drumSel;
+      g.roundRect(cx, cy, cell, cell, 4)
+        .fill(loaded ? theme.button : theme.inset)
+        .stroke({ width: selected ? 2 : 1, color: selected ? theme.selectedStroke : theme.moduleStroke });
+      const label = this.drumPadLabels[i];
+      if (label) {
+        label.text = pads[i]?.name?.slice(0, 5) ?? '';
+        label.style.fill = loaded ? theme.text : theme.textDim;
+      }
+    }
+  }
+
+  private drawDrumSteps(playhead = -1): void {
+    if (!this.drumStepsG) return;
+    const { x, y, w, h } = this.drumStepRect;
+    const row = this.drumPattern()[this.drumSel] ?? [];
+    if (row.length === 0) return;
+    const cellW = w / row.length;
+    const g = this.drumStepsG;
+    g.clear();
+    for (let i = 0; i < row.length; i++) {
+      const cx = x + i * cellW;
+      g.roundRect(cx + 1, y, cellW - 2, h, 2).fill(theme.inset);
+      if (i % 4 === 0) {
+        g.rect(cx + 1, y, 2, h).fill({ color: 0xffffff, alpha: 0.08 });
+      }
+      if (i === playhead) {
+        g.roundRect(cx + 1, y, cellW - 2, h, 2).fill({ color: 0xffffff, alpha: 0.12 });
+      }
+      const step = row[i];
+      if (step?.on) {
+        const barH = 4 + step.vel * (h - 8);
+        g.roundRect(cx + 2, y + h - barH - 2, cellW - 4, barH, 2)
+          .fill(i === playhead ? 0x7fe9ff : 0x3dd9ff);
+      }
+    }
+  }
+
+  /** Drum pad index at module-local coords (sample-library drops), else null. */
+  padIndexAt(localX: number, localY: number): number | null {
+    if (this.instance.type !== 'drum' || !this.drumPadsG) return null;
+    const { x, y, cell, gap } = this.drumPadGridRect;
+    const pitch = cell + gap;
+    const col = Math.floor((localX - x) / pitch);
+    const row = Math.floor((localY - y) / pitch);
+    if (col < 0 || col > 3 || row < 0 || row > 3) return null;
+    if (localX - x - col * pitch > cell || localY - y - row * pitch > cell) return null; // in the gap
+    return row * 4 + col;
+  }
+
+  /** Currently selected drum pad (drop fallback when not over the grid). */
+  get selectedPad(): number {
+    return this.drumSel;
+  }
+
+  private refreshDrumFace(): void {
+    if (!this.drumPadsG) return;
+    this.drawDrumPads();
+    this.drawDrumSteps(this.lastDrumStep);
+    if (this.drumNameText) {
+      const pad = this.drumPads()[this.drumSel];
+      this.drumNameText.text = `${this.drumSel + 1}: ${pad?.name ?? ''}`;
+    }
+    for (const field of ModuleView.DRUM_PAD_FIELDS) this.updateDrumRowText(field);
+  }
+
+  // -- synth wavetable loader --------------------------------------------------
+
+  private wtRowText: Text | null = null;
+
+  private buildWavetableRow(x: number, y: number, w: number): void {
+    this.wtRowText = new Text({ text: '', style: { fontSize: 10, fill: theme.textDim } });
+    this.wtRowText.position.set(x, y);
+    this.addChild(this.wtRowText);
+    this.updateWtRowText();
+
+    const hit = new Graphics().rect(x - 4, y - 4, w + 8, 18).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'audio/*';
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (file) void appState.loadSampleFile(this.instance.id, file);
+      };
+      input.click();
+    });
+    hit.on('pointerover', (e) =>
+      this.tooltip.show(
+        ['Wavetable', 'Click to load a wavetable file (2048-sample frames; short files become one cycle).'],
+        e.clientX,
+        e.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  private updateWtRowText(): void {
+    if (!this.wtRowText) return;
+    const name = (this.instance.data?.sampleName as string) || '';
+    this.wtRowText.text = name ? `WT: ${name}` : 'WT: built-in table — click to load';
   }
 
   // -- recorder face -----------------------------------------------------------
@@ -272,6 +1237,20 @@ export class ModuleView extends Container {
       style: { fontSize: 10, fill: theme.textDim },
     });
     this.sampleNameText.position.set(x, y + h + 6);
+    // Loaded sample's name opens the Sample Editor (PRD §8.2).
+    this.sampleNameText.eventMode = 'static';
+    this.sampleNameText.cursor = 'pointer';
+    this.sampleNameText.on('pointerdown', (e) => {
+      if (!appState.samples.has(this.instance.id)) return; // falls through to file load
+      e.stopPropagation();
+      appState.openSampleEditor(this.instance.id);
+    });
+    this.sampleNameText.on('pointerover', (e) => {
+      if (appState.samples.has(this.instance.id)) {
+        this.tooltip.show(['Sample Editor', 'Click to edit: trim, normalize, loop points…'], e.clientX, e.clientY);
+      }
+    });
+    this.sampleNameText.on('pointerout', () => this.tooltip.hide());
     this.addChild(this.sampleNameText);
 
     const hit = new Graphics().rect(x, y, w, h).fill({ color: 0xffffff, alpha: 0.001 });
@@ -301,6 +1280,8 @@ export class ModuleView extends Container {
   }
 
   refreshSample(): void {
+    if (this.drumPadsG) this.refreshDrumFace();
+    this.updateWtRowText();
     if (!this.waveform) return;
     const { x, y, w, h } = this.waveRect;
     const g = this.waveform;
@@ -457,17 +1438,21 @@ export class ModuleView extends Container {
     hit.cursor = 'ew-resize';
     hit.on('pointerdown', (e) => {
       e.stopPropagation();
+      if (e.altKey) {
+        // MIDI learn (PRD Phase 2): alt-click a param, then move a hardware CC.
+        appState.armMidiLearn(this.instance.id, param.id);
+        return;
+      }
       this.beginParamDrag(param, e);
     });
     hit.on('pointerover', (e) => {
-      const mod = appState.graph.modules.get(this.instance.id);
       this.tooltip.show(
         [`${param.label}: ${this.formatParam(param)}`,
-          param.options ? 'Click to cycle' : `Drag to change (${param.min}–${param.max}${param.unit ?? ''})`],
+          (param.options ? 'Click to cycle' : `Drag to change (${param.min}–${param.max}${param.unit ?? ''})`) +
+            '. Alt-click: MIDI learn.'],
         e.clientX,
         e.clientY,
       );
-      void mod;
     });
     hit.on('pointerout', () => this.tooltip.hide());
     this.addChild(hit);
@@ -516,6 +1501,7 @@ export class ModuleView extends Container {
 
   refreshParams(): void {
     for (const p of this.def.params) this.updateParamText(p);
+    if (this.instance.type === 'peq') this.drawPeqCurve();
   }
 
   // -- type-specific faces --------------------------------------------------
@@ -604,6 +1590,47 @@ export class ModuleView extends Container {
       if (current !== this.lastDrawnStep) {
         this.lastDrawnStep = current;
         this.drawStepGrid(current);
+      }
+    }
+    if (this.visG) this.drawVisScene();
+    if (this.compG) {
+      let step = -1;
+      let slot = -1;
+      if (appState.transport.playing) {
+        const pos = appState.transport.songPosition;
+        step = Math.floor(pos * 4) % 16;
+        slot = Math.floor(pos / 4) % Math.max(1, this.compSong().length);
+      }
+      if (step !== this.lastCompStep || slot !== this.lastCompSlot) {
+        this.lastCompStep = step;
+        this.lastCompSlot = slot;
+        this.drawComposer(step, slot);
+      }
+    }
+    if (this.peqSpectrumG) {
+      const spectrum = appState.spectra[this.instance.id];
+      if (spectrum && spectrum !== this.lastSpectrum) {
+        this.lastSpectrum = spectrum;
+        this.drawPeqSpectrum(spectrum);
+      }
+    }
+    if (this.grBar) {
+      // Gain reduction grows right-to-left, red, scaled to 24 dB full width.
+      const gr = appState.gainReduction[this.instance.id] ?? 0;
+      const w = Math.min(1, gr / 24) * this.grRect.w;
+      this.grBar.clear();
+      if (w > 0.5) {
+        this.grBar
+          .roundRect(this.grRect.x + this.grRect.w - w, this.grRect.y, w, 8, 3)
+          .fill(0xff5050);
+      }
+    }
+    if (this.drumStepsG) {
+      const step = appState.seqSteps[this.instance.id] ?? -1;
+      const current = appState.transport.playing ? step : -1;
+      if (current !== this.lastDrumStep) {
+        this.lastDrumStep = current;
+        this.drawDrumSteps(current);
       }
     }
     if (!this.meterBar) return;

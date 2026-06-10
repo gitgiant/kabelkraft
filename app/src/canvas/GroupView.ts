@@ -9,7 +9,7 @@ import { Container, FederatedPointerEvent, Graphics, Text } from 'pixi.js';
 import type { ModuleGroup } from '../core/graph';
 import { PORT_TYPE_COLORS, type PortType } from '../core/types';
 import { appState } from '../state';
-import { theme } from '../theme';
+import { nextGroupColor, theme } from '../theme';
 import { PORT_RADIUS } from './ModuleView';
 import type { Tooltip } from './Tooltip';
 
@@ -92,6 +92,36 @@ export class GroupView extends Container {
     title.position.set(8, 5);
     title.eventMode = 'none';
     this.addChild(title);
+
+    // Rename (✎) and recolor (⬤ cycles the palette) — PRD §6.
+    const rename = new Text({ text: '✎', style: { fontSize: 11, fill: theme.textDim } });
+    rename.anchor.set(1, 0);
+    rename.position.set(w - 24, 6);
+    rename.eventMode = 'static';
+    rename.cursor = 'pointer';
+    rename.on('pointerdown', (e) => {
+      e.stopPropagation();
+      const name = window.prompt('Group name', this.group.name);
+      if (name !== null) appState.renameGroup(this.group.id, name);
+    });
+    rename.on('pointerover', (e) => this.tooltip.show(['Rename group'], e.clientX, e.clientY));
+    rename.on('pointerout', () => this.tooltip.hide());
+    this.addChild(rename);
+
+    const swatch = new Graphics()
+      .circle(0, 0, 5)
+      .fill(this.group.color ?? theme.groupStroke)
+      .stroke({ width: 1, color: 0x16161c });
+    swatch.position.set(w - 10, 12);
+    swatch.eventMode = 'static';
+    swatch.cursor = 'pointer';
+    swatch.on('pointerdown', (e) => {
+      e.stopPropagation();
+      appState.recolorGroup(this.group.id, nextGroupColor(this.group.color));
+    });
+    swatch.on('pointerover', (e) => this.tooltip.show(['Recolor group', 'Click to cycle colors.'], e.clientX, e.clientY));
+    swatch.on('pointerout', () => this.tooltip.hide());
+    this.addChild(swatch);
 
     const place = (ports: BoundaryPort[], x: number) => {
       ports.forEach((port, i) => {

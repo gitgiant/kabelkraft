@@ -2,9 +2,13 @@
   import { onMount } from 'svelte';
   import { patchCanvas } from './canvas/PatchCanvas';
   import { appState } from './state';
+  import AiImport from './ui/AiImport.svelte';
   import ModulePalette from './ui/ModulePalette.svelte';
+  import SampleEditor from './ui/SampleEditor.svelte';
+  import SampleLibrary from './ui/SampleLibrary.svelte';
   import Toolbar from './ui/Toolbar.svelte';
   import Tutorial from './ui/Tutorial.svelte';
+  import VisualizerOverlay from './ui/VisualizerOverlay.svelte';
 
   let canvasContainer: HTMLDivElement;
 
@@ -75,8 +79,12 @@
   <div class="main">
     <ModulePalette />
     <div class="canvas-container" bind:this={canvasContainer}></div>
+    <SampleLibrary />
     <Tutorial />
   </div>
+  <SampleEditor />
+  <VisualizerOverlay />
+  <AiImport />
 </div>
 
 <style>

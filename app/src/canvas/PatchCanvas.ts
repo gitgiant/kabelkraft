@@ -9,7 +9,7 @@ import { Application, Container, FederatedPointerEvent, Graphics, Text } from 'p
 import type { ModuleGroup, PortRef, Wire } from '../core/graph';
 import { PORT_TYPE_COLORS } from '../core/types';
 import { appState } from '../state';
-import { onThemeChange, theme } from '../theme';
+import { nextGroupColor, onThemeChange, theme } from '../theme';
 import { GroupView, type BoundaryPort } from './GroupView';
 import { ModuleView } from './ModuleView';
 import { Tooltip } from './Tooltip';
@@ -28,6 +28,8 @@ interface ExpandedFrame {
   group: ModuleGroup;
   g: Graphics;
   title: Text;
+  rename: Text;
+  swatch: Graphics;
 }
 
 export class PatchCanvas {
@@ -79,6 +81,16 @@ export class PatchCanvas {
     appState.on('graphChanged', () => this.syncViews());
     appState.on('projectLoaded', () => this.rebuildAll());
     appState.on('paramChanged', () => {
+      // A synth whose mode changed needs a fresh face (mode-scoped params).
+      let rebuilt = false;
+      for (const [id, v] of [...this.views]) {
+        if (v.faceStale()) {
+          v.destroy({ children: true });
+          this.views.delete(id);
+          rebuilt = true;
+        }
+      }
+      if (rebuilt) this.syncViews();
       for (const v of this.views.values()) v.refreshParams();
     });
     appState.on('sampleLoaded', () => {
@@ -114,6 +126,42 @@ export class PatchCanvas {
         appState.groupSelection();
       }
     }
+  }
+
+  /**
+   * Sample-library drop target at a client point: a Sampler, or a Drum
+   * Machine pad (specific pad when the point is over the pad grid,
+   * otherwise the pad currently selected on the module).
+   */
+  dropTargetAt(clientX: number, clientY: number): { moduleId: string; pad?: number } | null {
+    const rect = this.app.canvas.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+      return null;
+    }
+    const wx = (clientX - rect.left - this.world.position.x) / this.world.scale.x;
+    const wy = (clientY - rect.top - this.world.position.y) / this.world.scale.y;
+    for (const [id, view] of this.views) {
+      if (!view.visible) continue;
+      const lx = wx - view.position.x;
+      const ly = wy - view.position.y;
+      if (lx < 0 || ly < 0 || lx > view.def.width || ly > view.def.height) continue;
+      if (view.instance.type === 'sampler') return { moduleId: id };
+      if (view.instance.type === 'drum') {
+        return { moduleId: id, pad: view.padIndexAt(lx, ly) ?? view.selectedPad };
+      }
+    }
+    return null;
+  }
+
+  /** Client-space center of a module tile — canvas e2e drive their mouse with this. */
+  clientPointFor(moduleId: string): { x: number; y: number } | null {
+    const view = this.views.get(moduleId);
+    if (!view) return null;
+    const rect = this.app.canvas.getBoundingClientRect();
+    return {
+      x: rect.left + this.world.position.x + (view.position.x + view.def.width / 2) * this.world.scale.x,
+      y: rect.top + this.world.position.y + (view.position.y + view.def.height / 2) * this.world.scale.y,
+    };
   }
 
   /** World coordinates of the current view center — used to place new modules. */
@@ -159,6 +207,8 @@ export class PatchCanvas {
     for (const frame of this.frames.values()) {
       frame.g.destroy();
       frame.title.destroy();
+      frame.rename.destroy();
+      frame.swatch.destroy();
     }
     this.frames.clear();
 
@@ -182,9 +232,26 @@ export class PatchCanvas {
         title.eventMode = 'static';
         title.cursor = 'pointer';
         title.on('pointertap', () => appState.toggleGroupCollapsed(group.id));
+        // Rename + recolor on the frame title row (PRD §6).
+        const rename = new Text({ text: '✎', style: { fontSize: 11, fill: theme.textDim } });
+        rename.eventMode = 'static';
+        rename.cursor = 'pointer';
+        rename.on('pointertap', () => {
+          const name = window.prompt('Group name', group.name);
+          if (name !== null) appState.renameGroup(group.id, name);
+        });
+        const swatch = new Graphics()
+          .circle(0, 0, 5)
+          .fill(group.color ?? theme.groupStroke)
+          .stroke({ width: 1, color: 0x16161c });
+        swatch.eventMode = 'static';
+        swatch.cursor = 'pointer';
+        swatch.on('pointertap', () => appState.recolorGroup(group.id, nextGroupColor(group.color)));
         this.frameLayer.addChild(g);
         this.frameLayer.addChild(title);
-        this.frames.set(group.id, { group, g, title });
+        this.frameLayer.addChild(rename);
+        this.frameLayer.addChild(swatch);
+        this.frames.set(group.id, { group, g, title, rename, swatch });
       }
     }
 
@@ -534,7 +601,7 @@ export class PatchCanvas {
   }
 
   private drawFrames(): void {
-    for (const { group, g, title } of this.frames.values()) {
+    for (const { group, g, title, rename, swatch } of this.frames.values()) {
       // Bounding box over visible member views (modules + nested group tiles).
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       const include = (x: number, y: number, w: number, h: number) => {
@@ -561,6 +628,8 @@ export class PatchCanvas {
         .fill({ color: group.color ?? theme.frameFill, alpha: 0.35 })
         .stroke({ width: 1.5, color: group.color ?? theme.groupStroke, alpha: 0.8 });
       title.position.set(minX - pad + 10, minY - pad - 10);
+      rename.position.set(title.position.x + title.width + 10, title.position.y + 1);
+      swatch.position.set(rename.position.x + 18, title.position.y + 8);
     }
   }
 

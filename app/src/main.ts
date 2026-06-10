@@ -1,6 +1,7 @@
 import { mount } from 'svelte'
 import './app.css'
 import App from './App.svelte'
+import { patchCanvas } from './canvas/PatchCanvas'
 import { appState } from './state'
 import { initTheme } from './theme'
 
@@ -14,8 +15,10 @@ const app = mount(App, {
 declare global {
   interface Window {
     __kk: typeof appState
+    __kkCanvas: typeof patchCanvas
   }
 }
 window.__kk = appState
+window.__kkCanvas = patchCanvas
 
 export default app

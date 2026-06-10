@@ -26,6 +26,11 @@ export interface ParamSpec {
   /** Discrete value labels (e.g. waveform names); param then holds an index. */
   options?: string[];
   /**
+   * Mode-scoped param (synth): only shown when the module's `mode` param
+   * matches. Always serialized and sent to the engine regardless.
+   */
+  group?: string;
+  /**
    * Excluded from Randomize (PRD §7): output gain/levels and anything
    * hearing-hazardous must set this.
    */
@@ -43,6 +48,10 @@ export interface ModuleDef {
   /** Default tile size on canvas (world units). */
   width: number;
   height: number;
+  /** Params render in two columns (many-param modules). */
+  twoColumn?: boolean;
+  /** Suppress auto param rows entirely — the module draws its own face (e.g. EQ curve). */
+  customFace?: boolean;
   /** Initial non-scalar state (e.g. sequencer steps); serialized with the patch. */
   defaultData?: () => Record<string, unknown>;
 }

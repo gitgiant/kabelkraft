@@ -84,6 +84,16 @@ export const LIGHT: Theme = {
   },
 };
 
+/** Group tint cycle (PRD §6 rename/recolor); undefined = theme default. */
+export const GROUP_COLORS: Array<number | undefined> = [
+  undefined, 0xff5050, 0xffb13d, 0x52e07a, 0x3dd9ff, 0x6a8aff, 0xb070ff, 0xff3dd0,
+];
+
+export function nextGroupColor(current: number | undefined): number | undefined {
+  const idx = GROUP_COLORS.indexOf(current);
+  return GROUP_COLORS[(idx + 1) % GROUP_COLORS.length];
+}
+
 /** Live theme — mutated in place by setTheme. */
 export const theme: Theme = { ...DARK };
 

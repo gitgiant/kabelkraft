@@ -19,6 +19,8 @@ export interface ProjectFile {
   groups?: ModuleGroup[];
   /** Embedded sample PCM — present only in explicit project saves, never in undo snapshots. */
   samples?: SerializedSample[];
+  /** MIDI-learn mappings: "channel:cc" → target param. */
+  midiMap?: Record<string, { moduleId: string; paramId: string }>;
 }
 
 export function serializeProject(
@@ -26,6 +28,7 @@ export function serializeProject(
   graph: Graph,
   transport: TransportState,
   samples?: SerializedSample[],
+  midiMap?: Record<string, { moduleId: string; paramId: string }>,
 ): string {
   const file: ProjectFile = {
     formatVersion: FORMAT_VERSION,
@@ -35,6 +38,7 @@ export function serializeProject(
     wires: [...graph.wires.values()],
     groups: [...graph.groups.values()],
     samples,
+    midiMap,
   };
   return JSON.stringify(file, null, 2);
 }
@@ -45,6 +49,7 @@ export interface LoadResult {
   transport: TransportState;
   warnings: string[];
   samples: SerializedSample[];
+  midiMap: Record<string, { moduleId: string; paramId: string }>;
 }
 
 export function deserializeProject(json: string, defs: Map<string, ModuleDef>): LoadResult {
@@ -93,11 +98,17 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
     group.groupIds = group.groupIds.filter((id) => graph.groups.has(id));
   }
 
+  const midiMap: Record<string, { moduleId: string; paramId: string }> = {};
+  for (const [key, target] of Object.entries(raw.midiMap ?? {})) {
+    if (graph.modules.has(target.moduleId)) midiMap[key] = target;
+  }
+
   return {
     graph,
     name: raw.name ?? 'Untitled',
     transport: { ...DEFAULT_TRANSPORT, ...raw.transport, playing: false },
     warnings,
     samples: (raw.samples ?? []).filter((s) => graph.modules.has(s.moduleId)),
+    midiMap,
   };
 }

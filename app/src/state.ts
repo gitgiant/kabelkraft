@@ -7,8 +7,12 @@
 import { Graph, type PortRef, type Wire } from './core/graph';
 import { createInstance, type ModuleInstance } from './core/module';
 import { MODULE_DEFS } from './core/registry';
-import { decodeSample, encodeSample, type SampleData } from './core/samples';
+import type { DrumPad } from './core/drumkit';
+import { DRUM_BASE_NOTE, renderDefaultKit } from './core/drumkit';
+import { decodeSample, encodeSample, parseSampleKey, sampleKey, type SampleData } from './core/samples';
 import { deserializeProject, serializeProject } from './core/serialize';
+import { parseKkGroup } from './core/aiimport';
+import { MidiManager } from './core/midi';
 import { DEFAULT_TRANSPORT, type TransportState } from './core/types';
 import { Engine } from './engine/engine';
 import type { MeterReading } from './engine/messages';
@@ -20,7 +24,10 @@ export type StateEvent =
   | 'transportChanged'
   | 'selectionChanged'
   | 'projectLoaded'
-  | 'sampleLoaded';
+  | 'sampleLoaded'
+  | 'editorChanged' // sample editor opened/closed
+  | 'midiChanged' // MIDI-learn armed/disarmed or mapping changed
+  | 'visualizerChanged'; // big visualizer overlay opened/closed
 
 type Listener = () => void;
 
@@ -36,6 +43,24 @@ export class AppState {
   seqSteps: Record<string, number> = {};
   /** Live control output values per source module (wire glow). */
   controlValues: Record<string, number> = {};
+  /** Live gain reduction (dB) per compressor/limiter, for GR meters. */
+  gainReduction: Record<string, number> = {};
+  /** Live input spectra (64 log bins, dB) per parametric EQ. */
+  spectra: Record<string, number[]> = {};
+  /** Live visualizer feeds: waveform, spectrum, recent note pitches, control. */
+  visData: Record<string, { wave: number[]; spectrum: number[]; notes: number[]; ctrl: number }> = {};
+  /** Module id shown in the big visualizer overlay; null = closed. */
+  visualizerOpen: string | null = null;
+
+  openVisualizer(moduleId: string): void {
+    this.visualizerOpen = moduleId;
+    this.emit('visualizerChanged');
+  }
+
+  closeVisualizer(): void {
+    this.visualizerOpen = null;
+    this.emit('visualizerChanged');
+  }
   /** moduleId → performance.now() of last note-on, for data-wire pulses. */
   noteFlash = new Map<string, number>();
   /** Per-keyboard-module held voices: moduleId → (key → voiceId). */
@@ -74,10 +99,15 @@ export class AppState {
       rec.samples += data.chL.length;
       rec.sampleRate = data.sampleRate;
     });
+    this.engine.onMidiEvents((msg) => this.handleEngineMidi(msg.events));
+    this.midi.onMessage((deviceId, data) => this.handleMidiMessage(deviceId, data));
     this.engine.onStatus((status) => {
       this.meters = status.meters;
       this.seqSteps = status.seqSteps;
       this.controlValues = status.controlValues;
+      this.gainReduction = status.gainReduction ?? {};
+      this.spectra = status.spectra ?? {};
+      this.visData = status.visData ?? {};
       const now = performance.now();
       for (const id of status.noteActivity) this.noteFlash.set(id, now);
       this.transport.songPosition = status.songPosition;
@@ -91,35 +121,189 @@ export class AppState {
     if (!wasRunning) {
       this.engine.syncGraph(this.graph);
       this.engine.sendTransport(this.transport, this.transport.songPosition);
-      for (const [moduleId, sample] of this.samples) {
-        this.engine.sendSample(moduleId, sample.sampleRate, sample.channels);
-      }
+      this.resendSamples();
     }
   }
 
   // -- Samples ------------------------------------------------------------
 
-  /** Install PCM into a sampler module (UI file loads and tests both land here). */
-  setSample(moduleId: string, sample: SampleData): void {
+  /** Push every stored sample whose module still exists into the worklet. */
+  private resendSamples(): void {
+    for (const [key, sample] of this.samples) {
+      const { moduleId, pad } = parseSampleKey(key);
+      if (!this.graph.modules.has(moduleId)) continue;
+      this.engine.sendSample(moduleId, sample, pad);
+    }
+  }
+
+  /**
+   * Install PCM into a sampler module or drum pad (UI file loads and tests
+   * both land here). `pad` set = drum machine pad slot.
+   */
+  setSample(moduleId: string, sample: SampleData, pad?: number): void {
     const mod = this.graph.modules.get(moduleId);
     if (!mod) return;
-    this.samples.set(moduleId, sample);
-    mod.data = { ...mod.data, sampleName: sample.name };
+    this.samples.set(sampleKey(moduleId, pad), sample);
+    if (pad === undefined) {
+      mod.data = { ...mod.data, sampleName: sample.name };
+    } else {
+      const pads = [...((mod.data?.pads as DrumPad[]) ?? [])];
+      if (pads[pad]) {
+        // Pad takes the file's name (sans extension) so the grid stays readable.
+        pads[pad] = { ...pads[pad], name: sample.name.replace(/\.[^.]+$/, '').slice(0, 12) };
+        this.setModuleData(moduleId, 'pads', pads);
+      }
+    }
     if (this.engine.running) {
-      this.engine.sendSample(moduleId, sample.sampleRate, sample.channels);
+      this.engine.sendSample(moduleId, sample, pad);
     }
     this.emit('sampleLoaded');
   }
 
-  /** Decode a user-picked audio file and load it into a sampler. */
-  async loadSampleFile(moduleId: string, file: File): Promise<void> {
+  /** Decode a user-picked audio file and load it into a sampler or drum pad. */
+  async loadSampleFile(moduleId: string, file: File, pad?: number): Promise<void> {
     await this.ensureEngine(); // file picker click is the user gesture
     const decoded = await this.engine.decode(await file.arrayBuffer());
     const channels: Float32Array[] = [];
     for (let c = 0; c < Math.min(2, decoded.numberOfChannels); c++) {
       channels.push(decoded.getChannelData(c).slice());
     }
-    this.setSample(moduleId, { name: file.name, sampleRate: decoded.sampleRate, channels });
+    this.setSample(moduleId, { name: file.name, sampleRate: decoded.sampleRate, channels }, pad);
+  }
+
+  // -- Sample editor (PRD §8.2) --------------------------------------------
+
+  /** Sample Editor target; null = closed. UI overlay watches 'editorChanged'. */
+  editingSample: { moduleId: string; pad?: number } | null = null;
+
+  openSampleEditor(moduleId: string, pad?: number): void {
+    if (!this.samples.has(sampleKey(moduleId, pad))) return; // nothing to edit
+    this.editingSample = { moduleId, pad };
+    this.emit('editorChanged');
+  }
+
+  closeSampleEditor(): void {
+    this.engine.stopPreview();
+    this.editingSample = null;
+    this.emit('editorChanged');
+  }
+
+  // -- MIDI (PRD §8.7 + MIDI learn) ------------------------------------------
+
+  readonly midi = new MidiManager();
+  /** Armed MIDI-learn target; the next CC received maps to it. */
+  midiLearn: { moduleId: string; paramId: string } | null = null;
+  /** "channel:cc" → param target. Saved with the project. */
+  readonly midiMap = new Map<string, { moduleId: string; paramId: string }>();
+  private clockTicks: number[] = [];
+
+  armMidiLearn(moduleId: string, paramId: string): void {
+    void this.midi.init();
+    this.midiLearn = { moduleId, paramId };
+    this.emit('midiChanged');
+  }
+
+  cancelMidiLearn(): void {
+    this.midiLearn = null;
+    this.emit('midiChanged');
+  }
+
+  private handleMidiMessage(deviceId: string, data: Uint8Array): void {
+    if (data[0] >= 0xf8) {
+      this.handleMidiClock(data[0]);
+      return;
+    }
+    const status = data[0] & 0xf0;
+    const channel = (data[0] & 0x0f) + 1;
+
+    if (status === 0xb0) {
+      // MIDI learn: capture the first CC that moves.
+      if (this.midiLearn) {
+        this.midiMap.set(`${channel}:${data[1]}`, this.midiLearn);
+        this.midiLearn = null;
+        this.emit('midiChanged');
+      }
+      const target = this.midiMap.get(`${channel}:${data[1]}`);
+      if (target) {
+        const mod = this.graph.modules.get(target.moduleId);
+        const spec = mod
+          ? this.graph.def(mod.type).params.find((p) => p.id === target.paramId)
+          : undefined;
+        if (spec) {
+          this.setParam(target.moduleId, target.paramId, spec.min + (data[2] / 127) * (spec.max - spec.min));
+        }
+      }
+    }
+
+    for (const mod of this.graph.modules.values()) {
+      if (mod.type !== 'midiIn') continue;
+      const wantDevice = (mod.data?.deviceId as string) || '';
+      if (wantDevice && wantDevice !== deviceId) continue;
+      const chFilter = Math.round(mod.params.channel ?? 0);
+      if (chFilter !== 0 && chFilter !== channel) continue;
+
+      if (status === 0x90 && data[2] > 0) {
+        this.noteOn(mod.id, `midi:${deviceId}:${data[1]}`, data[1], data[2] / 127);
+      } else if (status === 0x80 || (status === 0x90 && data[2] === 0)) {
+        this.noteOff(mod.id, `midi:${deviceId}:${data[1]}`);
+      } else if (status === 0xb0 && data[1] === Math.round(mod.params.cc ?? 1)) {
+        const v = data[2] / 127;
+        this.controlValues[mod.id] = v; // immediate echo for wire glow
+        if (this.engine.running) this.engine.sendControl(mod.id, v);
+      }
+    }
+  }
+
+  /** MIDI clock slave: 0xF8 tick (24 ppqn), 0xFA start, 0xFB continue, 0xFC stop. */
+  private handleMidiClock(byte: number): void {
+    const enabled = [...this.graph.modules.values()].some(
+      (m) => m.type === 'midiIn' && Math.round(m.params.clock ?? 0) === 1,
+    );
+    if (!enabled) return;
+    if (byte === 0xfa) {
+      this.transportCommand('stop');
+      this.transportCommand('play');
+    } else if (byte === 0xfb) {
+      this.transportCommand('play');
+    } else if (byte === 0xfc) {
+      this.transportCommand('stop');
+    } else if (byte === 0xf8) {
+      const now = performance.now();
+      this.clockTicks.push(now);
+      if (this.clockTicks.length > 25) this.clockTicks.shift();
+      if (this.clockTicks.length === 25) {
+        const msPerTick = (now - this.clockTicks[0]) / 24;
+        const bpm = 60000 / (msPerTick * 24);
+        if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 300 && Math.abs(bpm - this.transport.tempo) > 0.5) {
+          this.setTempo(bpm);
+        }
+      }
+    }
+  }
+
+  /** Worklet-side MIDI Out events → actual MIDI bytes. */
+  private handleEngineMidi(events: Array<{ moduleId: string; kind: string; pitch?: number; velocity?: number; value?: number }>): void {
+    for (const ev of events) {
+      const mod = this.graph.modules.get(ev.moduleId);
+      if (!mod || mod.type !== 'midiOut') continue;
+      const deviceId = (mod.data?.deviceId as string) || '';
+      const ch = Math.min(15, Math.max(0, Math.round(mod.params.channel ?? 1) - 1));
+      if (ev.kind === 'on') {
+        this.midi.send(deviceId, [0x90 | ch, ev.pitch ?? 60, Math.round((ev.velocity ?? 1) * 127)]);
+      } else if (ev.kind === 'off') {
+        this.midi.send(deviceId, [0x80 | ch, ev.pitch ?? 60, 0]);
+      } else if (ev.kind === 'cc') {
+        this.midi.send(deviceId, [0xb0 | ch, Math.round(mod.params.cc ?? 1), ev.value ?? 0]);
+      }
+    }
+  }
+
+  /** Audition a drum pad directly (pad click), bypassing note wires. */
+  padTrigger(moduleId: string, pad: number): void {
+    void this.ensureEngine().then(() => {
+      this.engine.noteOnModule(moduleId, this.engine.allocVoiceId(), DRUM_BASE_NOTE + pad, 1);
+    });
+    this.noteFlash.set(moduleId, performance.now());
   }
 
   on(event: StateEvent, fn: Listener): () => void {
@@ -175,7 +359,11 @@ export class AppState {
     this.transport = { ...result.transport, playing: wasPlaying };
     this.clearSelection();
     this.heldVoices.clear();
+    this.restoreMidiMap(result.midiMap);
     this.engine.syncGraph(this.graph);
+    // A module deleted then restored by undo gets a fresh worklet instance
+    // with no PCM — push stored samples back in.
+    if (this.engine.running) this.resendSamples();
     this.emit('projectLoaded');
     this.emit('graphChanged');
     this.emit('transportChanged');
@@ -188,8 +376,23 @@ export class AppState {
     const inst = createInstance(this.graph.def(type), x, y);
     this.graph.addModule(inst);
     this.engine.syncGraph(this.graph);
+    // After syncGraph: the worklet module must exist before PCM arrives.
+    if (type === 'drum') this.installDefaultKit(inst.id);
+    if (type === 'midiIn' || type === 'midiOut') void this.midi.init();
     this.emit('graphChanged');
     return inst;
+  }
+
+  /** Synthesized starter kit so a fresh Drum Machine makes sound at once. */
+  private installDefaultKit(moduleId: string): void {
+    renderDefaultKit().forEach((sample, pad) => {
+      if (!sample) return;
+      this.samples.set(sampleKey(moduleId, pad), sample);
+      if (this.engine.running) {
+        this.engine.sendSample(moduleId, sample, pad);
+      }
+    });
+    this.emit('sampleLoaded');
   }
 
   removeModule(moduleId: string): void {
@@ -271,6 +474,23 @@ export class AppState {
     this.emit('graphChanged');
   }
 
+  renameGroup(groupId: string, name: string): void {
+    const group = this.graph.groups.get(groupId);
+    const trimmed = name.trim();
+    if (!group || !trimmed || group.name === trimmed) return;
+    this.beginUndoable();
+    group.name = trimmed;
+    this.emit('graphChanged');
+  }
+
+  recolorGroup(groupId: string, color: number | undefined): void {
+    const group = this.graph.groups.get(groupId);
+    if (!group) return;
+    this.beginUndoable();
+    group.color = color;
+    this.emit('graphChanged');
+  }
+
   setParam(moduleId: string, paramId: string, value: number): void {
     const mod = this.graph.modules.get(moduleId);
     if (!mod) return;
@@ -290,6 +510,69 @@ export class AppState {
     if (!mod) return;
     mod.data = { ...mod.data, [key]: value };
     this.engine.setData(moduleId, key, value);
+  }
+
+  // -- AI patch import (PRD §10.2) -------------------------------------------
+
+  /**
+   * Validate and insert an AI-written .kkgroup. Structural errors abort with
+   * nothing touched; the inserted modules arrive as a selected Module Group.
+   * One undo step.
+   */
+  importAiPatch(
+    text: string,
+    origin: { x: number; y: number } = { x: 0, y: 0 },
+  ): { ok: boolean; errors: string[]; warnings: string[]; groupId?: string } {
+    const result = parseKkGroup(text, MODULE_DEFS);
+    if (!result.ok || !result.patch) {
+      return { ok: false, errors: result.errors, warnings: result.warnings };
+    }
+    const patch = result.patch;
+    const warnings = [...result.warnings];
+    this.beginUndoable();
+
+    // AI positions are hints only (PRD §10.2): use them when they spread out,
+    // otherwise grid-place; the canvas collision resolver handles the rest.
+    const xs = patch.modules.map((m) => m.x);
+    const ys = patch.modules.map((m) => m.y);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    const useHints = Math.max(...xs) - minX + (Math.max(...ys) - minY) > 100;
+
+    const idMap = new Map<string, string>();
+    const drumIds: string[] = [];
+    patch.modules.forEach((m, i) => {
+      const pos = useHints
+        ? { x: origin.x + (m.x - minX) - 300, y: origin.y + (m.y - minY) - 200 }
+        : { x: origin.x + (i % 3) * 320 - 320, y: origin.y + Math.floor(i / 3) * 300 - 150 };
+      const inst = createInstance(this.graph.def(m.type), pos.x, pos.y);
+      inst.params = { ...inst.params, ...m.params };
+      if (m.data) inst.data = { ...inst.data, ...m.data };
+      if (m.label) inst.label = m.label;
+      this.graph.addModule(inst);
+      idMap.set(m.id, inst.id);
+      if (m.type === 'drum') drumIds.push(inst.id);
+    });
+
+    for (const w of patch.wires) {
+      const res = this.graph.connect(
+        { moduleId: idMap.get(w.from.module)!, portId: w.from.port },
+        { moduleId: idMap.get(w.to.module)!, portId: w.to.port },
+      );
+      if (!res.ok) {
+        warnings.push(`Wire ${w.from.module}.${w.from.port} → ${w.to.module}.${w.to.port} dropped: ${res.reason}`);
+      }
+    }
+
+    const group = this.graph.createGroup(patch.name, [...idMap.values()], [], origin.x, origin.y);
+    this.engine.syncGraph(this.graph);
+    // Default kits only after the worklet knows the new modules.
+    for (const id of drumIds) this.installDefaultKit(id);
+    this.clearSelection();
+    this.selectedGroupIds.add(group.id);
+    this.emit('graphChanged');
+    this.emit('selectionChanged');
+    return { ok: true, errors: [], warnings, groupId: group.id };
   }
 
   // -- Selection --------------------------------------------------------
@@ -460,17 +743,27 @@ export class AppState {
 
   // -- Project -----------------------------------------------------------
 
+  private midiMapObject(): Record<string, { moduleId: string; paramId: string }> | undefined {
+    return this.midiMap.size > 0 ? Object.fromEntries(this.midiMap) : undefined;
+  }
+
+  private restoreMidiMap(map: Record<string, { moduleId: string; paramId: string }>): void {
+    this.midiMap.clear();
+    for (const [key, target] of Object.entries(map)) this.midiMap.set(key, target);
+  }
+
   /** Undo snapshots: graph only, no sample PCM. */
   serialize(): string {
-    return serializeProject(this.projectName, this.graph, this.transport);
+    return serializeProject(this.projectName, this.graph, this.transport, undefined, this.midiMapObject());
   }
 
   /** Explicit project save: embeds sample PCM for portability (PRD §15). */
   serializeWithSamples(): string {
     const samples = [...this.samples.entries()]
-      .filter(([moduleId]) => this.graph.modules.has(moduleId))
-      .map(([moduleId, sample]) => encodeSample(moduleId, sample));
-    return serializeProject(this.projectName, this.graph, this.transport, samples);
+      .map(([key, sample]) => ({ ...parseSampleKey(key), sample }))
+      .filter(({ moduleId }) => this.graph.modules.has(moduleId))
+      .map(({ moduleId, pad, sample }) => encodeSample(moduleId, sample, pad));
+    return serializeProject(this.projectName, this.graph, this.transport, samples, this.midiMapObject());
   }
 
   loadProject(json: string): string[] {
@@ -484,13 +777,17 @@ export class AppState {
     this.selectedWireId = null;
     this.heldVoices.clear();
     this.samples.clear();
+    this.restoreMidiMap(result.midiMap);
+    if ([...this.graph.modules.values()].some((m) => m.type === 'midiIn' || m.type === 'midiOut')) {
+      void this.midi.init();
+    }
     this.engine.syncGraph(this.graph);
     this.engine.sendTransport(this.transport, 0);
     for (const raw of result.samples) {
       const sample = decodeSample(raw);
-      this.samples.set(raw.moduleId, sample);
+      this.samples.set(sampleKey(raw.moduleId, raw.pad), sample);
       if (this.engine.running) {
-        this.engine.sendSample(raw.moduleId, sample.sampleRate, sample.channels);
+        this.engine.sendSample(raw.moduleId, sample, raw.pad);
       }
     }
     this.emit('projectLoaded');

@@ -20,7 +20,17 @@
     selectedGroup = [...appState.selectedGroupIds][0] ?? null;
   }
 
+  let midiLearnArmed = $state(false);
+
+  function onLearnKey(e: KeyboardEvent) {
+    if (e.key === 'Escape' && appState.midiLearn) appState.cancelMidiLearn();
+  }
+
   onMount(() => {
+    const offM = appState.on('midiChanged', () => {
+      midiLearnArmed = appState.midiLearn !== null;
+    });
+    window.addEventListener('keydown', onLearnKey);
     const offT = appState.on('transportChanged', () => {
       tempo = appState.transport.tempo;
       playing = appState.transport.playing;
@@ -32,6 +42,8 @@
     const offS = appState.on('selectionChanged', refreshEditState);
     const poll = setInterval(() => (audioOn = appState.engine.running), 500);
     return () => {
+      offM();
+      window.removeEventListener('keydown', onLearnKey);
       offT();
       offP();
       offG();
@@ -114,6 +126,26 @@
 
   <span class="spacer"></span>
 
+  {#if midiLearnArmed}
+    <span class="midi-learn" title="Move a control on your MIDI device to map it. Esc cancels.">
+      🎛 MIDI learn… (Esc)
+    </span>
+  {/if}
+
+  <button
+    class="ai-toggle"
+    onclick={() => window.dispatchEvent(new CustomEvent('kk-ai-import'))}
+    title="AI patches: copy the spec for any chatbot, import its .kkgroup reply"
+  >
+    🤖 AI
+  </button>
+  <button
+    class="library-toggle"
+    onclick={() => window.dispatchEvent(new CustomEvent('kk-toggle-library'))}
+    title="Sample Library: browse your own folders, audition, drag onto Sampler/Drum pads"
+  >
+    🗂 Samples
+  </button>
   <button class="theme-toggle" onclick={toggleTheme} title="Toggle dark/light theme">
     {themeName === 'dark' ? '☀' : '🌙'}
   </button>
@@ -183,6 +215,18 @@
     background: #ffb13d;
     color: #1a1a20;
     font-weight: 600;
+  }
+  .midi-learn {
+    font-size: 12px;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 2px 8px;
+    animation: pulse 1s infinite alternate;
+  }
+  @keyframes pulse {
+    from { opacity: 1; }
+    to { opacity: 0.5; }
   }
   .audio-on {
     padding: 0 6px;
