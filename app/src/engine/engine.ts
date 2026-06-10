@@ -73,7 +73,12 @@ export class Engine {
       return;
     }
     this.ctx = new AudioContext({ latencyHint: 'interactive' });
-    await this.ctx.audioWorklet.addModule('/engine-worklet.js');
+    if (!this.ctx.audioWorklet) {
+      throw new Error(
+        'AudioWorklet unavailable — page must be served over HTTPS or localhost (secure context).',
+      );
+    }
+    await this.ctx.audioWorklet.addModule(`${import.meta.env.BASE_URL}engine-worklet.js`);
     this.node = new AudioWorkletNode(this.ctx, 'kabelkraft-engine', {
       numberOfInputs: 0,
       outputChannelCount: [2],
