@@ -10,7 +10,7 @@ test('app loads with starter patch, no console errors', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('.toolbar .logo')).toHaveText('KabelKraft');
   await expect(page.locator('.canvas-container canvas')).toBeVisible();
-  await expect(page.locator('.palette .module-entry')).toHaveCount(7);
+  await expect(page.locator('.palette .module-entry')).toHaveCount(12);
 
   // Starter patch seeds 5 modules + 3 wires; give the canvas a beat to mount.
   await page.waitForTimeout(500);
@@ -57,4 +57,42 @@ test('play runs the sequencer and audio reaches the output', async ({ page }) =>
   // Song position advances while playing.
   const pos = await page.evaluate(() => window.__kk.transport.songPosition);
   expect(pos).toBeGreaterThan(0);
+});
+
+test('effect inserted into the chain passes audio through', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('.enable-audio').click();
+  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await page.locator('.transport button[title="Play"]').click();
+
+  // Rewire synth -> delay -> audioOut through state (graph ops, not UI drag).
+  const delayId = await page.evaluate(() => {
+    const s = window.__kk;
+    const mods = [...s.graph.modules.values()];
+    const synth = mods.find((m) => m.type === 'synth')!;
+    const audioOut = mods.find((m) => m.type === 'audioOut')!;
+    const direct = [...s.graph.wires.values()].find(
+      (w) => w.from.moduleId === synth.id && w.to.moduleId === audioOut.id,
+    )!;
+    s.disconnect(direct.id);
+    const delay = s.addModule('delay', 0, 400);
+    s.connect({ moduleId: synth.id, portId: 'out' }, { moduleId: delay.id, portId: 'in' });
+    s.connect({ moduleId: delay.id, portId: 'out' }, { moduleId: audioOut.id, portId: 'in' });
+    return delay.id;
+  });
+
+  // Audio must flow through the delay and still reach the output.
+  await expect
+    .poll(
+      () =>
+        page.evaluate((id) => {
+          const s = window.__kk;
+          const audioOut = [...s.graph.modules.values()].find((m) => m.type === 'audioOut')!;
+          const viaDelay = s.meters[id]?.peak ?? 0;
+          const atOut = s.meters[audioOut.id]?.peak ?? 0;
+          return Math.min(viaDelay, atOut);
+        }, delayId),
+      { timeout: 5000 },
+    )
+    .toBeGreaterThan(0.01);
 });

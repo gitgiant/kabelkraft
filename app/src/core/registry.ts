@@ -152,6 +152,111 @@ const levels: ModuleDef = {
   height: 120,
 };
 
+export const DIST_ALGOS = ['soft', 'hard', 'tube', 'fold'] as const;
+
+const audioIn = (desc = 'Audio input; multiple wires are summed.'): import('./module').PortSpec => ({
+  id: 'in', label: 'Audio', type: 'audio', direction: 'in', description: desc,
+});
+const audioOutPort = (desc = 'Processed audio output.'): import('./module').PortSpec => ({
+  id: 'out', label: 'Audio', type: 'audio', direction: 'out', description: desc,
+});
+
+const delay: ModuleDef = {
+  type: 'delay',
+  name: 'Delay',
+  category: 'effect',
+  description: 'Echo effect: delay time, feedback, dry/wet mix.',
+  ports: [audioIn(), audioOutPort()],
+  params: [
+    { id: 'time', label: 'Time', min: 1, max: 1500, default: 350, unit: 'ms', curve: 'exp', randomizable: true },
+    { id: 'feedback', label: 'Feedback', min: 0, max: 0.95, default: 0.4, randomizable: true },
+    { id: 'mix', label: 'Mix', min: 0, max: 1, default: 0.35, randomizable: true },
+  ],
+  width: 190,
+  height: 110,
+};
+
+const reverb: ModuleDef = {
+  type: 'reverb',
+  name: 'Reverb',
+  category: 'effect',
+  description: 'Room reverb (Freeverb-style): size, damping, dry/wet mix.',
+  ports: [audioIn(), audioOutPort()],
+  params: [
+    { id: 'size', label: 'Size', min: 0, max: 1, default: 0.5, randomizable: true },
+    { id: 'damp', label: 'Damp', min: 0, max: 1, default: 0.5, randomizable: true },
+    { id: 'mix', label: 'Mix', min: 0, max: 1, default: 0.3, randomizable: true },
+  ],
+  width: 190,
+  height: 110,
+};
+
+const distortion: ModuleDef = {
+  type: 'distortion',
+  name: 'Distortion',
+  category: 'effect',
+  description: 'Waveshaping distortion: algorithm, drive, tone filter, output trim, mix.',
+  ports: [audioIn(), audioOutPort()],
+  params: [
+    { id: 'algo', label: 'Algo', min: 0, max: DIST_ALGOS.length - 1, default: 0, options: [...DIST_ALGOS], randomizable: true },
+    { id: 'drive', label: 'Drive', min: 1, max: 30, default: 6, curve: 'exp', randomizable: true },
+    { id: 'tone', label: 'Tone', min: 500, max: 12000, default: 5000, unit: 'Hz', curve: 'exp', randomizable: true },
+    { id: 'trim', label: 'Trim', min: 0, max: 1, default: 0.7, randomizable: false },
+    { id: 'mix', label: 'Mix', min: 0, max: 1, default: 1, randomizable: true },
+  ],
+  width: 190,
+  height: 150,
+};
+
+const eq: ModuleDef = {
+  type: 'eq',
+  name: 'Simple EQ',
+  category: 'effect',
+  description: '3-band EQ: low shelf, mid peak, high shelf — gain and frequency each.',
+  ports: [audioIn(), audioOutPort()],
+  params: [
+    { id: 'lowGain', label: 'Low', min: -18, max: 18, default: 0, unit: 'dB', randomizable: true },
+    { id: 'lowFreq', label: 'Low Freq', min: 40, max: 500, default: 120, unit: 'Hz', curve: 'exp', randomizable: true },
+    { id: 'midGain', label: 'Mid', min: -18, max: 18, default: 0, unit: 'dB', randomizable: true },
+    { id: 'midFreq', label: 'Mid Freq', min: 200, max: 5000, default: 1000, unit: 'Hz', curve: 'exp', randomizable: true },
+    { id: 'highGain', label: 'High', min: -18, max: 18, default: 0, unit: 'dB', randomizable: true },
+    { id: 'highFreq', label: 'High Freq', min: 2000, max: 16000, default: 8000, unit: 'Hz', curve: 'exp', randomizable: true },
+  ],
+  width: 200,
+  height: 170,
+};
+
+const mixer: ModuleDef = {
+  type: 'mixer',
+  name: 'Mixer',
+  category: 'io',
+  description: '4-channel stereo mixer: per-channel level and pan, master level.',
+  ports: [
+    { id: 'in1', label: 'In 1', type: 'audio', direction: 'in', description: 'Channel 1 input.' },
+    { id: 'in2', label: 'In 2', type: 'audio', direction: 'in', description: 'Channel 2 input.' },
+    { id: 'in3', label: 'In 3', type: 'audio', direction: 'in', description: 'Channel 3 input.' },
+    { id: 'in4', label: 'In 4', type: 'audio', direction: 'in', description: 'Channel 4 input.' },
+    audioOutPort('Mixed stereo output.'),
+  ],
+  params: [
+    { id: 'lvl1', label: 'Lvl 1', min: 0, max: 1, default: 0.8, randomizable: false },
+    { id: 'pan1', label: 'Pan 1', min: -1, max: 1, default: 0, randomizable: true },
+    { id: 'lvl2', label: 'Lvl 2', min: 0, max: 1, default: 0.8, randomizable: false },
+    { id: 'pan2', label: 'Pan 2', min: -1, max: 1, default: 0, randomizable: true },
+    { id: 'lvl3', label: 'Lvl 3', min: 0, max: 1, default: 0.8, randomizable: false },
+    { id: 'pan3', label: 'Pan 3', min: -1, max: 1, default: 0, randomizable: true },
+    { id: 'lvl4', label: 'Lvl 4', min: 0, max: 1, default: 0.8, randomizable: false },
+    { id: 'pan4', label: 'Pan 4', min: -1, max: 1, default: 0, randomizable: true },
+    { id: 'master', label: 'Master', min: 0, max: 1, default: 0.8, randomizable: false },
+  ],
+  width: 210,
+  height: 230,
+};
+
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
-  [transport, sequencer, lfo, synth, keyboard, audioOut, levels].map((d) => [d.type, d]),
+  [
+    transport, sequencer, lfo, synth, keyboard,
+    delay, reverb, distortion, eq,
+    mixer, audioOut, levels,
+  ].map((d) => [d.type, d]),
 );

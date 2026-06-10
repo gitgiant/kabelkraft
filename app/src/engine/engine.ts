@@ -22,6 +22,11 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'levels',
   'sequencer',
   'lfo',
+  'delay',
+  'reverb',
+  'distortion',
+  'eq',
+  'mixer',
 ]);
 
 export type StatusListener = (status: StatusMessage) => void;

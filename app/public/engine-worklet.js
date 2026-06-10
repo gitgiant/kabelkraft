@@ -201,17 +201,30 @@ class SequencerModule {
   }
 }
 
+/**
+ * Modules with audio inputs declare `this.inputs = { portId: {L, R} }`;
+ * the host zeroes and sums incoming wires into them before render().
+ */
+function makeStereoBuf() {
+  return { L: new Float32Array(128), R: new Float32Array(128) };
+}
+
 class LevelsModule {
   constructor(id, params) {
     this.id = id;
     this.type = 'levels';
     this.params = params;
+    this.inputs = { in: makeStereoBuf() };
     this.outL = new Float32Array(128);
     this.outR = new Float32Array(128);
   }
 
-  render() {
-    // Metering only; input buffers were summed into outL/outR by the host.
+  render(blockSize) {
+    // Metering only: pass input through to out buffers so meters read it.
+    for (let i = 0; i < blockSize; i++) {
+      this.outL[i] = this.inputs.in.L[i];
+      this.outR[i] = this.inputs.in.R[i];
+    }
   }
 }
 
@@ -220,6 +233,7 @@ class AudioOutModule {
     this.id = id;
     this.type = 'audioOut';
     this.params = params;
+    this.inputs = { in: makeStereoBuf() };
     this.outL = new Float32Array(128);
     this.outR = new Float32Array(128);
     this.limiterEnv = 0;
@@ -230,8 +244,8 @@ class AudioOutModule {
     const limiterOn = (this.params.limiter ?? 1) >= 0.5;
     const releaseCoef = Math.exp(-1 / (0.08 * sampleRate)); // ~80 ms release
     for (let i = 0; i < blockSize; i++) {
-      let l = this.outL[i] * level;
-      let r = this.outR[i] * level;
+      let l = this.inputs.in.L[i] * level;
+      let r = this.inputs.in.R[i] * level;
       if (limiterOn) {
         const peak = Math.max(Math.abs(l), Math.abs(r));
         this.limiterEnv = Math.max(peak, this.limiterEnv * releaseCoef);
@@ -243,6 +257,295 @@ class AudioOutModule {
       }
       this.outL[i] = l;
       this.outR[i] = r;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Effects
+// ---------------------------------------------------------------------------
+
+class DelayModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'delay';
+    this.params = params;
+    this.inputs = { in: makeStereoBuf() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    const max = Math.ceil(2 * sampleRate);
+    this.bufL = new Float32Array(max);
+    this.bufR = new Float32Array(max);
+    this.writeIdx = 0;
+    this.curTime = ((params.time ?? 350) / 1000) * sampleRate;
+  }
+
+  render(blockSize) {
+    const len = this.bufL.length;
+    const target = Math.min(len - 2, Math.max(1, ((this.params.time ?? 350) / 1000) * sampleRate));
+    const fb = this.params.feedback ?? 0.4;
+    const mix = this.params.mix ?? 0.35;
+    for (let i = 0; i < blockSize; i++) {
+      this.curTime += (target - this.curTime) * 0.0005; // slew to avoid clicks
+      let readPos = this.writeIdx - this.curTime;
+      if (readPos < 0) readPos += len;
+      const i0 = Math.floor(readPos);
+      const frac = readPos - i0;
+      const i1 = (i0 + 1) % len;
+      const dL = this.bufL[i0] * (1 - frac) + this.bufL[i1] * frac;
+      const dR = this.bufR[i0] * (1 - frac) + this.bufR[i1] * frac;
+      const inL = this.inputs.in.L[i];
+      const inR = this.inputs.in.R[i];
+      this.bufL[this.writeIdx] = inL + dL * fb;
+      this.bufR[this.writeIdx] = inR + dR * fb;
+      this.outL[i] = inL * (1 - mix) + dL * mix;
+      this.outR[i] = inR * (1 - mix) + dR * mix;
+      this.writeIdx = (this.writeIdx + 1) % len;
+    }
+  }
+}
+
+class Comb {
+  constructor(size) {
+    this.buf = new Float32Array(size);
+    this.idx = 0;
+    this.store = 0;
+  }
+  process(x, feedback, damp) {
+    const y = this.buf[this.idx];
+    this.store = y * (1 - damp) + this.store * damp;
+    this.buf[this.idx] = x + this.store * feedback;
+    this.idx = (this.idx + 1) % this.buf.length;
+    return y;
+  }
+}
+
+class Allpass {
+  constructor(size) {
+    this.buf = new Float32Array(size);
+    this.idx = 0;
+  }
+  process(x) {
+    const y = this.buf[this.idx];
+    this.buf[this.idx] = x + y * 0.5;
+    this.idx = (this.idx + 1) % this.buf.length;
+    return y - x;
+  }
+}
+
+const COMB_TUNINGS = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
+const ALLPASS_TUNINGS = [556, 441, 341, 225];
+const STEREO_SPREAD = 23;
+
+class ReverbModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'reverb';
+    this.params = params;
+    this.inputs = { in: makeStereoBuf() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    const scale = sampleRate / 44100;
+    const sz = (n) => Math.max(8, Math.round(n * scale));
+    this.combsL = COMB_TUNINGS.map((n) => new Comb(sz(n)));
+    this.combsR = COMB_TUNINGS.map((n) => new Comb(sz(n + STEREO_SPREAD)));
+    this.allpassL = ALLPASS_TUNINGS.map((n) => new Allpass(sz(n)));
+    this.allpassR = ALLPASS_TUNINGS.map((n) => new Allpass(sz(n + STEREO_SPREAD)));
+  }
+
+  render(blockSize) {
+    const size = this.params.size ?? 0.5;
+    const feedback = 0.7 + size * 0.28;
+    const damp = (this.params.damp ?? 0.5) * 0.4;
+    const mix = this.params.mix ?? 0.3;
+    for (let i = 0; i < blockSize; i++) {
+      const inL = this.inputs.in.L[i];
+      const inR = this.inputs.in.R[i];
+      const input = (inL + inR) * 0.015;
+      let wetL = 0;
+      let wetR = 0;
+      for (const c of this.combsL) wetL += c.process(input, feedback, damp);
+      for (const c of this.combsR) wetR += c.process(input, feedback, damp);
+      for (const a of this.allpassL) wetL = a.process(wetL);
+      for (const a of this.allpassR) wetR = a.process(wetR);
+      this.outL[i] = inL * (1 - mix) + wetL * mix * 3;
+      this.outR[i] = inR * (1 - mix) + wetR * mix * 3;
+    }
+  }
+}
+
+const DIST_SOFT = 0;
+const DIST_HARD = 1;
+const DIST_TUBE = 2;
+const DIST_FOLD = 3;
+
+class DistortionModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'distortion';
+    this.params = params;
+    this.inputs = { in: makeStereoBuf() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.toneL = 0;
+    this.toneR = 0;
+  }
+
+  shape(x, algo, drive) {
+    switch (algo) {
+      case DIST_HARD: return Math.min(1, Math.max(-1, x * drive));
+      case DIST_TUBE: return x < 0 ? Math.tanh(x * drive * 0.6) : Math.tanh(x * drive);
+      case DIST_FOLD: {
+        // Foldback: wrap the overdriven signal as a triangle wave.
+        const f = x * drive * 0.25 + 0.25;
+        return 4 * Math.abs(f - Math.floor(f + 0.5)) - 1;
+      }
+      case DIST_SOFT:
+      default: return Math.tanh(x * drive);
+    }
+  }
+
+  render(blockSize) {
+    const algo = Math.round(this.params.algo ?? DIST_SOFT);
+    const drive = this.params.drive ?? 6;
+    const tone = this.params.tone ?? 5000;
+    const trim = this.params.trim ?? 0.7;
+    const mix = this.params.mix ?? 1;
+    const k = 1 - Math.exp((-2 * Math.PI * tone) / sampleRate); // one-pole LP
+    for (let i = 0; i < blockSize; i++) {
+      const inL = this.inputs.in.L[i];
+      const inR = this.inputs.in.R[i];
+      this.toneL += (this.shape(inL, algo, drive) - this.toneL) * k;
+      this.toneR += (this.shape(inR, algo, drive) - this.toneR) * k;
+      this.outL[i] = (inL * (1 - mix) + this.toneL * mix) * trim;
+      this.outR[i] = (inR * (1 - mix) + this.toneR * mix) * trim;
+    }
+  }
+}
+
+/** RBJ biquad, direct form II transposed. */
+class Biquad {
+  constructor() {
+    this.b0 = 1; this.b1 = 0; this.b2 = 0; this.a1 = 0; this.a2 = 0;
+    this.z1 = 0; this.z2 = 0;
+  }
+  set(b0, b1, b2, a0, a1, a2) {
+    this.b0 = b0 / a0; this.b1 = b1 / a0; this.b2 = b2 / a0;
+    this.a1 = a1 / a0; this.a2 = a2 / a0;
+  }
+  lowShelf(freq, dB) {
+    const A = Math.pow(10, dB / 40);
+    const w0 = (2 * Math.PI * freq) / sampleRate;
+    const cos = Math.cos(w0);
+    const alpha = (Math.sin(w0) / 2) * Math.SQRT2;
+    const sA = 2 * Math.sqrt(A) * alpha;
+    this.set(
+      A * (A + 1 - (A - 1) * cos + sA),
+      2 * A * (A - 1 - (A + 1) * cos),
+      A * (A + 1 - (A - 1) * cos - sA),
+      A + 1 + (A - 1) * cos + sA,
+      -2 * (A - 1 + (A + 1) * cos),
+      A + 1 + (A - 1) * cos - sA,
+    );
+  }
+  highShelf(freq, dB) {
+    const A = Math.pow(10, dB / 40);
+    const w0 = (2 * Math.PI * freq) / sampleRate;
+    const cos = Math.cos(w0);
+    const alpha = (Math.sin(w0) / 2) * Math.SQRT2;
+    const sA = 2 * Math.sqrt(A) * alpha;
+    this.set(
+      A * (A + 1 + (A - 1) * cos + sA),
+      -2 * A * (A - 1 + (A + 1) * cos),
+      A * (A + 1 + (A - 1) * cos - sA),
+      A + 1 - (A - 1) * cos + sA,
+      2 * (A - 1 - (A + 1) * cos),
+      A + 1 - (A - 1) * cos - sA,
+    );
+  }
+  peak(freq, dB, q) {
+    const A = Math.pow(10, dB / 40);
+    const w0 = (2 * Math.PI * freq) / sampleRate;
+    const cos = Math.cos(w0);
+    const alpha = Math.sin(w0) / (2 * q);
+    this.set(1 + alpha * A, -2 * cos, 1 - alpha * A, 1 + alpha / A, -2 * cos, 1 - alpha / A);
+  }
+  process(x) {
+    const y = this.b0 * x + this.z1;
+    this.z1 = this.b1 * x - this.a1 * y + this.z2;
+    this.z2 = this.b2 * x - this.a2 * y;
+    return y;
+  }
+}
+
+class EqModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'eq';
+    this.params = params;
+    this.inputs = { in: makeStereoBuf() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.bands = { L: [new Biquad(), new Biquad(), new Biquad()], R: [new Biquad(), new Biquad(), new Biquad()] };
+    this.coefKey = '';
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const key = `${p.lowGain},${p.lowFreq},${p.midGain},${p.midFreq},${p.highGain},${p.highFreq}`;
+    if (key !== this.coefKey) {
+      this.coefKey = key;
+      for (const ch of ['L', 'R']) {
+        this.bands[ch][0].lowShelf(p.lowFreq ?? 120, p.lowGain ?? 0);
+        this.bands[ch][1].peak(p.midFreq ?? 1000, p.midGain ?? 0, 0.7);
+        this.bands[ch][2].highShelf(p.highFreq ?? 8000, p.highGain ?? 0);
+      }
+    }
+    const [l0, l1, l2] = this.bands.L;
+    const [r0, r1, r2] = this.bands.R;
+    for (let i = 0; i < blockSize; i++) {
+      this.outL[i] = l2.process(l1.process(l0.process(this.inputs.in.L[i])));
+      this.outR[i] = r2.process(r1.process(r0.process(this.inputs.in.R[i])));
+    }
+  }
+}
+
+class MixerModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'mixer';
+    this.params = params;
+    this.inputs = {
+      in1: makeStereoBuf(),
+      in2: makeStereoBuf(),
+      in3: makeStereoBuf(),
+      in4: makeStereoBuf(),
+    };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+  }
+
+  render(blockSize) {
+    const master = this.params.master ?? 0.8;
+    this.outL.fill(0);
+    this.outR.fill(0);
+    for (let ch = 1; ch <= 4; ch++) {
+      const lvl = this.params[`lvl${ch}`] ?? 0.8;
+      if (lvl === 0) continue;
+      const pan = this.params[`pan${ch}`] ?? 0;
+      // Equal-power pan law.
+      const angle = ((pan + 1) * Math.PI) / 4;
+      const gL = lvl * Math.cos(angle);
+      const gR = lvl * Math.sin(angle);
+      const input = this.inputs[`in${ch}`];
+      for (let i = 0; i < blockSize; i++) {
+        this.outL[i] += input.L[i] * gL;
+        this.outR[i] += input.R[i] * gR;
+      }
+    }
+    for (let i = 0; i < blockSize; i++) {
+      this.outL[i] *= master;
+      this.outR[i] *= master;
     }
   }
 }
@@ -284,6 +587,16 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new LfoModule(m.id, m.params));
           } else if (m.type === 'sequencer') {
             next.set(m.id, new SequencerModule(m.id, m.params, m.data));
+          } else if (m.type === 'delay') {
+            next.set(m.id, new DelayModule(m.id, m.params));
+          } else if (m.type === 'reverb') {
+            next.set(m.id, new ReverbModule(m.id, m.params));
+          } else if (m.type === 'distortion') {
+            next.set(m.id, new DistortionModule(m.id, m.params));
+          } else if (m.type === 'eq') {
+            next.set(m.id, new EqModule(m.id, m.params));
+          } else if (m.type === 'mixer') {
+            next.set(m.id, new MixerModule(m.id, m.params));
           }
         }
         this.modules = next;
@@ -441,16 +754,20 @@ class EngineProcessor extends AudioWorkletProcessor {
       const mod = this.modules.get(id);
       if (!mod) continue;
 
-      if (mod.type === 'audioOut' || mod.type === 'levels') {
-        mod.outL.fill(0);
-        mod.outR.fill(0);
+      // Sum incoming audio wires into the module's per-port input buffers.
+      if (mod.inputs) {
+        for (const key in mod.inputs) {
+          mod.inputs[key].L.fill(0);
+          mod.inputs[key].R.fill(0);
+        }
         for (const w of this.audioWires) {
           if (w.toModuleId !== id) continue;
           const src = this.modules.get(w.fromModuleId);
-          if (!src || !src.outL) continue;
+          const dst = mod.inputs[w.toPortId];
+          if (!src || !src.outL || !dst) continue;
           for (let i = 0; i < blockSize; i++) {
-            mod.outL[i] += src.outL[i];
-            mod.outR[i] += src.outR[i];
+            dst.L[i] += src.outL[i];
+            dst.R[i] += src.outR[i];
           }
         }
       }

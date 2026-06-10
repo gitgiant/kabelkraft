@@ -4,7 +4,17 @@
  * the C++/WASM core slots into in Phase 2 (PRD §16).
  */
 
-export type EngineModuleType = 'synth' | 'audioOut' | 'levels' | 'sequencer' | 'lfo';
+export type EngineModuleType =
+  | 'synth'
+  | 'audioOut'
+  | 'levels'
+  | 'sequencer'
+  | 'lfo'
+  | 'delay'
+  | 'reverb'
+  | 'distortion'
+  | 'eq'
+  | 'mixer';
 
 export interface EngineModuleSnapshot {
   id: string;
