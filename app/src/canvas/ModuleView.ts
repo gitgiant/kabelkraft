@@ -9,9 +9,20 @@ import { Container, FederatedPointerEvent, Graphics, Text } from 'pixi.js';
 import type { ModuleDef, ParamSpec, PortSpec } from '../core/module';
 import type { ModuleInstance } from '../core/module';
 import { PORT_TYPE_COLORS } from '../core/types';
-import { WAVEFORMS } from '../core/registry';
+import {
+  SEQ_PITCH_MAX,
+  SEQ_PITCH_MIN,
+  WAVEFORMS,
+  type SeqStep,
+} from '../core/registry';
 import { appState } from '../state';
 import type { Tooltip } from './Tooltip';
+
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+function noteName(pitch: number): string {
+  return `${NOTE_NAMES[((pitch % 12) + 12) % 12]}${Math.floor(pitch / 12) - 1}`;
+}
 
 export const PORT_RADIUS = 7;
 const TITLE_H = 24;
@@ -184,6 +195,107 @@ export class ModuleView extends Container {
     if (this.instance.type === 'levels' || this.instance.type === 'audioOut') {
       this.buildMeter(x, this.def.height - 18, w);
     }
+    if (this.instance.type === 'sequencer') this.buildStepGrid(x, y + 4, w);
+  }
+
+  // -- sequencer step grid ---------------------------------------------------
+
+  private stepGrid: Graphics | null = null;
+  private stepGridRect = { x: 0, y: 0, w: 0, h: 0 };
+  private lastDrawnStep = -1;
+
+  private steps(): SeqStep[] {
+    return (this.instance.data?.steps as SeqStep[]) ?? [];
+  }
+
+  private buildStepGrid(x: number, y: number, w: number): void {
+    const h = this.def.height - y - 12;
+    this.stepGridRect = { x, y, w, h };
+    this.stepGrid = new Graphics();
+    this.addChild(this.stepGrid);
+    this.drawStepGrid();
+
+    const hit = new Graphics().rect(x, y, w, h).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      this.beginStepEdit(e);
+    });
+    hit.on('pointerover', (e) =>
+      this.tooltip.show(['Steps', 'Click: toggle step. Drag up/down: set pitch.'], e.clientX, e.clientY),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  private stepIndexAt(localX: number): number {
+    const { x, w } = this.stepGridRect;
+    const steps = this.steps();
+    return Math.min(steps.length - 1, Math.max(0, Math.floor(((localX - x) / w) * steps.length)));
+  }
+
+  private beginStepEdit(e: FederatedPointerEvent): void {
+    const local = this.toLocal(e.global);
+    const steps = this.steps();
+    const idx = this.stepIndexAt(local.x);
+    const step = steps[idx];
+    if (!step) return;
+    const startY = e.clientY;
+    const startPitch = step.pitch;
+    let moved = false;
+
+    const commit = () => {
+      appState.setModuleData(this.instance.id, 'steps', [...steps]);
+      this.drawStepGrid();
+    };
+    const onMove = (ev: PointerEvent) => {
+      const dy = startY - ev.clientY;
+      if (Math.abs(dy) > 3) moved = true;
+      if (!moved) return;
+      step.on = true;
+      step.pitch = Math.round(
+        Math.min(SEQ_PITCH_MAX, Math.max(SEQ_PITCH_MIN, startPitch + dy / 4)),
+      );
+      this.tooltip.showNow([noteName(step.pitch)], ev.clientX, ev.clientY);
+      commit();
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      this.tooltip.hide();
+      if (!moved) {
+        step.on = !step.on;
+        commit();
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  private drawStepGrid(playhead = -1): void {
+    if (!this.stepGrid) return;
+    const { x, y, w, h } = this.stepGridRect;
+    const steps = this.steps();
+    if (steps.length === 0) return;
+    const cellW = w / steps.length;
+    const g = this.stepGrid;
+    g.clear();
+    for (let i = 0; i < steps.length; i++) {
+      const cx = x + i * cellW;
+      const isBeat = i % 4 === 0;
+      g.roundRect(cx + 1, y, cellW - 2, h, 2).fill(isBeat ? 0x20202a : 0x1c1c24);
+      if (i === playhead) {
+        g.roundRect(cx + 1, y, cellW - 2, h, 2).fill({ color: 0xffffff, alpha: 0.12 });
+      }
+      const step = steps[i];
+      if (step.on) {
+        const norm = (step.pitch - SEQ_PITCH_MIN) / (SEQ_PITCH_MAX - SEQ_PITCH_MIN);
+        const barH = 4 + norm * (h - 8);
+        g.roundRect(cx + 2, y + h - barH - 2, cellW - 4, barH, 2)
+          .fill(i === playhead ? 0x7fe9ff : 0x3dd9ff);
+      }
+    }
   }
 
   private buildParamRow(param: ParamSpec, x: number, y: number, w: number): void {
@@ -333,8 +445,16 @@ export class ModuleView extends Container {
   private meterW = 0;
   private clipped = false;
 
-  /** Called from the canvas ticker with live engine meters. */
-  updateMeter(): void {
+  /** Called from the canvas ticker: live meters + sequencer playhead. */
+  updateLive(): void {
+    if (this.stepGrid) {
+      const step = appState.seqSteps[this.instance.id] ?? -1;
+      const current = appState.transport.playing ? step : -1;
+      if (current !== this.lastDrawnStep) {
+        this.lastDrawnStep = current;
+        this.drawStepGrid(current);
+      }
+    }
     if (!this.meterBar) return;
     const reading = appState.meters[this.instance.id];
     const peak = reading?.peak ?? 0;

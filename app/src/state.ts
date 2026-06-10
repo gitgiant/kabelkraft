@@ -29,6 +29,10 @@ export class AppState {
 
   /** Live per-module meters from the engine, refreshed ~30 Hz. */
   meters: Record<string, MeterReading> = {};
+  /** Current step per sequencer module (playhead UI), from the engine. */
+  seqSteps: Record<string, number> = {};
+  /** Live control output values per source module (wire glow). */
+  controlValues: Record<string, number> = {};
   /** moduleId → performance.now() of last note-on, for data-wire pulses. */
   noteFlash = new Map<string, number>();
   /** Per-keyboard-module held voices: moduleId → (key → voiceId). */
@@ -40,9 +44,24 @@ export class AppState {
   private listeners = new Map<StateEvent, Set<Listener>>();
 
   constructor() {
-    this.engine.onMeters((m) => {
-      this.meters = m;
+    this.engine.onStatus((status) => {
+      this.meters = status.meters;
+      this.seqSteps = status.seqSteps;
+      this.controlValues = status.controlValues;
+      const now = performance.now();
+      for (const id of status.noteActivity) this.noteFlash.set(id, now);
+      this.transport.songPosition = status.songPosition;
     });
+  }
+
+  /** Start the engine (user gesture required) and prime it with current state. */
+  async ensureEngine(): Promise<void> {
+    const wasRunning = this.engine.running;
+    await this.engine.start();
+    if (!wasRunning) {
+      this.engine.syncGraph(this.graph);
+      this.engine.sendTransport(this.transport, this.transport.songPosition);
+    }
   }
 
   on(event: StateEvent, fn: Listener): () => void {
@@ -94,9 +113,18 @@ export class AppState {
     this.engine.setParam(moduleId, paramId, value);
     if (mod.type === 'transport' && paramId === 'tempo') {
       this.transport.tempo = value;
+      this.engine.sendTransport(this.transport);
       this.emit('transportChanged');
     }
     this.emit('paramChanged');
+  }
+
+  /** Update one key of a module's data blob (e.g. sequencer steps). */
+  setModuleData(moduleId: string, key: string, value: unknown): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (!mod) return;
+    mod.data = { ...mod.data, [key]: value };
+    this.engine.setData(moduleId, key, value);
   }
 
   // -- Selection --------------------------------------------------------
@@ -116,7 +144,7 @@ export class AppState {
 
   /** key: stable identifier for the held note (e.g. "kbd:60" or "qwerty:a"). */
   noteOn(sourceModuleId: string, key: string, pitch: number, velocity = 0.9): void {
-    void this.engine.start();
+    void this.ensureEngine();
     const held = this.heldVoices.get(sourceModuleId) ?? new Map<string, number>();
     this.heldVoices.set(sourceModuleId, held);
     if (held.has(key)) return; // key repeat
@@ -137,14 +165,18 @@ export class AppState {
   // -- Transport ---------------------------------------------------------
 
   transportCommand(cmd: 'play' | 'stop' | 'pause' | 'rewind'): void {
-    void this.engine.start();
+    let jumpTo: number | undefined;
     if (cmd === 'play') this.transport.playing = true;
     if (cmd === 'pause') this.transport.playing = false;
     if (cmd === 'stop') {
       this.transport.playing = false;
-      this.transport.songPosition = 0;
+      jumpTo = 0;
     }
-    if (cmd === 'rewind') this.transport.songPosition = 0;
+    if (cmd === 'rewind') jumpTo = 0;
+    if (jumpTo !== undefined) this.transport.songPosition = jumpTo;
+    // ensureEngine sends the initial transport itself on first start.
+    if (this.engine.running) this.engine.sendTransport(this.transport, jumpTo);
+    else void this.ensureEngine();
     this.emit('transportChanged');
   }
 
@@ -153,6 +185,7 @@ export class AppState {
     for (const m of this.graph.modules.values()) {
       if (m.type === 'transport') m.params.tempo = this.transport.tempo;
     }
+    this.engine.sendTransport(this.transport);
     this.emit('transportChanged');
     this.emit('paramChanged');
   }
@@ -172,6 +205,7 @@ export class AppState {
     this.selectedWireId = null;
     this.heldVoices.clear();
     this.engine.syncGraph(this.graph);
+    this.engine.sendTransport(this.transport, 0);
     this.emit('projectLoaded');
     this.emit('graphChanged');
     this.emit('transportChanged');

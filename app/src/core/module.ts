@@ -43,6 +43,8 @@ export interface ModuleDef {
   /** Default tile size on canvas (world units). */
   width: number;
   height: number;
+  /** Initial non-scalar state (e.g. sequencer steps); serialized with the patch. */
+  defaultData?: () => Record<string, unknown>;
 }
 
 export interface ModuleInstance {
@@ -54,6 +56,8 @@ export interface ModuleInstance {
   /** User tint color (PRD §6) as 24-bit RGB, undefined = theme default. */
   color?: number;
   params: Record<string, number>;
+  /** Non-scalar module state (e.g. sequencer steps). */
+  data?: Record<string, unknown>;
 }
 
 let nextId = 1;
@@ -71,5 +75,5 @@ export function bumpModuleId(existing: string): void {
 export function createInstance(def: ModuleDef, x: number, y: number): ModuleInstance {
   const params: Record<string, number> = {};
   for (const p of def.params) params[p.id] = p.default;
-  return { id: newModuleId(), type: def.type, x, y, params };
+  return { id: newModuleId(), type: def.type, x, y, params, data: def.defaultData?.() };
 }

@@ -36,6 +36,7 @@ const synth: ModuleDef = {
   description: 'Classic polyphonic synthesizer: waveform, octave, ADSR amplitude envelope.',
   ports: [
     { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note input controlling the voices.' },
+    { id: 'pitchMod', label: 'Pitch Mod', type: 'control', direction: 'in', description: 'Pitch modulation input (vibrato); range set by PM Amt.' },
     { id: 'out', label: 'Audio', type: 'audio', direction: 'out', description: 'Synthesized audio output (stereo).' },
   ],
   params: [
@@ -45,10 +46,65 @@ const synth: ModuleDef = {
     { id: 'decay', label: 'Decay', min: 0.001, max: 4, default: 0.15, unit: 's', curve: 'exp', randomizable: true },
     { id: 'sustain', label: 'Sustain', min: 0, max: 1, default: 0.7, randomizable: true },
     { id: 'release', label: 'Release', min: 0.001, max: 8, default: 0.3, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'pmAmt', label: 'PM Amt', min: 0, max: 12, default: 2, unit: 'semitones', randomizable: true },
     { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
   ],
   width: 220,
-  height: 170,
+  height: 200,
+};
+
+export const LFO_SHAPES = ['sine', 'triangle', 'square', 'sawtooth', 's&h'] as const;
+
+const lfo: ModuleDef = {
+  type: 'lfo',
+  name: 'LFO',
+  category: 'data',
+  description: 'Low-frequency oscillator outputting a control signal: shape, rate, depth, offset.',
+  ports: [
+    { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Control signal 0.0–1.0.' },
+  ],
+  params: [
+    { id: 'shape', label: 'Shape', min: 0, max: LFO_SHAPES.length - 1, default: 0, options: [...LFO_SHAPES], randomizable: true },
+    { id: 'rate', label: 'Rate', min: 0.01, max: 20, default: 2, unit: 'Hz', curve: 'exp', randomizable: true },
+    { id: 'depth', label: 'Depth', min: 0, max: 1, default: 0.5, randomizable: true },
+    { id: 'offset', label: 'Offset', min: 0, max: 1, default: 0.5, randomizable: true },
+  ],
+  width: 180,
+  height: 130,
+};
+
+export interface SeqStep {
+  on: boolean;
+  /** MIDI pitch. */
+  pitch: number;
+}
+
+export const SEQ_STEPS = 16;
+export const SEQ_PITCH_MIN = 36;
+export const SEQ_PITCH_MAX = 84;
+
+const sequencer: ModuleDef = {
+  type: 'sequencer',
+  name: 'Sequencer',
+  category: 'data',
+  description:
+    'Step sequencer synced to the Master Transport. Click a step to toggle, drag vertically to set pitch.',
+  ports: [
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'out', description: 'Sequenced notes while the transport plays.' },
+  ],
+  params: [
+    { id: 'division', label: 'Division', min: 0, max: 2, default: 2, options: ['1/4', '1/8', '1/16'], randomizable: false },
+    { id: 'gate', label: 'Gate', min: 0.05, max: 1, default: 0.5, randomizable: true },
+  ],
+  width: 340,
+  height: 160,
+  defaultData: () => ({
+    // A minor-ish default pattern so play immediately sounds musical.
+    steps: [57, 0, 60, 0, 64, 0, 60, 0, 57, 0, 60, 0, 64, 67, 64, 60].map((p) => ({
+      on: p > 0,
+      pitch: p || 60,
+    })) satisfies SeqStep[],
+  }),
 };
 
 const keyboard: ModuleDef = {
@@ -97,5 +153,5 @@ const levels: ModuleDef = {
 };
 
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
-  [transport, synth, keyboard, audioOut, levels].map((d) => [d.type, d]),
+  [transport, sequencer, lfo, synth, keyboard, audioOut, levels].map((d) => [d.type, d]),
 );

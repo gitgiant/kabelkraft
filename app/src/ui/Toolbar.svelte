@@ -25,8 +25,7 @@
   });
 
   async function enableAudio() {
-    await appState.engine.start();
-    appState.engine.syncGraph(appState.graph);
+    await appState.ensureEngine();
     audioOn = appState.engine.running;
   }
 

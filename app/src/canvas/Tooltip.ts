@@ -36,6 +36,19 @@ export class Tooltip {
     }, SHOW_DELAY_MS);
   }
 
+  /** Show immediately, no delay — for live value feedback during drags. */
+  showNow(lines: string[], clientX: number, clientY: number): void {
+    this.cancel();
+    this.timer = window.setTimeout(() => undefined, 0);
+    this.el.innerHTML = lines
+      .map((l, i) => `<div class="${i === 0 ? 'kk-tooltip-title' : 'kk-tooltip-line'}">${l}</div>`)
+      .join('');
+    this.el.style.display = 'block';
+    const rect = this.el.parentElement!.getBoundingClientRect();
+    this.el.style.left = `${clientX - rect.left + 14}px`;
+    this.el.style.top = `${clientY - rect.top - 30}px`;
+  }
+
   hide(): void {
     this.cancel();
     this.el.style.display = 'none';

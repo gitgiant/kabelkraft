@@ -39,23 +39,23 @@
 
   function seedStarterPatch() {
     // "60 seconds to sound" (PRD vision): a wired, playable starter patch.
-    appState.addModule('transport', -120, -220);
-    const keyboard = appState.addModule('keyboard', -480, 0);
-    const synth = appState.addModule('synth', -120, -10);
+    // Press Play for the sequence, or play the keyboard directly.
+    appState.addModule('transport', -150, -300);
+    const sequencer = appState.addModule('sequencer', -540, -160);
+    const keyboard = appState.addModule('keyboard', -510, 60);
+    const synth = appState.addModule('synth', -120, -40);
+    const lfo = appState.addModule('lfo', -380, 220);
     const audioOut = appState.addModule('audioOut', 220, 0);
     const levels = appState.addModule('levels', 220, 160);
-    appState.connect(
-      { moduleId: keyboard.id, portId: 'notes' },
-      { moduleId: synth.id, portId: 'notes' },
-    );
-    appState.connect(
-      { moduleId: synth.id, portId: 'out' },
-      { moduleId: audioOut.id, portId: 'in' },
-    );
-    appState.connect(
-      { moduleId: synth.id, portId: 'out' },
-      { moduleId: levels.id, portId: 'in' },
-    );
+    const wire = (fromId: string, fromPort: string, toId: string, toPort: string) =>
+      appState.connect({ moduleId: fromId, portId: fromPort }, { moduleId: toId, portId: toPort });
+    wire(sequencer.id, 'notes', synth.id, 'notes');
+    wire(keyboard.id, 'notes', synth.id, 'notes');
+    wire(lfo.id, 'out', synth.id, 'pitchMod');
+    wire(synth.id, 'out', audioOut.id, 'in');
+    wire(synth.id, 'out', levels.id, 'in');
+    // Gentle default vibrato so the LFO wire visibly does something.
+    appState.setParam(synth.id, 'pmAmt', 0.3);
   }
 
   onMount(() => {

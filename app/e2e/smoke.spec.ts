@@ -10,7 +10,7 @@ test('app loads with starter patch, no console errors', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('.toolbar .logo')).toHaveText('KabelKraft');
   await expect(page.locator('.canvas-container canvas')).toBeVisible();
-  await expect(page.locator('.palette .module-entry')).toHaveCount(5);
+  await expect(page.locator('.palette .module-entry')).toHaveCount(7);
 
   // Starter patch seeds 5 modules + 3 wires; give the canvas a beat to mount.
   await page.waitForTimeout(500);
@@ -32,4 +32,29 @@ test('enable audio starts the engine worklet', async ({ page }) => {
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+});
+
+test('play runs the sequencer and audio reaches the output', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('.enable-audio').click();
+  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await page.locator('.transport button[title="Play"]').click();
+
+  // Starter patch: sequencer -> synth -> audioOut. Wait for meters to show
+  // signal at the audio output module.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const s = window.__kk;
+          const audioOut = [...s.graph.modules.values()].find((m) => m.type === 'audioOut');
+          return audioOut ? (s.meters[audioOut.id]?.peak ?? 0) : -1;
+        }),
+      { timeout: 5000 },
+    )
+    .toBeGreaterThan(0.01);
+
+  // Song position advances while playing.
+  const pos = await page.evaluate(() => window.__kk.transport.songPosition);
+  expect(pos).toBeGreaterThan(0);
 });

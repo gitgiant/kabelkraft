@@ -312,6 +312,13 @@ export class PatchCanvas {
           alpha = 0.35 + 0.65 * k;
           width = 2 + 3 * k;
         }
+      } else if (wire.type === 'control') {
+        // Glow proportional to the live control value (PRD §4.4).
+        const v = appState.controlValues[wire.from.moduleId];
+        if (v !== undefined) {
+          alpha = 0.3 + 0.6 * v;
+          width = 2 + 2 * v;
+        }
       }
 
       if (wire.id === appState.selectedWireId) {
@@ -332,7 +339,7 @@ export class PatchCanvas {
       }
     }
 
-    for (const view of this.views.values()) view.updateMeter();
+    for (const view of this.views.values()) view.updateLive();
   }
 
   private strokePath(points: Array<{ x: number; y: number }>, width: number, color: number, alpha: number): void {
