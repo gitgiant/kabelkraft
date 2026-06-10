@@ -5,6 +5,7 @@
   import AiImport from './ui/AiImport.svelte';
   import FaceEditor from './ui/FaceEditor.svelte';
   import ModulePalette from './ui/ModulePalette.svelte';
+  import PianoRoll from './ui/PianoRoll.svelte';
   import SampleEditor from './ui/SampleEditor.svelte';
   import SampleLibrary from './ui/SampleLibrary.svelte';
   import Toolbar from './ui/Toolbar.svelte';
@@ -167,6 +168,7 @@
     <Tutorial />
   </div>
   <SampleEditor />
+  <PianoRoll />
   <VisualizerOverlay />
   <AiImport />
   <FaceEditor />

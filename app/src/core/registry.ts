@@ -4,6 +4,7 @@
  */
 
 import type { ModuleDef } from './module';
+import { defaultNote } from './composer';
 import { defaultDrumPads, defaultDrumPattern } from './drumkit';
 import { ROOT_NAMES, SCALE_NAMES } from './scales';
 
@@ -284,25 +285,12 @@ const midiOut: ModuleDef = {
   defaultData: () => ({ deviceId: '', deviceName: 'first output' }),
 };
 
-export const COMPOSER_TRACKS = 4;
-export const COMPOSER_PATTERNS = 8;
-export const COMPOSER_SLOTS = 16;
-export const COMPOSER_PATTERN_NAMES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'] as const;
-
 function defaultComposerData(): Record<string, unknown> {
-  const patterns = Array.from({ length: COMPOSER_PATTERNS }, () =>
-    Array.from({ length: COMPOSER_TRACKS }, () =>
-      Array.from({ length: 16 }, () => ({ on: false, pitch: 60 })),
-    ),
+  // A two-bar phrase so the default clip makes sound at once.
+  const notes = [57, 60, 64, 60, 57, 60, 65, 64].map((pitch, i) =>
+    defaultNote(i, pitch, 0.75),
   );
-  // Pattern A, track 1: a simple arp so the default song makes sound at once.
-  [57, 60, 64, 60].forEach((pitch, i) => {
-    patterns[0][0][i * 4] = { on: true, pitch };
-  });
-  const song = Array.from({ length: COMPOSER_SLOTS }, () => -1);
-  song[0] = 0;
-  song[1] = 0;
-  return { patterns, song };
+  return { notes, length: 8 };
 }
 
 const composer: ModuleDef = {
@@ -310,19 +298,15 @@ const composer: ModuleDef = {
   name: 'Composer',
   category: 'data',
   description:
-    'Pattern bank + song arrangement (PRD §8.3): 8 patterns × 4 tracks × 16 steps, ordered into ' +
-    'a song that follows the Master Transport. One bar per slot; each track has its own Note output.',
+    'Piano-roll clip (PRD §8.3): free-time notes with per-note velocity, pan, release, mod X/Y ' +
+    'and probability, looped against the Master Transport. Open the editor for the full roll ' +
+    'with quantize/humanize tools and MIDI file import/export.',
   ports: [
-    { id: 'out1', label: 'T1', type: 'note', direction: 'out', description: 'Track 1 note stream.' },
-    { id: 'out2', label: 'T2', type: 'note', direction: 'out', description: 'Track 2 note stream.' },
-    { id: 'out3', label: 'T3', type: 'note', direction: 'out', description: 'Track 3 note stream.' },
-    { id: 'out4', label: 'T4', type: 'note', direction: 'out', description: 'Track 4 note stream.' },
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'out', description: 'Clip note stream while the transport plays.' },
   ],
-  params: [
-    { id: 'gate', label: 'Gate', min: 0.05, max: 1, default: 0.5, randomizable: true },
-  ],
-  width: 400,
-  height: 264,
+  params: [],
+  width: 320,
+  height: 184,
   defaultData: defaultComposerData,
 };
 

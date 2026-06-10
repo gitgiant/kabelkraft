@@ -1,18 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
+import { classicRig } from './util';
 
 async function startPlaying(page: Page): Promise<{ synth: string; out: string }> {
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
-  const ids = await page.evaluate(() => {
-    const mods = [...window.__kk.graph.modules.values()];
-    return {
-      synth: mods.find((m) => m.type === 'synth')!.id,
-      out: mods.find((m) => m.type === 'audioOut')!.id,
-    };
-  });
+  const rig = await classicRig(page);
   await page.locator('.transport button[title="Play"]').click();
-  return ids;
+  return { synth: rig.synth, out: rig.out };
 }
 
 test('new effects chained in series pass audio through', async ({ page }) => {

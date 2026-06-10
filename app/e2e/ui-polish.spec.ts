@@ -44,8 +44,13 @@ test('filter face: response curve drag sets cutoff + Q; knobs work', async ({ pa
   await page.goto('/');
   await page.waitForTimeout(400);
 
-  // Clear of the starter patch so the collision resolver leaves it in view.
-  const vcf = await page.evaluate(() => window.__kk.addModule('vcf', 250, -380).id);
+  // Empty canvas so the collision resolver / group tile can't shift the vcf.
+  const vcf = await page.evaluate(() => {
+    const s = window.__kk;
+    for (const g of [...s.graph.groups.keys()]) s.ungroup(g);
+    for (const m of [...s.graph.modules.values()]) s.removeModule(m.id);
+    return s.addModule('vcf', 250, -380).id;
+  });
   await page.waitForTimeout(300); // fresh tile needs a rendered frame
 
   // Drag on the curve display (bottom area): center = cutoff ≈ √(40·18000), Q ≈ mid.

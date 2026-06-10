@@ -1,23 +1,22 @@
 import { expect, test, type Page } from '@playwright/test';
+import { classicRig } from './util';
 
 async function insertFx(page: Page, type: string): Promise<{ fx: string; synth: string }> {
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
-  const ids = await page.evaluate((fxType) => {
+  const rig = await classicRig(page);
+  const ids = await page.evaluate(({ fxType, synth, out }) => {
     const s = window.__kk;
-    const mods = [...s.graph.modules.values()];
-    const synth = mods.find((m) => m.type === 'synth')!;
-    const out = mods.find((m) => m.type === 'audioOut')!;
     const direct = [...s.graph.wires.values()].find(
-      (w) => w.from.moduleId === synth.id && w.to.moduleId === out.id,
+      (w) => w.from.moduleId === synth && w.to.moduleId === out,
     )!;
     s.disconnect(direct.id);
     const fx = s.addModule(fxType, 600, 400);
-    s.connect({ moduleId: synth.id, portId: 'out' }, { moduleId: fx.id, portId: 'in' });
-    s.connect({ moduleId: fx.id, portId: 'out' }, { moduleId: out.id, portId: 'in' });
-    return { fx: fx.id, synth: synth.id };
-  }, type);
+    s.connect({ moduleId: synth, portId: 'out' }, { moduleId: fx.id, portId: 'in' });
+    s.connect({ moduleId: fx.id, portId: 'out' }, { moduleId: out, portId: 'in' });
+    return { fx: fx.id, synth };
+  }, { fxType: type, synth: rig.synth, out: rig.out });
   await page.locator('.transport button[title="Play"]').click();
   return ids;
 }

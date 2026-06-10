@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { classicRig } from './util';
 
 test('app loads with starter patch, no console errors', async ({ page }) => {
   const errors: string[] = [];
@@ -62,6 +63,7 @@ test('play runs the sequencer and audio reaches the output', async ({ page }) =>
 test('grouping keeps audio flowing and undo restores the graph', async ({ page }) => {
   await page.goto('/');
   await page.locator('.enable-audio').click();
+  await classicRig(page);
   await page.locator('.transport button[title="Play"]').click();
 
   // Group synth+LFO; graph stays flat for the engine, so audio must continue.
@@ -235,6 +237,7 @@ test('recorder captures playing audio and downloads a WAV', async ({ page }) => 
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await classicRig(page);
 
   const recorderId = await page.evaluate(() => {
     const s = window.__kk;
@@ -266,6 +269,7 @@ test('ADSR and Random feed control values', async ({ page }) => {
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await classicRig(page);
 
   const ids = await page.evaluate(() => {
     const s = window.__kk;
@@ -308,6 +312,7 @@ test('effect inserted into the chain passes audio through', async ({ page }) => 
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await classicRig(page);
   await page.locator('.transport button[title="Play"]').click();
 
   // Rewire synth -> delay -> audioOut through state (graph ops, not UI drag).

@@ -20,6 +20,7 @@ import {
   type DrumStep,
   type SeqStep,
 } from '../core/registry';
+import { clipFromData } from '../core/composer';
 import { bandCoefs, biquadResponseDb, chainResponseDb, vcfCoefs } from '../core/eqmath';
 import { sampleKey } from '../core/samples';
 import { appState } from '../state';
@@ -355,7 +356,11 @@ export class ModuleView extends Container {
       const av = a0 + (a1 - a0) * n;
       g.clear();
       g.circle(cx, cy, r * 0.74).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
+      // moveTo before each arc: without it the path connects from its
+      // current point (the graphics origin), drawing stray wire-like lines.
+      g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
       g.arc(cx, cy, r, a0, a1).stroke({ width: 3, color: theme.inset });
+      g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
       g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: PORT_TYPE_COLORS.audio });
       g.moveTo(cx + Math.cos(av) * r * 0.25, cy + Math.sin(av) * r * 0.25)
         .lineTo(cx + Math.cos(av) * r * 0.66, cy + Math.sin(av) * r * 0.66)
@@ -600,7 +605,11 @@ export class ModuleView extends Container {
     const g = this.ctrlG;
     g.clear();
     g.circle(cx, cy, 28).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
+    // moveTo before each arc: without it the path connects from its
+    // current point (the graphics origin), drawing stray wire-like lines.
+    g.moveTo(cx + Math.cos(a0) * 36, cy + Math.sin(a0) * 36);
     g.arc(cx, cy, 36, a0, a1).stroke({ width: 4, color: theme.inset });
+    g.moveTo(cx + Math.cos(a0) * 36, cy + Math.sin(a0) * 36);
     g.arc(cx, cy, 36, a0, av).stroke({ width: 4, color: PORT_TYPE_COLORS.control });
     g.moveTo(cx + Math.cos(av) * 10, cy + Math.sin(av) * 10)
       .lineTo(cx + Math.cos(av) * 26, cy + Math.sin(av) * 26)
@@ -809,183 +818,100 @@ export class ModuleView extends Container {
       .stroke({ width: 2, color: on ? theme.text : theme.moduleStroke });
   }
 
-  // -- composer face (PRD §8.3) --------------------------------------------------
+  // -- composer face (PRD §8.3, piano roll) --------------------------------------
 
-  private compSelPattern = 0;
-  private compSelTrack = 0;
   private compG: Graphics | null = null;
-  private compRect = { x: 0, y: 0, w: 0 };
-  private compPatTexts: Text[] = [];
-  private compTrkTexts: Text[] = [];
-  private compSongTexts: Text[] = [];
-  private lastCompStep = -1;
-  private lastCompSlot = -1;
-
-  private static readonly COMP_ROWS = { pat: 0, trk: 26, step: 52, stepH: 70, song: 128, songH: 26 };
-
-  private compPatterns(): SeqStep[][][] {
-    return (this.instance.data?.patterns as SeqStep[][][]) ?? [];
-  }
-
-  private compSong(): number[] {
-    return (this.instance.data?.song as number[]) ?? [];
-  }
+  private compRect = { x: 0, y: 0, w: 0, h: 0 };
+  private lastCompPos = -1;
+  private lastCompData: unknown = null;
 
   private buildComposerFace(x: number, y: number, w: number): void {
-    this.compRect = { x, y, w };
-    this.compG = new Graphics();
-    this.addChild(this.compG);
-
-    const R = ModuleView.COMP_ROWS;
-    const mkText = (text: string, cx: number, cy: number, list: Text[]) => {
-      const t = new Text({ text, style: { fontSize: 10, fill: theme.text } });
-      t.anchor.set(0.5);
-      t.position.set(cx, cy);
-      t.eventMode = 'none';
-      this.addChild(t);
-      list.push(t);
-    };
-    const patW = w / 8;
-    for (let i = 0; i < 8; i++) {
-      mkText('ABCDEFGH'[i], x + i * patW + patW / 2, y + R.pat + 11, this.compPatTexts);
-    }
-    const trkW = w / 4;
-    for (let i = 0; i < 4; i++) {
-      mkText(`T${i + 1}`, x + i * trkW + trkW / 2, y + R.trk + 11, this.compTrkTexts);
-    }
-    const slotW = w / 16;
-    for (let i = 0; i < 16; i++) {
-      mkText('·', x + i * slotW + slotW / 2, y + R.song + 13, this.compSongTexts);
-    }
-
-    const faceH = R.song + R.songH;
-    const hit = new Graphics().rect(x, y, w, faceH).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'pointer';
-    hit.on('pointerdown', (e) => {
+    const h = this.def.height - y - 46; // room for the open button below
+    this.compRect = { x, y, w, h };
+    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(0x0c0c12);
+    bg.eventMode = 'static';
+    bg.cursor = 'pointer';
+    bg.on('pointertap', (e) => {
       e.stopPropagation();
-      const local = this.toLocal(e.global);
-      const ly = local.y - y;
-      const lx = Math.min(w - 1, Math.max(0, local.x - x));
-      if (ly < R.trk) {
-        this.compSelPattern = Math.min(7, Math.floor(lx / patW));
-        this.drawComposer();
-      } else if (ly < R.step) {
-        this.compSelTrack = Math.min(3, Math.floor(lx / trkW));
-        this.drawComposer();
-      } else if (ly < R.song) {
-        this.beginCompStepEdit(e);
-      } else {
-        // Song row: cycle empty → A…H → empty (one undo step per click).
-        const slot = Math.min(15, Math.floor(lx / slotW));
-        const song = [...this.compSong()];
-        song[slot] = song[slot] >= 7 ? -1 : (song[slot] ?? -1) + 1;
-        appState.beginUndoable();
-        appState.setModuleData(this.instance.id, 'song', song);
-        this.drawComposer();
-      }
+      appState.openComposer(this.instance.id);
     });
-    hit.on('pointerover', (e) =>
+    bg.on('pointerover', (e) =>
       this.tooltip.show(
-        ['Composer', 'Rows: pattern bank, track, step grid (drag = pitch), song slots (click to cycle).'],
+        ['Composer clip', 'Preview of the piano-roll clip. Click to open the editor.'],
         e.clientX,
         e.clientY,
       ),
     );
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-    this.drawComposer();
+    bg.on('pointerout', () => this.tooltip.hide());
+    this.addChild(bg);
+    this.compG = new Graphics();
+    this.compG.eventMode = 'none';
+    this.addChild(this.compG);
+
+    const btnY = y + h + 8;
+    const btn = new Graphics()
+      .roundRect(x, btnY, w, 26, 4)
+      .fill(theme.button)
+      .stroke({ width: 1, color: theme.moduleStroke });
+    btn.eventMode = 'static';
+    btn.cursor = 'pointer';
+    btn.on('pointerdown', (e) => {
+      e.stopPropagation();
+      appState.openComposer(this.instance.id);
+    });
+    btn.on('pointerover', (e) =>
+      this.tooltip.show(['Piano Roll', 'Open the full editor: notes, tools, MIDI import/export.'], e.clientX, e.clientY),
+    );
+    btn.on('pointerout', () => this.tooltip.hide());
+    this.addChild(btn);
+    const label = new Text({ text: 'Open Piano Roll ▸', style: { fontSize: 12, fill: theme.text } });
+    label.anchor.set(0.5);
+    label.position.set(x + w / 2, btnY + 13);
+    label.eventMode = 'none';
+    this.addChild(label);
+
+    this.drawCompPreview(-1);
   }
 
-  private beginCompStepEdit(e: FederatedPointerEvent): void {
-    const patterns = this.compPatterns();
-    const row = patterns[this.compSelPattern]?.[this.compSelTrack];
-    if (!row || row.length === 0) return;
-    appState.beginUndoable();
-    const { x, w } = this.compRect;
-    const local = this.toLocal(e.global);
-    const idx = Math.min(row.length - 1, Math.max(0, Math.floor(((local.x - x) / w) * row.length)));
-    const step = row[idx];
-    const startY = e.clientY;
-    const startPitch = step.pitch;
-    let moved = false;
-
-    const commit = () => {
-      appState.setModuleData(this.instance.id, 'patterns', [...patterns]);
-      this.drawComposer();
-    };
-    const onMove = (ev: PointerEvent) => {
-      const dy = startY - ev.clientY;
-      if (Math.abs(dy) > 3) moved = true;
-      if (!moved) return;
-      step.on = true;
-      step.pitch = Math.round(Math.min(SEQ_PITCH_MAX, Math.max(SEQ_PITCH_MIN, startPitch + dy / 4)));
-      this.tooltip.showNow([noteName(step.pitch)], ev.clientX, ev.clientY);
-      commit();
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      this.tooltip.hide();
-      if (!moved) {
-        step.on = !step.on;
-        commit();
-      }
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-
-  private drawComposer(playStep = -1, playSlot = -1): void {
+  private drawCompPreview(pos: number): void {
     if (!this.compG) return;
-    const { x, y, w } = this.compRect;
-    const R = ModuleView.COMP_ROWS;
+    const { x, y, w, h } = this.compRect;
+    const clip = clipFromData(this.instance.data);
     const g = this.compG;
     g.clear();
 
-    const patW = w / 8;
-    for (let i = 0; i < 8; i++) {
-      const selected = i === this.compSelPattern;
-      g.roundRect(x + i * patW + 1, y + R.pat, patW - 2, 22, 3)
-        .fill(theme.inset)
-        .stroke({ width: selected ? 2 : 1, color: selected ? theme.selectedStroke : theme.moduleStroke });
-    }
-    const trkW = w / 4;
-    for (let i = 0; i < 4; i++) {
-      const selected = i === this.compSelTrack;
-      g.roundRect(x + i * trkW + 1, y + R.trk, trkW - 2, 22, 3)
-        .fill(theme.inset)
-        .stroke({ width: selected ? 2 : 1, color: selected ? theme.selectedStroke : theme.moduleStroke });
+    // Beat grid, light on bar lines.
+    for (let b = 0; b <= clip.length; b++) {
+      const gx = x + (b / clip.length) * w;
+      g.moveTo(gx, y).lineTo(gx, y + h).stroke({
+        width: 1,
+        color: theme.moduleStroke,
+        alpha: b % 4 === 0 ? 0.5 : 0.15,
+      });
     }
 
-    const row = this.compPatterns()[this.compSelPattern]?.[this.compSelTrack] ?? [];
-    const cellW = w / Math.max(1, row.length);
-    for (let i = 0; i < row.length; i++) {
-      const cx = x + i * cellW;
-      g.roundRect(cx + 1, y + R.step, cellW - 2, R.stepH, 2).fill(theme.inset);
-      if (i === playStep) {
-        g.roundRect(cx + 1, y + R.step, cellW - 2, R.stepH, 2).fill({ color: 0xffffff, alpha: 0.12 });
+    if (clip.notes.length) {
+      let lo = 127;
+      let hi = 0;
+      for (const n of clip.notes) {
+        lo = Math.min(lo, n.pitch);
+        hi = Math.max(hi, n.pitch);
       }
-      const step = row[i];
-      if (step?.on) {
-        const norm = (step.pitch - SEQ_PITCH_MIN) / (SEQ_PITCH_MAX - SEQ_PITCH_MIN);
-        const barH = 4 + norm * (R.stepH - 8);
-        g.roundRect(cx + 2, y + R.step + R.stepH - barH - 2, cellW - 4, barH, 2)
-          .fill(i === playStep ? 0x7fe9ff : 0x3dd9ff);
+      lo = Math.max(0, lo - 2);
+      hi = Math.min(127, hi + 2);
+      const rowH = h / (hi - lo + 1);
+      for (const n of clip.notes) {
+        const nx = x + (Math.min(n.start, clip.length) / clip.length) * w;
+        const nw = Math.max(2, (Math.min(n.length, clip.length - n.start) / clip.length) * w);
+        const ny = y + (hi - n.pitch) * rowH;
+        g.roundRect(nx, ny + 1, nw, Math.max(2, rowH - 2), 1)
+          .fill({ color: 0x3dd9ff, alpha: 0.35 + 0.65 * n.vel });
       }
     }
 
-    const song = this.compSong();
-    const slotW = w / 16;
-    for (let i = 0; i < 16; i++) {
-      g.roundRect(x + i * slotW + 1, y + R.song, slotW - 2, R.songH, 3)
-        .fill(i === playSlot ? theme.button : theme.inset);
-      const t = this.compSongTexts[i];
-      if (t) {
-        const v = song[i] ?? -1;
-        t.text = v >= 0 ? 'ABCDEFGH'[v] : '·';
-        t.style.fill = v >= 0 ? theme.text : theme.textDim;
-      }
+    if (pos >= 0) {
+      const px = x + (pos / clip.length) * w;
+      g.moveTo(px, y).lineTo(px, y + h).stroke({ width: 1.5, color: 0xffffff, alpha: 0.7 });
     }
   }
 
@@ -2146,17 +2072,17 @@ export class ModuleView extends Container {
     }
     if (this.visG) this.drawVisScene();
     if (this.compG) {
-      let step = -1;
-      let slot = -1;
+      let pos = -1;
       if (appState.transport.playing) {
-        const pos = appState.transport.songPosition;
-        step = Math.floor(pos * 4) % 16;
-        slot = Math.floor(pos / 4) % Math.max(1, this.compSong().length);
+        const len = Math.max(1, Number(this.instance.data?.length) || 16);
+        // Quantize the playhead to ~half-pixel steps so we redraw sparingly.
+        const step = len / (this.compRect.w * 2);
+        pos = Math.floor(((appState.transport.songPosition % len) + len) % len / step) * step;
       }
-      if (step !== this.lastCompStep || slot !== this.lastCompSlot) {
-        this.lastCompStep = step;
-        this.lastCompSlot = slot;
-        this.drawComposer(step, slot);
+      if (pos !== this.lastCompPos || this.instance.data !== this.lastCompData) {
+        this.lastCompPos = pos;
+        this.lastCompData = this.instance.data;
+        this.drawCompPreview(pos);
       }
     }
     if (this.peqSpectrumG) {

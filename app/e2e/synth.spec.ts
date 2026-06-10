@@ -1,16 +1,12 @@
 import { expect, test, type Page } from '@playwright/test';
+import { classicRig } from './util';
 
 async function startWithAudio(page: Page): Promise<{ synth: string; out: string }> {
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
-  return page.evaluate(() => {
-    const mods = [...window.__kk.graph.modules.values()];
-    return {
-      synth: mods.find((m) => m.type === 'synth')!.id,
-      out: mods.find((m) => m.type === 'audioOut')!.id,
-    };
-  });
+  const rig = await classicRig(page);
+  return { synth: rig.synth, out: rig.out };
 }
 
 async function pollPeak(page: Page, id: string): Promise<void> {
@@ -72,6 +68,7 @@ test('arpeggiator steps a held chord into the synth', async ({ page }) => {
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await classicRig(page);
 
   const ids = await page.evaluate(() => {
     const s = window.__kk;

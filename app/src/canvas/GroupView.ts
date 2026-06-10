@@ -390,7 +390,11 @@ export class GroupView extends Container {
         g.clear();
         g.alpha = dim;
         g.circle(cx, cy, r * 0.78).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
+        // moveTo before each arc: without it the path connects from its
+        // current point (the graphics origin), drawing stray wire-like lines.
+        g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
         g.arc(cx, cy, r, a0, a1).stroke({ width: 3, color: theme.inset });
+        g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
         g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: PORT_TYPE_COLORS.control });
         g.moveTo(cx + Math.cos(av) * r * 0.3, cy + Math.sin(av) * r * 0.3)
           .lineTo(cx + Math.cos(av) * r * 0.72, cy + Math.sin(av) * r * 0.72)

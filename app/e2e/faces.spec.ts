@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { classicRig } from './util';
 
 /**
  * Module face designer (PRD §6 macro controls as a design framework):
@@ -7,14 +8,12 @@ import { expect, test, type Page } from '@playwright/test';
 
 async function start(page: Page): Promise<{ synth: string; lfo: string }> {
   await page.goto('/');
-  await page.waitForTimeout(400); // starter patch mounts
-  return page.evaluate(() => {
-    const mods = [...window.__kk.graph.modules.values()];
-    return {
-      synth: mods.find((m) => m.type === 'synth')!.id,
-      lfo: mods.find((m) => m.type === 'lfo')!.id,
-    };
-  });
+  await page.waitForTimeout(400); // canvas mounts
+  // Classic flat rig: these specs group synth+lfo themselves and would
+  // collide with the shipping starter patch's pre-made faced group.
+  const rig = await classicRig(page);
+  await page.waitForTimeout(200); // let the rebuilt canvas render
+  return { synth: rig.synth, lfo: rig.lfo };
 }
 
 /** Group synth+lfo and return the group id (selected afterwards). */

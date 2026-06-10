@@ -36,7 +36,8 @@ export type StateEvent =
   | 'midiChanged' // MIDI-learn armed/disarmed or mapping changed
   | 'visualizerChanged' // big visualizer overlay opened/closed
   | 'faceEditorChanged' // face editor opened/closed
-  | 'faceLearnChanged'; // face learn armed/canceled/completed
+  | 'faceLearnChanged' // face learn armed/canceled/completed
+  | 'composerChanged'; // piano-roll editor opened/closed
 
 type Listener = () => void;
 
@@ -69,6 +70,20 @@ export class AppState {
   closeVisualizer(): void {
     this.visualizerOpen = null;
     this.emit('visualizerChanged');
+  }
+
+  /** Composer module open in the piano-roll editor; null = closed. */
+  composerOpen: string | null = null;
+
+  openComposer(moduleId: string): void {
+    if (this.graph.modules.get(moduleId)?.type !== 'composer') return;
+    this.composerOpen = moduleId;
+    this.emit('composerChanged');
+  }
+
+  closeComposer(): void {
+    this.composerOpen = null;
+    this.emit('composerChanged');
   }
   /** moduleId → performance.now() of last note-on, for data-wire pulses. */
   noteFlash = new Map<string, number>();

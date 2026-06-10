@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { classicRig } from './util';
 
 test('visualizer receives wave + spectrum and big view opens', async ({ page }) => {
   const errors: string[] = [];
@@ -6,17 +7,15 @@ test('visualizer receives wave + spectrum and big view opens', async ({ page }) 
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  const rig = await classicRig(page);
 
-  const visId = await page.evaluate(() => {
+  const visId = await page.evaluate(({ synth, sequencer }) => {
     const s = window.__kk;
-    const mods = [...s.graph.modules.values()];
-    const synth = mods.find((m) => m.type === 'synth')!;
-    const seq = mods.find((m) => m.type === 'sequencer')!;
     const vis = s.addModule('visualizer', 600, 500);
-    s.connect({ moduleId: synth.id, portId: 'out' }, { moduleId: vis.id, portId: 'in' });
-    s.connect({ moduleId: seq.id, portId: 'notes' }, { moduleId: vis.id, portId: 'notes' });
+    s.connect({ moduleId: synth, portId: 'out' }, { moduleId: vis.id, portId: 'in' });
+    s.connect({ moduleId: sequencer, portId: 'notes' }, { moduleId: vis.id, portId: 'notes' });
     return vis.id;
-  });
+  }, { synth: rig.synth, sequencer: rig.sequencer });
   await page.locator('.transport button[title="Play"]').click();
 
   // Waveform + spectrum feeds arrive with real signal in them.

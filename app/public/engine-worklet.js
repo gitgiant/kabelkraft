@@ -55,9 +55,15 @@ class Voice {
     this.svfLp = 0;
     this.svfBp = 0;
     this.age = 0;
+    // Per-note expression (composer piano roll); neutral defaults.
+    this.pan = 0; // -1..1
+    this.modX = 0; // vibrato depth 0..1
+    this.modY = 0; // cutoff lift 0..1
+    this.relVel = 0.5; // note-off velocity; 0.5 = neutral release time
+    this.vibPhase = 0;
   }
 
-  noteOn(voiceId, pitch, velocity, glideFrom) {
+  noteOn(voiceId, pitch, velocity, glideFrom, extras) {
     this.active = true;
     this.voiceId = voiceId;
     this.pitch = pitch;
@@ -67,10 +73,16 @@ class Voice {
     this.fStage = 'attack';
     this.fEnv = 0;
     this.age = 0;
+    this.pan = extras && extras.pan !== undefined ? extras.pan : 0;
+    this.modX = extras && extras.modX !== undefined ? extras.modX : 0;
+    this.modY = extras && extras.modY !== undefined ? extras.modY : 0;
+    this.relVel = 0.5;
+    this.vibPhase = 0;
     // amp env continues from current level for click-free retrigger
   }
 
-  noteOff() {
+  noteOff(release) {
+    if (release !== undefined) this.relVel = release;
     if (this.stage !== 'off') this.stage = 'release';
     if (this.fStage !== 'off') this.fStage = 'release';
   }
@@ -130,7 +142,7 @@ class SynthModule {
     return Math.min(MAX_VOICES, Math.max(1, Math.round(this.params.voices ?? 8)));
   }
 
-  noteOn(voiceId, pitch, velocity) {
+  noteOn(voiceId, pitch, velocity, extras) {
     const limit = this.maxVoices();
     const activeVoices = this.voices.filter((v) => v.active);
     let voice;
@@ -140,13 +152,13 @@ class SynthModule {
       voice = this.voices.find((v) => !v.active);
     }
     const glide = this.params.glide ?? 0;
-    voice.noteOn(voiceId, pitch, velocity, glide > 0.001 ? this.lastPitch : undefined);
+    voice.noteOn(voiceId, pitch, velocity, glide > 0.001 ? this.lastPitch : undefined, extras);
     this.lastPitch = pitch;
   }
 
-  noteOff(voiceId) {
+  noteOff(voiceId, release) {
     for (const v of this.voices) {
-      if (v.active && v.voiceId === voiceId) v.noteOff();
+      if (v.active && v.voiceId === voiceId) v.noteOff(release);
     }
   }
 
@@ -260,16 +272,27 @@ class SynthModule {
     const glideCoef = glide > 0.001 ? 1 - Math.exp(-1 / (glide * 0.2 * sampleRate)) : 1;
 
     this.outL.fill(0);
+    this.outR.fill(0);
 
     for (const v of this.voices) {
       if (!v.active) continue;
+
+      // Per-note expression (composer piano roll): note-off velocity scales
+      // the release time (high = lifted fast = shorter tail), mod Y lifts the
+      // per-voice cutoff up to +2 octaves, mod X adds 5 Hz vibrato, pan uses
+      // a balance law so center stays at unity.
+      const relScale = 0.5 + v.relVel; // 0.5×..1.5× speed, 0.5 = neutral
+      const relStepV = relStep * relScale;
+      const fRelStepV = fRelStep * relScale;
+      const gL = Math.min(1, 1 - v.pan);
+      const gR = Math.min(1, 1 + v.pan);
 
       // Per-voice cutoff once per block: filter env moves slowly vs. ~3 ms blocks.
       let f = 0;
       if (fType > 0) {
         const cutEff = Math.min(
           16000,
-          Math.max(20, cutoff * Math.pow(2, v.fEnv * fAmt * 6 + cutoffModOct)),
+          Math.max(20, cutoff * Math.pow(2, v.fEnv * fAmt * 6 + cutoffModOct + v.modY * 2)),
         );
         f = Math.min(1, 2 * Math.sin(Math.PI * Math.min(0.45, cutEff / sampleRate)));
       }
@@ -282,7 +305,7 @@ class SynthModule {
           v.env -= decStep;
           if (v.env <= sustain) { v.env = sustain; v.stage = 'decay-hold'; }
         } else if (v.stage === 'release') {
-          v.env -= relStep;
+          v.env -= relStepV;
           if (v.env <= 0) { v.env = 0; v.stage = 'off'; v.active = false; break; }
         }
         if (v.fStage === 'attack') {
@@ -292,15 +315,22 @@ class SynthModule {
           v.fEnv -= fDecStep;
           if (v.fEnv <= fSustain) { v.fEnv = fSustain; v.fStage = 'decay-hold'; }
         } else if (v.fStage === 'release') {
-          v.fEnv -= fRelStep;
+          v.fEnv -= fRelStepV;
           if (v.fEnv <= 0) { v.fEnv = 0; v.fStage = 'off'; }
         }
 
         if (glideCoef < 1) v.curPitch += (v.pitch - v.curPitch) * glideCoef;
         else v.curPitch = v.pitch;
 
+        let vib = 0;
+        if (v.modX > 0) {
+          vib = Math.sin(2 * Math.PI * v.vibPhase) * v.modX * 0.5;
+          v.vibPhase += 5 / sampleRate;
+          if (v.vibPhase >= 1) v.vibPhase -= 1;
+        }
+
         const freq =
-          440 * Math.pow(2, (v.curPitch + octave * 12 + coarse + fine + pitchModSemis - 69) / 12);
+          440 * Math.pow(2, (v.curPitch + octave * 12 + coarse + fine + pitchModSemis + vib - 69) / 12);
         const phaseStep = freq / sampleRate;
 
         let sample;
@@ -321,15 +351,19 @@ class SynthModule {
           sample = fType === 1 ? v.svfLp : fType === 2 ? hp : v.svfBp;
         }
 
-        this.outL[i] += sample * v.env * v.velocity * 0.3;
+        const out = sample * v.env * v.velocity * 0.3;
+        this.outL[i] += out * gL;
+        this.outR[i] += out * gR;
       }
       v.age++;
     }
 
     if (level !== 1) {
-      for (let i = 0; i < blockSize; i++) this.outL[i] *= level;
+      for (let i = 0; i < blockSize; i++) {
+        this.outL[i] *= level;
+        this.outR[i] *= level;
+      }
     }
-    this.outR.set(this.outL);
   }
 }
 
@@ -359,7 +393,7 @@ class SamplerModule {
     for (const v of this.voices) v.active = false;
   }
 
-  noteOn(voiceId, pitch, velocity) {
+  noteOn(voiceId, pitch, velocity, extras) {
     if (!this.sample) return;
     let voice = this.voices.find((v) => !v.active);
     if (!voice) voice = this.voices.reduce((a, b) => (a.age > b.age ? a : b));
@@ -373,11 +407,17 @@ class SamplerModule {
     voice.stage = 'attack';
     voice.env = 0;
     voice.age = 0;
+    // Per-note expression: pan (balance law) + release velocity.
+    voice.pan = extras && extras.pan !== undefined ? extras.pan : 0;
+    voice.relVel = 0.5;
   }
 
-  noteOff(voiceId) {
+  noteOff(voiceId, release) {
     for (const v of this.voices) {
-      if (v.active && v.voiceId === voiceId) v.stage = 'release';
+      if (v.active && v.voiceId === voiceId) {
+        v.stage = 'release';
+        if (release !== undefined) v.relVel = release;
+      }
     }
   }
 
@@ -400,6 +440,10 @@ class SamplerModule {
 
     for (const v of this.voices) {
       if (!v.active) continue;
+      const relStepV = relStep * (0.5 + (v.relVel === undefined ? 0.5 : v.relVel));
+      const pan = v.pan || 0;
+      const gPanL = Math.min(1, 1 - pan);
+      const gPanR = Math.min(1, 1 + pan);
       for (let i = 0; i < blockSize; i++) {
         if (v.stage === 'attack') {
           v.env += atkStep;
@@ -408,7 +452,7 @@ class SamplerModule {
           v.env -= decStep;
           if (v.env <= sustain) { v.env = sustain; v.stage = 'sustain'; }
         } else if (v.stage === 'release') {
-          v.env -= relStep;
+          v.env -= relStepV;
           if (v.env <= 0) { v.env = 0; v.stage = 'off'; v.active = false; break; }
         }
 
@@ -423,8 +467,8 @@ class SamplerModule {
         }
         const frac = v.pos - i0;
         const g = v.env * v.velocity * level;
-        this.outL[i] += (chL[i0] * (1 - frac) + chL[i0 + 1] * frac) * g;
-        this.outR[i] += (chR[i0] * (1 - frac) + chR[i0 + 1] * frac) * g;
+        this.outL[i] += (chL[i0] * (1 - frac) + chL[i0 + 1] * frac) * g * gPanL;
+        this.outR[i] += (chR[i0] * (1 - frac) + chR[i0 + 1] * frac) * g * gPanR;
         v.pos += v.rate;
       }
       v.age++;
@@ -1342,23 +1386,23 @@ class ArpModule {
 }
 
 /**
- * Composer (PRD §8.3): pattern bank arranged into a song. One song slot =
- * one bar of 16 sixteenths; each of the 4 tracks emits on its own out port.
+ * Composer (PRD §8.3, piano roll): one clip of free-time notes
+ * ({ start, length } in beats, per-note vel/prob) looped over data.length
+ * beats against the transport. Notes fire when their start crosses the
+ * current block's beat window.
  */
 class ComposerModule {
   constructor(id, params, data) {
     this.id = id;
     this.type = 'composer';
     this.params = params;
-    this.data = data || { patterns: [], song: [] };
-    this.lastStepIndex = -1;
+    this.data = data || { notes: [], length: 16 };
     this.activeNotes = []; // { voiceId, offAtSample }
   }
 
   allNotesOff(emitOff) {
     for (const n of this.activeNotes) emitOff(this.id, n.voiceId);
     this.activeNotes = [];
-    this.lastStepIndex = -1;
   }
 }
 
@@ -2568,22 +2612,23 @@ class EngineProcessor extends AudioWorkletProcessor {
     }
   }
 
-  routeNoteOn(srcId, voiceId, pitch, velocity, fromPortId) {
+  routeNoteOn(srcId, voiceId, pitch, velocity, fromPortId, extras) {
     for (const w of this.noteWires) {
       if (w.fromModuleId !== srcId) continue;
-      // Multi-out sources (composer tracks) route per output port.
+      // Multi-out sources route per output port.
       if (fromPortId && w.fromPortId && w.fromPortId !== fromPortId) continue;
       const target = this.modules.get(w.toModuleId);
-      if (target && target.noteOn) target.noteOn(voiceId, pitch, velocity);
+      // extras: per-note expression { pan, modX, modY } from the piano roll.
+      if (target && target.noteOn) target.noteOn(voiceId, pitch, velocity, extras);
     }
     this.noteActivity.add(srcId);
   }
 
-  routeNoteOff(srcId, voiceId) {
+  routeNoteOff(srcId, voiceId, release) {
     for (const w of this.noteWires) {
       if (w.fromModuleId !== srcId) continue;
       const target = this.modules.get(w.toModuleId);
-      if (target && target.noteOff) target.noteOff(voiceId);
+      if (target && target.noteOff) target.noteOff(voiceId, release);
     }
   }
 
@@ -2631,7 +2676,7 @@ class EngineProcessor extends AudioWorkletProcessor {
         continue;
       }
       if (mod.type === 'composer') {
-        this.runComposer(mod, blockEnd);
+        this.runComposer(mod, blockSize, blockEnd);
         continue;
       }
       if (mod.type !== 'sequencer') continue;
@@ -2672,43 +2717,53 @@ class EngineProcessor extends AudioWorkletProcessor {
     }
   }
 
-  /** Advance one composer across this block: song slot → pattern → step. */
-  runComposer(mod, blockEnd) {
+  /**
+   * Advance one composer across this block: fire clip notes whose start
+   * falls inside the block's beat window, mapped into the loop. Blocks tile
+   * the timeline with half-open windows, so each note fires exactly once
+   * per pass (minus probability rolls).
+   */
+  runComposer(mod, blockSize, blockEnd) {
     const t = this.transport;
 
     mod.activeNotes = mod.activeNotes.filter((n) => {
       if (n.offAtSample <= blockEnd) {
-        this.routeNoteOff(mod.id, n.voiceId);
+        this.routeNoteOff(mod.id, n.voiceId, n.release);
         return false;
       }
       return true;
     });
 
     if (!t.playing) return;
-    const patterns = (mod.data && mod.data.patterns) || [];
-    const song = (mod.data && mod.data.song) || [];
-    if (patterns.length === 0 || song.length === 0) return;
+    const notes = (mod.data && mod.data.notes) || [];
+    const len = Math.max(1, (mod.data && mod.data.length) || 16);
+    if (notes.length === 0) return;
 
-    const idx = Math.floor(t.posBeats * 4); // sixteenths
-    if (idx === mod.lastStepIndex) return;
-    mod.lastStepIndex = idx;
+    const blockBeats = (t.tempo / 60) * (blockSize / sampleRate);
+    const start = ((t.posBeats % len) + len) % len;
+    const end = start + blockBeats;
 
-    const bar = Math.floor(idx / 16);
-    const slot = ((bar % song.length) + song.length) % song.length;
-    const pIdx = song[slot];
-    if (pIdx === undefined || pIdx < 0) return;
-    const pattern = patterns[pIdx];
-    if (!pattern) return;
-    const step = ((idx % 16) + 16) % 16;
-
-    const gate = mod.params.gate ?? 0.5;
-    const stepDurSamples = (60 / t.tempo / 4) * sampleRate;
-    for (let track = 0; track < pattern.length; track++) {
-      const st = pattern[track][step];
-      if (!st || !st.on) continue;
+    for (const note of notes) {
+      const s = ((note.start % len) + len) % len;
+      const hit = (s >= start && s < end) || (end > len && s < end - len);
+      if (!hit) continue;
+      const prob = note.prob === undefined ? 1 : note.prob;
+      if (prob < 1 && Math.random() > prob) continue;
       const voiceId = this.nextVoiceId++;
-      this.routeNoteOn(mod.id, voiceId, st.pitch, 0.9, `out${track + 1}`);
-      mod.activeNotes.push({ voiceId, offAtSample: this.sampleCount + stepDurSamples * gate });
+      this.routeNoteOn(
+        mod.id,
+        voiceId,
+        note.pitch,
+        note.vel === undefined ? 0.8 : note.vel,
+        'notes',
+        { pan: note.pan || 0, modX: note.modX || 0, modY: note.modY || 0 },
+      );
+      const durSamples = (note.length * 60 / t.tempo) * sampleRate;
+      mod.activeNotes.push({
+        voiceId,
+        offAtSample: this.sampleCount + durSamples,
+        release: note.release === undefined ? 0.5 : note.release,
+      });
     }
   }
 

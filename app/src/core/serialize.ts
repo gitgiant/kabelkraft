@@ -3,6 +3,7 @@
  * Same schema family the AI patch format (§10.1) builds on.
  */
 
+import { clipFromData } from './composer';
 import { Graph, bumpGroupId, bumpWireId, type ModuleGroup, type Wire } from './graph';
 import { bumpModuleId, type ModuleDef, type ModuleInstance } from './module';
 import type { SerializedSample } from './samples';
@@ -74,7 +75,14 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
     const def = defs.get(mod.type)!;
     const params: Record<string, number> = {};
     for (const p of def.params) params[p.id] = mod.params?.[p.id] ?? p.default;
-    graph.addModule({ ...mod, params });
+    // Legacy composer pattern banks become piano-roll clips.
+    let data = mod.data;
+    if (mod.type === 'composer' && data && !Array.isArray(data.notes)) {
+      const clip = clipFromData(data);
+      data = { notes: clip.notes, length: clip.length };
+      warnings.push(`Composer ${mod.id}: legacy patterns converted to a piano-roll clip`);
+    }
+    graph.addModule({ ...mod, params, data });
     bumpModuleId(mod.id);
   }
 

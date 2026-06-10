@@ -89,3 +89,33 @@ Third option is standalone aplication, where performance is desired: I am famili
 
 fourth option which would be IDEAL: support all 3, browser, VST, standalone.
 for software stack before we start building I want a full cost benefit anaylsis here.
+
+
+
+=============
+
+second phase human design
+way more powerful visualizer
+have streaming video input
+have visualizer take in all sorts of input
+build visual engine, effect layering, generative visuals
+
+
+module "panels" with artwork, styling, UI, hide away the ugly stuff
+make panels take visualizer input -> visualize effects and produce
+a track is not only an audio piece but a visual one
+
+generative sources: can be plugged into data or audio inputs or visualizer-> pulse, random, noise, audio stream, math forumula, external APIS, AI?
+local LLM for patch generation? prototype later
+artwork generation
+
+mod matrix - matrix 
+
+combine AI art generation, sample generation, patch generation to enable prompt like:
+"I want vaporwave sounding lead with an 808 lookin drum machine" which would produce the internal synth, the face artwork (even visualizer engine), and audio sample generation
+
+redraw all modules as module faces, and allow going all the way down to the atom level.
+
+UI elements color input - rainbows
+
+auto wire button

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { classicRig } from './util';
 
 /**
  * Build-your-own-synth components (Voice/Osc/Filter/Amp + poly lanes) and
@@ -9,7 +10,9 @@ async function start(page: Page): Promise<void> {
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
-  // Silence the starter patch so meters reflect only what each test builds.
+  // Classic flat rig (the shipping starter's group tile would overlap test
+  // placements), silenced so meters reflect only what each test builds.
+  await classicRig(page);
   await page.evaluate(() => {
     const s = window.__kk;
     for (const w of [...s.graph.wires.values()]) s.disconnect(w.id);
