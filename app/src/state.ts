@@ -12,6 +12,7 @@ import { deserializeProject, serializeProject } from './core/serialize';
 import { DEFAULT_TRANSPORT, type TransportState } from './core/types';
 import { Engine } from './engine/engine';
 import type { MeterReading } from './engine/messages';
+import { encodeWav } from './engine/wav';
 
 export type StateEvent =
   | 'graphChanged' // modules/wires added or removed — structural
@@ -56,7 +57,23 @@ export class AppState {
   private redoStack: string[] = [];
   private static readonly UNDO_LIMIT = 100;
 
+  /** Active recordings: moduleId → accumulated chunks. */
+  private recordings = new Map<
+    string,
+    { chunksL: Float32Array[]; chunksR: Float32Array[]; samples: number; sampleRate: number }
+  >();
+  /** For UI + tests: last finished recording length in seconds. */
+  lastRecordingSeconds = 0;
+
   constructor() {
+    this.engine.onRecordData((data) => {
+      const rec = this.recordings.get(data.moduleId);
+      if (!rec) return;
+      rec.chunksL.push(data.chL);
+      rec.chunksR.push(data.chR);
+      rec.samples += data.chL.length;
+      rec.sampleRate = data.sampleRate;
+    });
     this.engine.onStatus((status) => {
       this.meters = status.meters;
       this.seqSteps = status.seqSteps;
@@ -363,6 +380,54 @@ export class AppState {
     if (voiceId === undefined) return;
     held!.delete(key);
     this.engine.noteOff(this.graph, sourceModuleId, voiceId);
+  }
+
+  // -- Recording (PRD §8.7) -------------------------------------------------
+
+  isRecording(moduleId: string): boolean {
+    return this.recordings.has(moduleId);
+  }
+
+  recordingSeconds(moduleId: string): number {
+    const rec = this.recordings.get(moduleId);
+    return rec ? rec.samples / rec.sampleRate : 0;
+  }
+
+  toggleRecord(moduleId: string): void {
+    if (this.recordings.has(moduleId)) {
+      this.finishRecording(moduleId);
+      return;
+    }
+    void this.ensureEngine().then(() => {
+      this.recordings.set(moduleId, { chunksL: [], chunksR: [], samples: 0, sampleRate: 48000 });
+      this.engine.recordStart(moduleId);
+    });
+  }
+
+  private finishRecording(moduleId: string): void {
+    this.engine.recordStop(moduleId);
+    // Give the final flush a moment to arrive before assembling the file.
+    setTimeout(() => {
+      const rec = this.recordings.get(moduleId);
+      this.recordings.delete(moduleId);
+      if (!rec || rec.samples === 0) return;
+      const chL = new Float32Array(rec.samples);
+      const chR = new Float32Array(rec.samples);
+      let offset = 0;
+      for (let i = 0; i < rec.chunksL.length; i++) {
+        chL.set(rec.chunksL[i], offset);
+        chR.set(rec.chunksR[i], offset);
+        offset += rec.chunksL[i].length;
+      }
+      this.lastRecordingSeconds = rec.samples / rec.sampleRate;
+      const blob = encodeWav(chL, chR, rec.sampleRate);
+      const a = document.createElement('a');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      a.href = URL.createObjectURL(blob);
+      a.download = `${this.projectName}-${stamp}.wav`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }, 150);
   }
 
   // -- Transport ---------------------------------------------------------

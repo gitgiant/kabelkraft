@@ -10,7 +10,7 @@ test('app loads with starter patch, no console errors', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('.toolbar .logo')).toHaveText('KabelKraft');
   await expect(page.locator('.canvas-container canvas')).toBeVisible();
-  await expect(page.locator('.palette .module-entry')).toHaveCount(13);
+  await expect(page.locator('.palette .module-entry')).toHaveCount(16);
 
   // Starter patch seeds 5 modules + 3 wires; give the canvas a beat to mount.
   await page.waitForTimeout(500);
@@ -156,6 +156,79 @@ test('sampler plays injected PCM pitched by the sequencer', async ({ page }) => 
   expect(roundTrip.embedded).toBe(1);
   expect(roundTrip.restoredName).toBe('test-sine.wav');
   expect(roundTrip.restoredLength).toBe(22050);
+});
+
+test('recorder captures playing audio and downloads a WAV', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('.enable-audio').click();
+  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+
+  const recorderId = await page.evaluate(() => {
+    const s = window.__kk;
+    const synth = [...s.graph.modules.values()].find((m) => m.type === 'synth')!;
+    const recorder = s.addModule('recorder', 600, 400);
+    s.connect({ moduleId: synth.id, portId: 'out' }, { moduleId: recorder.id, portId: 'in' });
+    return recorder.id;
+  });
+
+  await page.locator('.transport button[title="Play"]').click();
+  await page.evaluate((id) => window.__kk.toggleRecord(id), recorderId);
+
+  // Record ~1.5 s of the sequence.
+  await page.waitForTimeout(1500);
+  await expect
+    .poll(() => page.evaluate((id) => window.__kk.recordingSeconds(id), recorderId))
+    .toBeGreaterThan(0.5);
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.evaluate((id) => window.__kk.toggleRecord(id), recorderId);
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/\.wav$/);
+
+  const seconds = await page.evaluate(() => window.__kk.lastRecordingSeconds);
+  expect(seconds).toBeGreaterThan(0.5);
+});
+
+test('ADSR and Random feed control values', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('.enable-audio').click();
+  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+
+  const ids = await page.evaluate(() => {
+    const s = window.__kk;
+    const mods = [...s.graph.modules.values()];
+    const sequencer = mods.find((m) => m.type === 'sequencer')!;
+    const synth = mods.find((m) => m.type === 'synth')!;
+    const adsr = s.addModule('adsr', 0, 600);
+    const random = s.addModule('random', 300, 600);
+    s.connect({ moduleId: sequencer.id, portId: 'notes' }, { moduleId: adsr.id, portId: 'notes' });
+    // Control fan-in is single-wire: random replaces the starter LFO on pitchMod.
+    s.connect({ moduleId: random.id, portId: 'out' }, { moduleId: synth.id, portId: 'pitchMod' });
+    return { adsr: adsr.id, random: random.id, synth: synth.id };
+  });
+
+  // Single-wire rule: synth pitchMod now has exactly one incoming wire.
+  const fanIn = await page.evaluate(
+    (synthId) =>
+      [...window.__kk.graph.wires.values()].filter(
+        (w) => w.to.moduleId === synthId && w.to.portId === 'pitchMod',
+      ).length,
+    ids.synth,
+  );
+  expect(fanIn).toBe(1);
+
+  await page.locator('.transport button[title="Play"]').click();
+  // ADSR envelope rises with sequencer gates; Random always emits a value.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          (i) => (window.__kk.controlValues[i.adsr] ?? 0) + (window.__kk.controlValues[i.random] !== undefined ? 1 : 0),
+          ids,
+        ),
+      { timeout: 5000 },
+    )
+    .toBeGreaterThan(1);
 });
 
 test('effect inserted into the chain passes audio through', async ({ page }) => {

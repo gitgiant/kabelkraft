@@ -13,7 +13,9 @@ import type {
   EngineModuleSnapshot,
   EngineModuleType,
   EngineWireSnapshot,
+  RecordDataMessage,
   StatusMessage,
+  WorkletMessage,
 } from './messages';
 
 const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
@@ -26,16 +28,21 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'delay',
   'reverb',
   'distortion',
+  'adsr',
+  'random',
   'eq',
   'mixer',
+  'recorder',
 ]);
 
 export type StatusListener = (status: StatusMessage) => void;
+export type RecordDataListener = (data: RecordDataMessage) => void;
 
 export class Engine {
   private ctx: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
   private statusListeners = new Set<StatusListener>();
+  private recordListeners = new Set<RecordDataListener>();
   private nextVoiceId = 1;
 
   get running(): boolean {
@@ -54,9 +61,11 @@ export class Engine {
       numberOfInputs: 0,
       outputChannelCount: [2],
     });
-    this.node.port.onmessage = (e: MessageEvent<StatusMessage>) => {
+    this.node.port.onmessage = (e: MessageEvent<WorkletMessage>) => {
       if (e.data.type === 'status') {
         for (const l of this.statusListeners) l(e.data);
+      } else if (e.data.type === 'recordData') {
+        for (const l of this.recordListeners) l(e.data);
       }
     };
     this.node.connect(this.ctx.destination);
@@ -65,6 +74,19 @@ export class Engine {
   onStatus(listener: StatusListener): () => void {
     this.statusListeners.add(listener);
     return () => this.statusListeners.delete(listener);
+  }
+
+  onRecordData(listener: RecordDataListener): () => void {
+    this.recordListeners.add(listener);
+    return () => this.recordListeners.delete(listener);
+  }
+
+  recordStart(moduleId: string): void {
+    this.send({ type: 'recordStart', moduleId });
+  }
+
+  recordStop(moduleId: string): void {
+    this.send({ type: 'recordStop', moduleId });
   }
 
   private send(msg: EngineMessage): void {

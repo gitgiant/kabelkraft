@@ -11,11 +11,14 @@ export type EngineModuleType =
   | 'levels'
   | 'sequencer'
   | 'lfo'
+  | 'adsr'
+  | 'random'
   | 'delay'
   | 'reverb'
   | 'distortion'
   | 'eq'
-  | 'mixer';
+  | 'mixer'
+  | 'recorder';
 
 export interface EngineModuleSnapshot {
   id: string;
@@ -84,6 +87,11 @@ export interface SampleMessage {
   channels: Float32Array[];
 }
 
+export interface RecordControlMessage {
+  type: 'recordStart' | 'recordStop';
+  moduleId: string;
+}
+
 export type EngineMessage =
   | GraphMessage
   | ParamMessage
@@ -91,7 +99,8 @@ export type EngineMessage =
   | TransportMessage
   | NoteOnMessage
   | NoteOffMessage
-  | SampleMessage;
+  | SampleMessage
+  | RecordControlMessage;
 
 /** Worklet → main thread, ~30 Hz. */
 export interface MeterReading {
@@ -112,3 +121,14 @@ export interface StatusMessage {
   /** Transport position in beats (worklet is the clock while playing). */
   songPosition: number;
 }
+
+/** Worklet → main: a chunk of captured audio from a recorder module. */
+export interface RecordDataMessage {
+  type: 'recordData';
+  moduleId: string;
+  sampleRate: number;
+  chL: Float32Array;
+  chR: Float32Array;
+}
+
+export type WorkletMessage = StatusMessage | RecordDataMessage;

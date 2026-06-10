@@ -192,11 +192,71 @@ export class ModuleView extends Container {
 
     if (this.instance.type === 'keyboard') this.buildKeys(x, y + 2, w);
     if (this.instance.type === 'transport') this.buildTransportButtons(x, y + 4);
-    if (this.instance.type === 'levels' || this.instance.type === 'audioOut') {
+    if (
+      this.instance.type === 'levels' ||
+      this.instance.type === 'audioOut' ||
+      this.instance.type === 'recorder'
+    ) {
       this.buildMeter(x, this.def.height - 18, w);
     }
     if (this.instance.type === 'sequencer') this.buildStepGrid(x, y + 4, w);
     if (this.instance.type === 'sampler') this.buildSamplerFace(x, y + 4, w);
+    if (this.instance.type === 'recorder') this.buildRecorderFace(x, y + 4, w);
+  }
+
+  // -- recorder face -----------------------------------------------------------
+
+  private recButton: Graphics | null = null;
+  private recLabel: Text | null = null;
+  private recElapsed: Text | null = null;
+  private recRect = { x: 0, y: 0 };
+
+  private buildRecorderFace(x: number, y: number, w: number): void {
+    this.recRect = { x, y };
+    this.recButton = new Graphics();
+    this.addChild(this.recButton);
+
+    this.recLabel = new Text({ text: '', style: { fontSize: 12, fill: TEXT_COLOR, fontWeight: 'bold' } });
+    this.recLabel.anchor.set(0.5);
+    this.recLabel.position.set(x + 45, y + 15);
+    this.recLabel.eventMode = 'none';
+    this.addChild(this.recLabel);
+
+    this.recElapsed = new Text({ text: '0.0 s', style: { fontSize: 12, fill: DIM_TEXT } });
+    this.recElapsed.anchor.set(1, 0);
+    this.recElapsed.position.set(x + w, y + 8);
+    this.addChild(this.recElapsed);
+
+    const hit = new Graphics().rect(x, y, 90, 30).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      appState.toggleRecord(this.instance.id);
+      this.drawRecButton();
+    });
+    hit.on('pointerover', (e) =>
+      this.tooltip.show(
+        ['Recorder', 'Records incoming audio; stopping downloads a WAV file.'],
+        e.clientX,
+        e.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+    this.drawRecButton();
+  }
+
+  private drawRecButton(): void {
+    if (!this.recButton || !this.recLabel) return;
+    const recording = appState.isRecording(this.instance.id);
+    const { x, y } = this.recRect;
+    this.recButton
+      .clear()
+      .roundRect(x, y, 90, 30, 6)
+      .fill(recording ? 0xaa2020 : 0x3a3a48)
+      .stroke({ width: 1, color: recording ? 0xff5050 : 0x4a4a58 });
+    this.recLabel.text = recording ? '■ STOP' : '● REC';
   }
 
   // -- sampler face ----------------------------------------------------------
@@ -532,6 +592,16 @@ export class ModuleView extends Container {
 
   /** Called from the canvas ticker: live meters + sequencer playhead. */
   updateLive(): void {
+    if (this.recElapsed) {
+      const recording = appState.isRecording(this.instance.id);
+      this.recElapsed.text = recording
+        ? `${appState.recordingSeconds(this.instance.id).toFixed(1)} s`
+        : appState.lastRecordingSeconds > 0
+          ? `saved ${appState.lastRecordingSeconds.toFixed(1)} s`
+          : '0.0 s';
+      // Keep the button in sync if recording was toggled elsewhere.
+      this.drawRecButton();
+    }
     if (this.stepGrid) {
       const step = appState.seqSteps[this.instance.id] ?? -1;
       const current = appState.transport.playing ? step : -1;

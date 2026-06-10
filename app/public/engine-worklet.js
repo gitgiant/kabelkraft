@@ -270,6 +270,125 @@ class LfoModule {
   }
 }
 
+/** Note-gated control envelope (monophonic; any held note keeps the gate open). */
+class AdsrModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'adsr';
+    this.params = params;
+    this.held = new Set();
+    this.stage = 'off'; // attack | decay | sustain | release | off
+    this.env = 0;
+    this.value = 0;
+  }
+
+  noteOn(voiceId) {
+    this.held.add(voiceId);
+    this.stage = 'attack';
+  }
+
+  noteOff(voiceId) {
+    this.held.delete(voiceId);
+    if (this.held.size === 0 && this.stage !== 'off') this.stage = 'release';
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const step = blockSize / sampleRate;
+    if (this.stage === 'attack') {
+      this.env += step / Math.max(0.001, p.attack ?? 0.05);
+      if (this.env >= 1) { this.env = 1; this.stage = 'decay'; }
+    } else if (this.stage === 'decay') {
+      const sustain = p.sustain ?? 0.6;
+      this.env -= step / Math.max(0.001, p.decay ?? 0.2);
+      if (this.env <= sustain) { this.env = sustain; this.stage = 'sustain'; }
+    } else if (this.stage === 'release') {
+      this.env -= step / Math.max(0.001, p.release ?? 0.3);
+      if (this.env <= 0) { this.env = 0; this.stage = 'off'; }
+    }
+    this.value = this.env;
+  }
+}
+
+const RANDOM_WALK = 0;
+const RANDOM_SH = 1;
+
+class RandomModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'random';
+    this.params = params;
+    this.phase = 0;
+    this.current = Math.random();
+    this.target = Math.random();
+    this.value = 0.5;
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const mode = Math.round(p.mode ?? RANDOM_WALK);
+    const rate = p.rate ?? 1;
+    const depth = p.depth ?? 0.5;
+    const offset = p.offset ?? 0.5;
+
+    this.phase += (rate * blockSize) / sampleRate;
+    if (this.phase >= 1) {
+      this.phase -= Math.floor(this.phase);
+      this.current = mode === RANDOM_SH ? this.target : this.current;
+      this.target = Math.random();
+    }
+    const raw = mode === RANDOM_WALK
+      ? this.current + (this.target - this.current) * this.phase // glide between targets
+      : this.target; // stepped
+    if (mode === RANDOM_WALK && this.phase >= 0.999) this.current = this.target;
+    this.value = Math.min(1, Math.max(0, offset + (raw - 0.5) * depth));
+  }
+}
+
+class RecorderModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'recorder';
+    this.params = params;
+    this.inputs = { in: makeStereoBuf() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.recording = false;
+    this.chunksL = [];
+    this.chunksR = [];
+    this.pendingSamples = 0;
+  }
+
+  render(blockSize) {
+    for (let i = 0; i < blockSize; i++) {
+      this.outL[i] = this.inputs.in.L[i];
+      this.outR[i] = this.inputs.in.R[i];
+    }
+    if (this.recording) {
+      this.chunksL.push(this.outL.slice(0, blockSize));
+      this.chunksR.push(this.outR.slice(0, blockSize));
+      this.pendingSamples += blockSize;
+    }
+  }
+
+  /** Concatenate pending chunks for transfer to the main thread. */
+  drain() {
+    if (this.pendingSamples === 0) return null;
+    const chL = new Float32Array(this.pendingSamples);
+    const chR = new Float32Array(this.pendingSamples);
+    let offset = 0;
+    for (let i = 0; i < this.chunksL.length; i++) {
+      chL.set(this.chunksL[i], offset);
+      chR.set(this.chunksR[i], offset);
+      offset += this.chunksL[i].length;
+    }
+    this.chunksL = [];
+    this.chunksR = [];
+    this.pendingSamples = 0;
+    return { chL, chR };
+  }
+}
+
 class SequencerModule {
   constructor(id, params, data) {
     this.id = id;
@@ -693,6 +812,12 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new EqModule(m.id, m.params));
           } else if (m.type === 'mixer') {
             next.set(m.id, new MixerModule(m.id, m.params));
+          } else if (m.type === 'adsr') {
+            next.set(m.id, new AdsrModule(m.id, m.params));
+          } else if (m.type === 'random') {
+            next.set(m.id, new RandomModule(m.id, m.params));
+          } else if (m.type === 'recorder') {
+            next.set(m.id, new RecorderModule(m.id, m.params));
           }
         }
         this.modules = next;
@@ -740,6 +865,19 @@ class EngineProcessor extends AudioWorkletProcessor {
       case 'sample': {
         const mod = this.modules.get(msg.moduleId);
         if (mod && mod.type === 'sampler') mod.setSample(msg.sampleRate, msg.channels);
+        break;
+      }
+      case 'recordStart': {
+        const mod = this.modules.get(msg.moduleId);
+        if (mod && mod.type === 'recorder') mod.recording = true;
+        break;
+      }
+      case 'recordStop': {
+        const mod = this.modules.get(msg.moduleId);
+        if (mod && mod.type === 'recorder') {
+          mod.recording = false;
+          this.flushRecorder(mod);
+        }
         break;
       }
     }
@@ -873,7 +1011,7 @@ class EngineProcessor extends AudioWorkletProcessor {
         }
       }
 
-      if (mod.type === 'lfo') {
+      if (mod.type === 'lfo' || mod.type === 'adsr' || mod.type === 'random') {
         mod.render(blockSize);
         continue;
       }
@@ -891,8 +1029,25 @@ class EngineProcessor extends AudioWorkletProcessor {
     }
 
     this.sampleCount += blockSize;
+
+    // Stream recorder captures in ~0.25 s chunks.
+    for (const mod of this.modules.values()) {
+      if (mod.type === 'recorder' && mod.recording && mod.pendingSamples >= sampleRate / 4) {
+        this.flushRecorder(mod);
+      }
+    }
+
     this.postStatus(blockSize);
     return true;
+  }
+
+  flushRecorder(mod) {
+    const data = mod.drain();
+    if (!data) return;
+    this.port.postMessage(
+      { type: 'recordData', moduleId: mod.id, sampleRate, chL: data.chL, chR: data.chR },
+      [data.chL.buffer, data.chR.buffer],
+    );
   }
 
   postStatus(blockSize) {
@@ -933,7 +1088,7 @@ class EngineProcessor extends AudioWorkletProcessor {
     const controlValues = {};
     for (const mod of this.modules.values()) {
       if (mod.type === 'sequencer') seqSteps[mod.id] = mod.currentStep;
-      if (mod.type === 'lfo') controlValues[mod.id] = mod.value;
+      if (mod.value !== undefined) controlValues[mod.id] = mod.value;
     }
 
     this.port.postMessage({

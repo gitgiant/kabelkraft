@@ -176,6 +176,59 @@ const levels: ModuleDef = {
   height: 120,
 };
 
+const adsr: ModuleDef = {
+  type: 'adsr',
+  name: 'ADSR',
+  category: 'data',
+  description:
+    'Envelope as a control signal: gated by incoming notes, modulates anything with a control input.',
+  ports: [
+    { id: 'notes', label: 'Gate', type: 'note', direction: 'in', description: 'Notes gate the envelope (note on = attack, note off = release).' },
+    { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Envelope value 0.0–1.0.' },
+  ],
+  params: [
+    { id: 'attack', label: 'Attack', min: 0.001, max: 4, default: 0.05, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'decay', label: 'Decay', min: 0.001, max: 4, default: 0.2, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'sustain', label: 'Sustain', min: 0, max: 1, default: 0.6, randomizable: true },
+    { id: 'release', label: 'Release', min: 0.001, max: 8, default: 0.3, unit: 's', curve: 'exp', randomizable: true },
+  ],
+  width: 180,
+  height: 130,
+};
+
+export const RANDOM_MODES = ['walk', 's&h'] as const;
+
+const random: ModuleDef = {
+  type: 'random',
+  name: 'Random',
+  category: 'data',
+  description: 'Random control source: smooth random walk or stepped sample-and-hold.',
+  ports: [
+    { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Random control signal 0.0–1.0.' },
+  ],
+  params: [
+    { id: 'mode', label: 'Mode', min: 0, max: RANDOM_MODES.length - 1, default: 0, options: [...RANDOM_MODES], randomizable: true },
+    { id: 'rate', label: 'Rate', min: 0.01, max: 20, default: 1, unit: 'Hz', curve: 'exp', randomizable: true },
+    { id: 'depth', label: 'Depth', min: 0, max: 1, default: 0.5, randomizable: true },
+    { id: 'offset', label: 'Offset', min: 0, max: 1, default: 0.5, randomizable: true },
+  ],
+  width: 180,
+  height: 130,
+};
+
+const recorder: ModuleDef = {
+  type: 'recorder',
+  name: 'Recorder',
+  category: 'io',
+  description: 'Records incoming audio; stopping downloads a WAV file (PRD §8.7).',
+  ports: [
+    { id: 'in', label: 'Audio', type: 'audio', direction: 'in', description: 'Audio to record; multiple wires are summed.' },
+  ],
+  params: [],
+  width: 190,
+  height: 120,
+};
+
 export const DIST_ALGOS = ['soft', 'hard', 'tube', 'fold'] as const;
 
 const audioIn = (desc = 'Audio input; multiple wires are summed.'): import('./module').PortSpec => ({
@@ -279,8 +332,8 @@ const mixer: ModuleDef = {
 
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
-    transport, sequencer, lfo, synth, sampler, keyboard,
+    transport, sequencer, lfo, adsr, random, synth, sampler, keyboard,
     delay, reverb, distortion, eq,
-    mixer, audioOut, levels,
+    mixer, recorder, audioOut, levels,
   ].map((d) => [d.type, d]),
 );
