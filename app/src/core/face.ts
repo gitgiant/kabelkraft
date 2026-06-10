@@ -61,7 +61,7 @@ export function defaultFace(): FaceSpec {
   return { width: 320, height: 220, grid: 10, snap: true, elements: [] };
 }
 
-const ELEMENT_DEFAULTS: Record<FaceElementKind, { w: number; h: number }> = {
+export const ELEMENT_DEFAULTS: Record<FaceElementKind, { w: number; h: number }> = {
   knob: { w: 70, h: 86 },
   slider: { w: 36, h: 120 },
   xy: { w: 120, h: 120 },

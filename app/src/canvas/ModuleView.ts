@@ -75,6 +75,9 @@ export class ModuleView extends Container {
   private clipDot: Graphics | null = null;
   private portDots = new Map<string, Graphics>();
   private flashTimers = new Map<string, number>();
+  private popUntil = 0;
+  private popFrom = { x: 0, y: 0 };
+  private static readonly POP_MS = 340;
 
   constructor(
     readonly instance: ModuleInstance,
@@ -190,6 +193,46 @@ export class ModuleView extends Container {
     this.flashTimers.set(
       portId,
       window.setTimeout(() => this.setPortHighlight(portId, false), 350),
+    );
+  }
+
+  /** Pop a freshly inserted module into existence (AI import, PRD §10). */
+  popIn(): void {
+    this.popFrom = { x: this.position.x, y: this.position.y };
+    this.popUntil = performance.now() + ModuleView.POP_MS;
+    this.scale.set(0.001);
+    this.alpha = 0;
+  }
+
+  /** Snap an in-flight pop to its resting transform (e.g. if the user grabs it). */
+  cancelPop(): void {
+    if (this.popUntil === 0) return;
+    this.popUntil = 0;
+    this.scale.set(1);
+    this.alpha = 1;
+    this.position.set(this.popFrom.x, this.popFrom.y);
+  }
+
+  /** Advance the pop animation; called once per frame while active. */
+  advancePop(now: number): void {
+    if (this.popUntil === 0) return;
+    const remaining = this.popUntil - now;
+    if (remaining <= 0) {
+      this.cancelPop();
+      return;
+    }
+    const t = 1 - remaining / ModuleView.POP_MS;
+    // ease-out-back: grows past 1 then settles, for a tactile "pop".
+    const c1 = 1.70158;
+    const c3 = c1 + 1;
+    const u = t - 1;
+    const s = 1 + c3 * u * u * u + c1 * u * u;
+    this.scale.set(s);
+    this.alpha = Math.min(1, t * 3);
+    // Scale about the tile centre without disturbing the logical position.
+    this.position.set(
+      this.popFrom.x + (1 - s) * (this.def.width / 2),
+      this.popFrom.y + (1 - s) * (this.def.height / 2),
     );
   }
 

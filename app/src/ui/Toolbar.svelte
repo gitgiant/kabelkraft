@@ -205,7 +205,7 @@
   <button
     class="ai-toggle"
     onclick={() => window.dispatchEvent(new CustomEvent('kk-ai-import'))}
-    title="AI patches: copy the spec for any chatbot, import its .kkgroup reply"
+    title="AI patches: generate in-app with Claude or a local LLM, or copy the spec for any chatbot"
   >
     🤖 AI
   </button>

@@ -705,10 +705,10 @@ export class AppState {
   importAiPatch(
     text: string,
     origin: { x: number; y: number } = { x: 0, y: 0 },
-  ): { ok: boolean; errors: string[]; warnings: string[]; groupId?: string } {
+  ): { ok: boolean; errors: string[]; warnings: string[]; groupId?: string; moduleIds: string[] } {
     const result = parseKkGroup(text, MODULE_DEFS);
     if (!result.ok || !result.patch) {
-      return { ok: false, errors: result.errors, warnings: result.warnings };
+      return { ok: false, errors: result.errors, warnings: result.warnings, moduleIds: [] };
     }
     const patch = result.patch;
     const warnings = [...result.warnings];
@@ -748,6 +748,24 @@ export class AppState {
     }
 
     const group = this.graph.createGroup(patch.name, [...idMap.values()], [], origin.x, origin.y);
+
+    // Optional AI-designed front panel (PRD §6/§10): remap element bindings from
+    // the patch's own ids to the real instance ids, prune any that don't resolve,
+    // and collapse so the face is shown as a finished module.
+    if (patch.face) {
+      const face = {
+        ...patch.face,
+        elements: patch.face.elements.map((el) => ({
+          ...el,
+          moduleId: el.moduleId ? idMap.get(el.moduleId) : undefined,
+          moduleId2: el.moduleId2 ? idMap.get(el.moduleId2) : undefined,
+        })),
+      };
+      pruneFaceBindings(this.graph, group.id, face);
+      group.face = face;
+      group.collapsed = true;
+    }
+
     this.engine.syncGraph(this.graph);
     // Default kits only after the worklet knows the new modules.
     for (const id of drumIds) this.installDefaultKit(id);
@@ -755,7 +773,7 @@ export class AppState {
     this.selectedGroupIds.add(group.id);
     this.emit('graphChanged');
     this.emit('selectionChanged');
-    return { ok: true, errors: [], warnings, groupId: group.id };
+    return { ok: true, errors: [], warnings, groupId: group.id, moduleIds: [...idMap.values()] };
   }
 
   // -- Selection --------------------------------------------------------

@@ -1,11 +1,23 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
+  import { extractJson } from '../core/aiimport';
   import { generateSpecPack } from '../core/aispec';
+  import {
+    CLAUDE_MODELS,
+    generatePatch,
+    loadSettings,
+    providerLabel,
+    providerReady,
+    saveSettings,
+    type AiSettings,
+  } from '../core/aiprovider';
   import { appState } from '../state';
 
   // PRD §10.2: copy the spec pack for an external chatbot, paste its JSON
   // reply (or drop a .kkgroup file), validate readably, insert as a group.
+  // PRD §10.3: if a backend (Claude / local LLM) is configured, generate in-app
+  // instead — same spec pack, same validator, with an automatic repair loop.
 
   let open = $state(false);
   let text = $state('');
@@ -14,18 +26,112 @@
   let copied = $state(false);
   let imported = $state(false);
 
+  let settings = $state<AiSettings>(loadSettings());
+  let showSettings = $state(false);
+  let generating = $state(false);
+  let genStatus = $state('');
+
+  // A generated + validated patch waiting to be placed (drag onto canvas / Place).
+  let readyPatch = $state('');
+  let readyName = $state('');
+  let placing = $state(false);
+
   onMount(() => {
     const onToggle = () => {
       open = !open;
       errors = [];
       warnings = [];
       imported = false;
+      readyPatch = '';
+      placing = false;
     };
     window.addEventListener('kk-ai-import', onToggle);
-    return () => window.removeEventListener('kk-ai-import', onToggle);
+    // Drag the ready-patch chip anywhere over the canvas to place it there.
+    window.addEventListener('dragover', onWindowDragOver);
+    window.addEventListener('drop', onWindowDrop);
+    return () => {
+      window.removeEventListener('kk-ai-import', onToggle);
+      window.removeEventListener('dragover', onWindowDragOver);
+      window.removeEventListener('drop', onWindowDrop);
+    };
   });
 
+  function patchName(t: string): string {
+    try {
+      return (JSON.parse(extractJson(t)).name as string) || 'AI Patch';
+    } catch {
+      return 'AI Patch';
+    }
+  }
+
+  /** Validate + insert at a world point, then pop the new modules in. */
+  function insertAt(point: { x: number; y: number }) {
+    const result = appState.importAiPatch(readyPatch, point);
+    errors = result.errors;
+    warnings = result.warnings;
+    if (result.ok) {
+      patchCanvas.popInImport(result.moduleIds, result.groupId);
+      imported = true;
+      readyPatch = '';
+      text = '';
+      setTimeout(() => (open = false), 900);
+    }
+  }
+
+  function place() {
+    if (readyPatch) insertAt(patchCanvas.viewCenter());
+  }
+
+  function onChipDragStart(e: DragEvent) {
+    placing = true;
+    e.dataTransfer?.setData('text/plain', readyName);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy';
+  }
+
+  function onWindowDragOver(e: DragEvent) {
+    if (placing) e.preventDefault(); // mark the page as a valid drop surface
+  }
+
+  function onWindowDrop(e: DragEvent) {
+    if (!placing || !readyPatch) return;
+    e.preventDefault();
+    const point = patchCanvas.worldFromClient(e.clientX, e.clientY);
+    placing = false;
+    if (point) insertAt(point); // dropped outside the canvas → keep the chip
+  }
+
   let userPrompt = $state('');
+
+  function persistSettings() {
+    saveSettings(settings);
+  }
+
+  async function generate() {
+    const prompt = userPrompt.trim();
+    if (!prompt || generating) return;
+    generating = true;
+    genStatus = '';
+    errors = [];
+    warnings = [];
+    imported = false;
+    readyPatch = '';
+    try {
+      const result = await generatePatch(prompt, settings, 3, (s) => (genStatus = s));
+      text = result.text;
+      if (result.ok) {
+        // Hold it as a draggable chip instead of auto-inserting (PRD §10).
+        readyPatch = result.text;
+        readyName = patchName(result.text);
+      } else {
+        runImport(); // surface the validation errors (nothing is inserted)
+      }
+    } catch (e) {
+      errors = [(e as Error).message];
+    } finally {
+      generating = false;
+      genStatus = '';
+    }
+  }
 
   async function copySpec() {
     // Spec + the user's request in one paste-able block.
@@ -42,6 +148,7 @@
     errors = result.errors;
     warnings = result.warnings;
     if (result.ok) {
+      patchCanvas.popInImport(result.moduleIds, result.groupId);
       imported = true;
       text = '';
       setTimeout(() => {
@@ -64,18 +171,84 @@
 <svelte:window onkeydown={onKey} />
 
 {#if open}
-  <div class="ai-backdrop">
+  <div class="ai-backdrop" class:placing>
     <div class="ai-dialog" role="dialog" aria-label="Import AI Patch" tabindex="-1" ondragover={(e) => e.preventDefault()} ondrop={onDrop}>
       <div class="ai-header">
-        <span class="ai-title">Import AI Patch</span>
+        <span class="ai-title">AI Patch</span>
+        <span class="provider-tag" title="Active AI backend (configure with Setup)">{providerLabel(settings)}</span>
         <span class="spacer"></span>
+        <button class="setup-btn" class:active={showSettings} onclick={() => (showSettings = !showSettings)} title="Configure an AI backend">
+          ⚙ Setup
+        </button>
         <button onclick={() => (open = false)} title="Close (Esc)">✕</button>
       </div>
 
+      {#if showSettings}
+        <div class="settings">
+          <div class="settings-row">
+            <span class="settings-label">Backend</span>
+            <div class="provider-pick">
+              <label><input type="radio" name="prov" value="none" bind:group={settings.provider} onchange={persistSettings} /> Off (copy/paste)</label>
+              <label><input type="radio" name="prov" value="claude" bind:group={settings.provider} onchange={persistSettings} /> Claude</label>
+              <label><input type="radio" name="prov" value="local" bind:group={settings.provider} onchange={persistSettings} /> Local LLM</label>
+            </div>
+          </div>
+
+          {#if settings.provider === 'claude'}
+            <div class="settings-row">
+              <span class="settings-label">API key</span>
+              <input class="grow" type="password" placeholder="sk-ant-…" bind:value={settings.claude.apiKey} onchange={persistSettings} spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="settings-row">
+              <span class="settings-label">Model</span>
+              <select bind:value={settings.claude.model} onchange={persistSettings}>
+                {#each CLAUDE_MODELS as m}<option value={m}>{m}</option>{/each}
+              </select>
+            </div>
+            <p class="settings-note">Key is stored in this browser only and sent directly to Anthropic.</p>
+          {:else if settings.provider === 'local'}
+            <div class="settings-row">
+              <span class="settings-label">Base URL</span>
+              <input class="grow" type="text" placeholder="http://localhost:11434/v1" bind:value={settings.local.baseUrl} onchange={persistSettings} spellcheck="false" />
+            </div>
+            <div class="settings-row">
+              <span class="settings-label">Model</span>
+              <input class="grow" type="text" placeholder="llama3.1" bind:value={settings.local.model} onchange={persistSettings} spellcheck="false" />
+            </div>
+            <p class="settings-note">Any OpenAI-compatible endpoint (Ollama, LM Studio). The server must allow this page's origin (CORS).</p>
+          {/if}
+        </div>
+      {/if}
+
       <p class="ai-help">
-        1. Describe the sound you want, copy, and paste it into any chatbot.<br />
-        2. Paste the JSON it answers with below (or drop a .kkgroup file here).
+        {#if readyPatch}
+          Patch ready — <strong>drag it onto the canvas</strong> to place it where you drop, or <strong>Place</strong> it in the center.
+        {:else if providerReady(settings)}
+          Describe the sound you want and click <strong>Generate</strong> — it's built and validated, then drag it onto the canvas.
+        {:else}
+          1. Describe the sound you want, copy, and paste it into any chatbot.<br />
+          2. Paste the JSON it answers with below (or drop a .kkgroup file here).
+        {/if}
       </p>
+
+      {#if readyPatch}
+        <div class="ready">
+          <div
+            class="patch-chip"
+            role="button"
+            tabindex="0"
+            draggable="true"
+            ondragstart={onChipDragStart}
+            ondragend={() => (placing = false)}
+            title="Drag onto the canvas to drop it there"
+          >
+            <span class="chip-icon">🎛</span>
+            <span class="chip-name">{readyName}</span>
+            <span class="chip-hint">drag onto canvas</span>
+          </div>
+          <button class="place" onclick={place}>Place in center</button>
+        </div>
+      {/if}
 
       <div class="prompt-row">
         <input
@@ -84,10 +257,17 @@
           bind:value={userPrompt}
           placeholder="e.g. a warm dub bassline with tape delay"
           spellcheck="false"
+          onkeydown={(e) => { if (e.key === 'Enter' && providerReady(settings)) generate(); }}
         />
-        <button class="copy-spec" onclick={copySpec} title="Copies the AI spec followed by USER PROMPT: your text">
-          {copied ? '✓ Copied!' : '📋 Copy Spec + Prompt'}
-        </button>
+        {#if providerReady(settings)}
+          <button class="generate" onclick={generate} disabled={generating || userPrompt.trim().length === 0} title="Generate, validate, and insert in one step">
+            {generating ? '… ' + genStatus : '✨ Generate'}
+          </button>
+        {:else}
+          <button class="copy-spec" onclick={copySpec} title="Copies the AI spec followed by USER PROMPT: your text">
+            {copied ? '✓ Copied!' : '📋 Copy Spec + Prompt'}
+          </button>
+        {/if}
       </div>
 
       <textarea
@@ -126,6 +306,12 @@
     align-items: center;
     justify-content: center;
     z-index: 65;
+    transition: opacity 0.12s ease;
+  }
+  /* While dragging the ready chip, get out of the way so the canvas is the drop target. */
+  .ai-backdrop.placing {
+    opacity: 0;
+    pointer-events: none;
   }
   .ai-dialog {
     width: 640px;
@@ -158,6 +344,99 @@
   }
   .copy-spec {
     font-weight: 600;
+    white-space: nowrap;
+  }
+  .provider-tag {
+    font-size: 11px;
+    color: var(--text-dim);
+    border: 1px solid var(--panel-border);
+    border-radius: 5px;
+    padding: 1px 6px;
+    margin-left: 8px;
+  }
+  .setup-btn.active {
+    outline: 1px solid var(--accent);
+  }
+  .generate {
+    background: var(--accent);
+    color: #1a1a20;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .generate:disabled {
+    opacity: 0.5;
+  }
+  .settings {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--control);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .settings-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .settings-label {
+    width: 64px;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .provider-pick {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .provider-pick label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .settings .grow {
+    flex: 1;
+    font-size: 12px;
+  }
+  .settings-note {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin: 0;
+  }
+  .ready {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .patch-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #1a1a20;
+    font-weight: 600;
+    cursor: grab;
+    user-select: none;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+  .patch-chip:active {
+    cursor: grabbing;
+  }
+  .chip-icon {
+    font-size: 16px;
+  }
+  .chip-hint {
+    font-size: 11px;
+    font-weight: 500;
+    opacity: 0.75;
+  }
+  .place {
     white-space: nowrap;
   }
   .prompt-row {
