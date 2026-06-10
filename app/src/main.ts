@@ -2,6 +2,9 @@ import { mount } from 'svelte'
 import './app.css'
 import App from './App.svelte'
 import { appState } from './state'
+import { initTheme } from './theme'
+
+initTheme()
 
 const app = mount(App, {
   target: document.getElementById('app')!,

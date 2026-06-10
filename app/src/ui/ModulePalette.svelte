@@ -29,8 +29,8 @@
 <style>
   .palette {
     width: 170px;
-    background: #1f1f26;
-    border-right: 1px solid #34343f;
+    background: var(--panel);
+    border-right: 1px solid var(--panel-border);
     padding: 10px;
     overflow-y: auto;
     user-select: none;
@@ -38,14 +38,14 @@
   .palette-title {
     font-weight: 700;
     font-size: 13px;
-    color: #d8d8e0;
+    color: var(--text);
     margin-bottom: 8px;
   }
   .category {
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 1px;
-    color: #707080;
+    color: var(--text-dim);
     margin: 10px 0 4px;
   }
   .module-entry {
@@ -54,11 +54,11 @@
     text-align: left;
     margin-bottom: 4px;
     padding: 6px 8px;
-    background: #26262e;
-    border: 1px solid #3a3a48;
+    background: var(--control);
+    border: 1px solid var(--control-border);
   }
   .module-entry:hover {
-    background: #32323e;
-    border-color: #ffb13d;
+    background: var(--panel-border);
+    border-color: var(--accent);
   }
 </style>

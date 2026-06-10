@@ -158,6 +158,78 @@ test('sampler plays injected PCM pitched by the sequencer', async ({ page }) => 
   expect(roundTrip.restoredLength).toBe(22050);
 });
 
+test('theme toggle switches to light and persists', async ({ page }) => {
+  await page.goto('/');
+  const before = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),
+  );
+  expect(before).toBe('#17171c');
+  await page.locator('.theme-toggle').click();
+  const after = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),
+  );
+  expect(after).toBe('#e9e9ef');
+  expect(await page.evaluate(() => localStorage.getItem('kk-theme'))).toBe('light');
+  // Persists across reload.
+  await page.reload();
+  const reloaded = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),
+  );
+  expect(reloaded).toBe('#e9e9ef');
+  await page.evaluate(() => localStorage.removeItem('kk-theme'));
+});
+
+test('tutorial steps auto-advance and complete', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('button[title="Start the tutorial"]').click();
+  await expect(page.locator('.tutorial-title')).toHaveText('Add a Synth');
+
+  // Tutorial resets to a minimal patch (transport + audioOut only).
+  expect(await page.evaluate(() => window.__kk.graph.modules.size)).toBe(2);
+
+  await page.locator('.module-entry', { hasText: 'Synth' }).first().click();
+  await expect(page.locator('.tutorial-title')).toHaveText('Add a Keyboard');
+
+  await page.locator('.module-entry', { hasText: 'Keyboard' }).click();
+  await expect(page.locator('.tutorial-title')).toHaveText('Wire some notes');
+
+  // Remaining steps via state ops (drag emulation is covered elsewhere).
+  await page.evaluate(() => {
+    const s = window.__kk;
+    const mods = [...s.graph.modules.values()];
+    const kb = mods.find((m) => m.type === 'keyboard')!;
+    const synth = mods.find((m) => m.type === 'synth')!;
+    s.connect({ moduleId: kb.id, portId: 'notes' }, { moduleId: synth.id, portId: 'notes' });
+  });
+  await expect(page.locator('.tutorial-title')).toHaveText('Wire the audio');
+
+  await page.evaluate(() => {
+    const s = window.__kk;
+    const mods = [...s.graph.modules.values()];
+    const synth = mods.find((m) => m.type === 'synth')!;
+    const out = mods.find((m) => m.type === 'audioOut')!;
+    s.connect({ moduleId: synth.id, portId: 'out' }, { moduleId: out.id, portId: 'in' });
+  });
+  await expect(page.locator('.tutorial-title')).toHaveText('Play!');
+
+  // Play a note via the state API (engine already started by tutorial).
+  await page.evaluate(() => {
+    const s = window.__kk;
+    const kb = [...s.graph.modules.values()].find((m) => m.type === 'keyboard')!;
+    s.noteOn(kb.id, 'e2e', 64);
+  });
+  await expect(page.locator('.tutorial-title')).toHaveText('Modulate with data', { timeout: 5000 });
+
+  await page.evaluate(() => {
+    const s = window.__kk;
+    const mods = [...s.graph.modules.values()];
+    const synth = mods.find((m) => m.type === 'synth')!;
+    const lfo = s.addModule('lfo', -400, 200);
+    s.connect({ moduleId: lfo.id, portId: 'out' }, { moduleId: synth.id, portId: 'pitchMod' });
+  });
+  await expect(page.locator('.tutorial-step')).toHaveText(/Tutorial complete/);
+});
+
 test('recorder captures playing audio and downloads a WAV', async ({ page }) => {
   await page.goto('/');
   await page.locator('.enable-audio').click();

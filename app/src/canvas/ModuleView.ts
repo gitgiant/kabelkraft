@@ -16,6 +16,7 @@ import {
   type SeqStep,
 } from '../core/registry';
 import { appState } from '../state';
+import { theme } from '../theme';
 import type { Tooltip } from './Tooltip';
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -27,11 +28,6 @@ function noteName(pitch: number): string {
 export const PORT_RADIUS = 7;
 const TITLE_H = 24;
 const ROW_H = 20;
-const BODY_COLOR = 0x26262e;
-const BODY_SELECTED = 0x32323e;
-const TITLE_COLOR = 0x33333d;
-const TEXT_COLOR = 0xd8d8e0;
-const DIM_TEXT = 0x9090a0;
 
 export interface PortHandlers {
   onPortDown(moduleId: string, portId: string, e: FederatedPointerEvent): void;
@@ -85,10 +81,10 @@ export class ModuleView extends Container {
     this.body.clear();
     this.body
       .roundRect(0, 0, w, h, 8)
-      .fill(selected ? BODY_SELECTED : BODY_COLOR)
-      .stroke({ width: selected ? 2 : 1, color: selected ? 0xffffff : 0x4a4a58 });
-    this.body.roundRect(0, 0, w, TITLE_H, 8).fill(TITLE_COLOR);
-    this.body.rect(0, TITLE_H - 8, w, 8).fill(TITLE_COLOR);
+      .fill(selected ? theme.moduleBodySelected : theme.moduleBody)
+      .stroke({ width: selected ? 2 : 1, color: selected ? theme.selectedStroke : theme.moduleStroke });
+    this.body.roundRect(0, 0, w, TITLE_H, 8).fill(theme.moduleTitle);
+    this.body.rect(0, TITLE_H - 8, w, 8).fill(theme.moduleTitle);
     if (this.instance.color !== undefined) {
       this.body.rect(0, TITLE_H, w, 3).fill(this.instance.color);
     }
@@ -97,7 +93,7 @@ export class ModuleView extends Container {
   private buildTitle(): void {
     const title = new Text({
       text: this.instance.label ?? this.def.name,
-      style: { fontSize: 12, fill: TEXT_COLOR, fontWeight: 'bold' },
+      style: { fontSize: 12, fill: theme.text, fontWeight: 'bold' },
     });
     title.position.set(8, 5);
     this.addChild(title);
@@ -216,13 +212,13 @@ export class ModuleView extends Container {
     this.recButton = new Graphics();
     this.addChild(this.recButton);
 
-    this.recLabel = new Text({ text: '', style: { fontSize: 12, fill: TEXT_COLOR, fontWeight: 'bold' } });
+    this.recLabel = new Text({ text: '', style: { fontSize: 12, fill: theme.text, fontWeight: 'bold' } });
     this.recLabel.anchor.set(0.5);
     this.recLabel.position.set(x + 45, y + 15);
     this.recLabel.eventMode = 'none';
     this.addChild(this.recLabel);
 
-    this.recElapsed = new Text({ text: '0.0 s', style: { fontSize: 12, fill: DIM_TEXT } });
+    this.recElapsed = new Text({ text: '0.0 s', style: { fontSize: 12, fill: theme.textDim } });
     this.recElapsed.anchor.set(1, 0);
     this.recElapsed.position.set(x + w, y + 8);
     this.addChild(this.recElapsed);
@@ -254,7 +250,7 @@ export class ModuleView extends Container {
     this.recButton
       .clear()
       .roundRect(x, y, 90, 30, 6)
-      .fill(recording ? 0xaa2020 : 0x3a3a48)
+      .fill(recording ? 0xaa2020 : theme.button)
       .stroke({ width: 1, color: recording ? 0xff5050 : 0x4a4a58 });
     this.recLabel.text = recording ? '■ STOP' : '● REC';
   }
@@ -273,7 +269,7 @@ export class ModuleView extends Container {
 
     this.sampleNameText = new Text({
       text: '',
-      style: { fontSize: 10, fill: DIM_TEXT },
+      style: { fontSize: 10, fill: theme.textDim },
     });
     this.sampleNameText.position.set(x, y + h + 6);
     this.addChild(this.sampleNameText);
@@ -309,7 +305,7 @@ export class ModuleView extends Container {
     const { x, y, w, h } = this.waveRect;
     const g = this.waveform;
     g.clear();
-    g.roundRect(x, y, w, h, 4).fill(0x16161c);
+    g.roundRect(x, y, w, h, 4).fill(theme.inset);
     const sample = appState.samples.get(this.instance.id);
     if (this.sampleNameText) {
       this.sampleNameText.text = sample
@@ -428,7 +424,7 @@ export class ModuleView extends Container {
     for (let i = 0; i < steps.length; i++) {
       const cx = x + i * cellW;
       const isBeat = i % 4 === 0;
-      g.roundRect(cx + 1, y, cellW - 2, h, 2).fill(isBeat ? 0x20202a : 0x1c1c24);
+      g.roundRect(cx + 1, y, cellW - 2, h, 2).fill(theme.inset);
       if (i === playhead) {
         g.roundRect(cx + 1, y, cellW - 2, h, 2).fill({ color: 0xffffff, alpha: 0.12 });
       }
@@ -443,13 +439,13 @@ export class ModuleView extends Container {
   }
 
   private buildParamRow(param: ParamSpec, x: number, y: number, w: number): void {
-    const label = new Text({ text: param.label, style: { fontSize: 11, fill: DIM_TEXT } });
+    const label = new Text({ text: param.label, style: { fontSize: 11, fill: theme.textDim } });
     label.position.set(x, y + 3);
     this.addChild(label);
 
     const value = new Text({
       text: this.formatParam(param),
-      style: { fontSize: 11, fill: TEXT_COLOR },
+      style: { fontSize: 11, fill: theme.text },
     });
     value.anchor.set(1, 0);
     value.position.set(x + w, y + 3);
@@ -553,7 +549,7 @@ export class ModuleView extends Container {
       ['⏮', 'rewind'], ['▶', 'play'], ['⏸', 'pause'], ['⏹', 'stop'],
     ];
     buttons.forEach(([icon, cmd], i) => {
-      const g = new Graphics().roundRect(0, 0, 36, 26, 5).fill(0x3a3a48);
+      const g = new Graphics().roundRect(0, 0, 36, 26, 5).fill(theme.button);
       g.position.set(x + i * 42, y);
       g.eventMode = 'static';
       g.cursor = 'pointer';
@@ -562,7 +558,7 @@ export class ModuleView extends Container {
         appState.transportCommand(cmd);
       });
       this.addChild(g);
-      const t = new Text({ text: icon, style: { fontSize: 13, fill: TEXT_COLOR } });
+      const t = new Text({ text: icon, style: { fontSize: 13, fill: theme.text } });
       t.anchor.set(0.5);
       t.position.set(x + i * 42 + 18, y + 13);
       t.eventMode = 'none';
@@ -571,7 +567,7 @@ export class ModuleView extends Container {
   }
 
   private buildMeter(x: number, y: number, w: number): void {
-    const bg = new Graphics().roundRect(x, y, w, 8, 3).fill(0x16161c);
+    const bg = new Graphics().roundRect(x, y, w, 8, 3).fill(theme.inset);
     this.addChild(bg);
     this.meterBar = new Graphics();
     this.addChild(this.meterBar);

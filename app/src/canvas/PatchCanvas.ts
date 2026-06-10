@@ -9,11 +9,12 @@ import { Application, Container, FederatedPointerEvent, Graphics, Text } from 'p
 import type { ModuleGroup, PortRef, Wire } from '../core/graph';
 import { PORT_TYPE_COLORS } from '../core/types';
 import { appState } from '../state';
+import { onThemeChange, theme } from '../theme';
 import { GroupView, type BoundaryPort } from './GroupView';
 import { ModuleView } from './ModuleView';
 import { Tooltip } from './Tooltip';
 
-const BG_COLOR = 0x17171c;
+
 const NOTE_FLASH_MS = 250;
 
 interface WireDrag {
@@ -54,7 +55,7 @@ export class PatchCanvas {
   private bandStart: { x: number; y: number } | null = null;
 
   async mount(container: HTMLElement): Promise<void> {
-    await this.app.init({ background: BG_COLOR, resizeTo: container, antialias: true });
+    await this.app.init({ background: theme.canvasBg, resizeTo: container, antialias: true });
     container.appendChild(this.app.canvas);
     this.tooltip = new Tooltip(container);
 
@@ -85,6 +86,10 @@ export class PatchCanvas {
     });
     appState.on('selectionChanged', () => {
       for (const [id, v] of this.views) v.setSelected(appState.selectedModuleIds.has(id));
+    });
+    onThemeChange(() => {
+      this.app.renderer.background.color = theme.canvasBg;
+      this.rebuildAll();
     });
 
     this.app.ticker.add(() => this.tick());
@@ -145,6 +150,7 @@ export class PatchCanvas {
       }, this.tooltip);
       this.moduleLayer.addChild(view);
       this.views.set(inst.id, view);
+      this.resolveCollisions(view); // newly placed modules must not overlap (PRD §5)
     }
 
     // Group tiles and frames are few — rebuild from scratch each change.
@@ -171,7 +177,7 @@ export class PatchCanvas {
         const g = new Graphics();
         const title = new Text({
           text: `▣ ${group.name}  ▾`,
-          style: { fontSize: 12, fill: 0xb0b0d0, fontWeight: 'bold' },
+          style: { fontSize: 12, fill: theme.textDim, fontWeight: 'bold' },
         });
         title.eventMode = 'static';
         title.cursor = 'pointer';
@@ -552,8 +558,8 @@ export class PatchCanvas {
       if (!Number.isFinite(minX)) continue;
       const pad = 24;
       g.roundRect(minX - pad, minY - pad - 16, maxX - minX + pad * 2, maxY - minY + pad * 2 + 16, 14)
-        .fill({ color: group.color ?? 0x2a2a3a, alpha: 0.35 })
-        .stroke({ width: 1.5, color: group.color ?? 0x5a5a78, alpha: 0.8 });
+        .fill({ color: group.color ?? theme.frameFill, alpha: 0.35 })
+        .stroke({ width: 1.5, color: group.color ?? theme.groupStroke, alpha: 0.8 });
       title.position.set(minX - pad + 10, minY - pad - 10);
     }
   }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { appState } from '../state';
+  import { setTheme, theme } from '../theme';
 
   let projectName = $state(appState.projectName);
   let tempo = $state(appState.transport.tempo);
@@ -61,6 +62,17 @@
     if (warnings.length) alert(`Project loaded with warnings:\n${warnings.join('\n')}`);
     fileInput.value = '';
   }
+
+  let themeName = $state(theme.name);
+
+  function toggleTheme() {
+    themeName = themeName === 'dark' ? 'light' : 'dark';
+    setTheme(themeName);
+  }
+
+  function startTutorial() {
+    window.dispatchEvent(new CustomEvent('kk-start-tutorial'));
+  }
 </script>
 
 <div class="toolbar">
@@ -102,6 +114,11 @@
 
   <span class="spacer"></span>
 
+  <button class="theme-toggle" onclick={toggleTheme} title="Toggle dark/light theme">
+    {themeName === 'dark' ? '☀' : '🌙'}
+  </button>
+  <button onclick={startTutorial} title="Start the tutorial">?</button>
+
   {#if !audioOn}
     <button class="enable-audio" onclick={enableAudio}>🔊 Enable Audio</button>
   {:else}
@@ -115,14 +132,14 @@
     align-items: center;
     gap: 8px;
     padding: 6px 12px;
-    background: #1f1f26;
-    border-bottom: 1px solid #34343f;
+    background: var(--panel);
+    border-bottom: 1px solid var(--panel-border);
     user-select: none;
   }
   .logo {
     font-weight: 700;
     letter-spacing: 0.5px;
-    color: #ffb13d;
+    color: var(--accent);
     margin-right: 8px;
   }
   .project-name {
@@ -134,7 +151,7 @@
   .divider {
     width: 1px;
     height: 20px;
-    background: #34343f;
+    background: var(--panel-border);
     margin: 0 4px;
   }
   button:disabled {
@@ -147,7 +164,7 @@
     gap: 4px;
     padding: 2px 8px;
     border-radius: 6px;
-    background: #26262e;
+    background: var(--control);
   }
   .transport.playing {
     outline: 1px solid #52e07a;
@@ -157,7 +174,7 @@
     align-items: center;
     gap: 4px;
     font-size: 12px;
-    color: #9090a0;
+    color: var(--text-dim);
   }
   .transport input[type='number'] {
     width: 56px;

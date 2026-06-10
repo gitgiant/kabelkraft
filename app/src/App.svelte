@@ -4,6 +4,7 @@
   import { appState } from './state';
   import ModulePalette from './ui/ModulePalette.svelte';
   import Toolbar from './ui/Toolbar.svelte';
+  import Tutorial from './ui/Tutorial.svelte';
 
   let canvasContainer: HTMLDivElement;
 
@@ -74,6 +75,7 @@
   <div class="main">
     <ModulePalette />
     <div class="canvas-container" bind:this={canvasContainer}></div>
+    <Tutorial />
   </div>
 </div>
 

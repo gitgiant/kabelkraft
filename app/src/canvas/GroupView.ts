@@ -9,12 +9,11 @@ import { Container, FederatedPointerEvent, Graphics, Text } from 'pixi.js';
 import type { ModuleGroup } from '../core/graph';
 import { PORT_TYPE_COLORS, type PortType } from '../core/types';
 import { appState } from '../state';
+import { theme } from '../theme';
 import { PORT_RADIUS } from './ModuleView';
 import type { Tooltip } from './Tooltip';
 
 const TITLE_H = 24;
-const BODY_COLOR = 0x222230;
-const FRAME_COLOR = 0x2a2a3a;
 
 export interface BoundaryPort {
   key: string; // `${moduleId}:${portId}`
@@ -62,10 +61,10 @@ export class GroupView extends Container {
 
     const body = new Graphics()
       .roundRect(0, 0, w, h, 10)
-      .fill(BODY_COLOR)
-      .stroke({ width: 2, color: this.group.color ?? 0x5a5a78 });
-    body.roundRect(0, 0, w, TITLE_H, 10).fill(0x33334a);
-    body.rect(0, TITLE_H - 8, w, 8).fill(0x33334a);
+      .fill(theme.groupBody)
+      .stroke({ width: 2, color: this.group.color ?? theme.groupStroke });
+    body.roundRect(0, 0, w, TITLE_H, 10).fill(theme.groupTitle);
+    body.rect(0, TITLE_H - 8, w, 8).fill(theme.groupTitle);
     body.eventMode = 'static';
     body.cursor = 'grab';
     body.on('pointerdown', (e) => this.handlers.onBodyDown(this, e));
@@ -88,7 +87,7 @@ export class GroupView extends Container {
 
     const title = new Text({
       text: `▣ ${this.group.name}`,
-      style: { fontSize: 12, fill: 0xe0e0ec, fontWeight: 'bold' },
+      style: { fontSize: 12, fill: theme.text, fontWeight: 'bold' },
     });
     title.position.set(8, 5);
     title.eventMode = 'none';
@@ -157,4 +156,4 @@ export class GroupView extends Container {
   }
 }
 
-export { FRAME_COLOR, TITLE_H as GROUP_TITLE_H };
+export { TITLE_H as GROUP_TITLE_H };

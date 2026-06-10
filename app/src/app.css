@@ -59,7 +59,7 @@ input:focus {
   z-index: 10;
   max-width: 280px;
   padding: 8px 10px;
-  background: rgba(26, 26, 32, 0.95);
+  background: var(--panel);
   border: 1px solid var(--control-border);
   border-radius: 6px;
   pointer-events: none;
