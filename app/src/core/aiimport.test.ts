@@ -8,7 +8,7 @@ const valid = JSON.stringify({
   formatVersion: 1,
   name: 'Test',
   modules: [
-    { id: 'a', type: 'synth', params: { level: 0.5 } },
+    { id: 'a', type: 'smpl', params: { level: 0.5 } },
     { id: 'b', type: 'audioOut' },
   ],
   wires: [{ from: { module: 'a', port: 'out' }, to: { module: 'b', port: 'in' } }],
@@ -30,18 +30,18 @@ describe('AI patch validation', () => {
 
   it('reports unknown module types with a closest match', () => {
     const r = parseKkGroup(
-      JSON.stringify({ modules: [{ id: 'a', type: 'synht' }] }),
+      JSON.stringify({ modules: [{ id: 'a', type: 'lfoo' }] }),
       MODULE_DEFS,
     );
     expect(r.ok).toBe(false);
-    expect(r.errors[0]).toContain('"synht" unknown');
-    expect(r.errors[0]).toContain('"synth"');
+    expect(r.errors[0]).toContain('"lfoo" unknown');
+    expect(r.errors[0]).toContain('"lfo"');
   });
 
   it('drops unknown params with a suggestion and clamps out-of-range values', () => {
     const r = parseKkGroup(
       JSON.stringify({
-        modules: [{ id: 'a', type: 'synth', params: { levle: 0.5, level: 99 } }],
+        modules: [{ id: 'a', type: 'smpl', params: { levle: 0.5, level: 99 } }],
       }),
       MODULE_DEFS,
     );
@@ -56,7 +56,7 @@ describe('AI patch validation', () => {
       parseKkGroup(
         JSON.stringify({
           modules: [
-            { id: 'a', type: 'synth' },
+            { id: 'a', type: 'smpl' },
             { id: 'b', type: 'audioOut' },
             { id: 'l', type: 'lfo' },
           ],
@@ -80,13 +80,13 @@ describe('AI patch validation', () => {
   });
 
   it('closest() only suggests plausible matches', () => {
-    expect(closest('synht', MODULE_DEFS.keys())).toBe('synth');
+    expect(closest('vcff', MODULE_DEFS.keys())).toBe('vcf');
     expect(closest('zzzzzzzzzz', MODULE_DEFS.keys())).toBeNull();
   });
 
-  it('suggestType falls back to vocabulary aliases (PRD example: superSaw → synth)', () => {
-    expect(suggestType('superSaw', MODULE_DEFS.keys())).toBe('synth');
-    expect(suggestType('drumMachine', MODULE_DEFS.keys())).toBe('drum');
+  it('suggestType falls back to vocabulary aliases (superSaw → osc, drums → smpl)', () => {
+    expect(suggestType('superSaw', MODULE_DEFS.keys())).toBe('osc');
+    expect(suggestType('drumMachine', MODULE_DEFS.keys())).toBe('smpl');
     expect(suggestType('zzqq', MODULE_DEFS.keys())).toBeNull();
   });
 });
@@ -128,7 +128,7 @@ describe('AI face parsing', () => {
     JSON.stringify({
       kind: 'kkgroup',
       modules: [
-        { id: 'a', type: 'synth' },
+        { id: 'a', type: 'smpl' },
         { id: 'b', type: 'audioOut' },
       ],
       wires: [{ from: { module: 'a', port: 'out' }, to: { module: 'b', port: 'in' } }],

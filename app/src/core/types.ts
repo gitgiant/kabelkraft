@@ -4,7 +4,7 @@
  * JSON schema, and (later) the AI spec pack.
  */
 
-export type PortType = 'audio' | 'note' | 'control' | 'trigger' | 'transport';
+export type PortType = 'audio' | 'note' | 'control' | 'trigger' | 'transport' | 'color';
 
 export type PortDirection = 'in' | 'out';
 
@@ -15,6 +15,7 @@ export const PORT_TYPE_COLORS: Record<PortType, number> = {
   control: 0xff3dd0, // magenta
   trigger: 0x52e07a, // green
   transport: 0xf0f0f0, // white
+  color: 0xb070ff, // violet — carries a live RGB value (Color Gen → UI tints)
 };
 
 /** Audio channel layout per wire — stereo by default (PRD §4.1). */

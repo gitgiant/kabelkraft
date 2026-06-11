@@ -1,3 +1,9 @@
+<script module lang="ts">
+  import type { ComposerNote as _CN } from '../core/composer';
+  // Shared across all open panels so a riff can be copied between composers.
+  let clipboard: _CN[] = [];
+</script>
+
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
@@ -12,20 +18,28 @@
     type ComposerNote,
   } from '../core/composer';
   import { parseSmf, writeSmf, type SmfFile } from '../core/smf';
+  import { patchCanvas } from '../canvas/PatchCanvas';
   import { appState } from '../state';
 
   // PRD §8.3 reworked: full piano-roll editor for the Composer module.
   // Keys on the left, zoomable free-time note grid, per-note parameter lane,
   // cut/copy/paste/undo/redo, quantize/humanize/randomize, MIDI file I/O.
   // Edits commit straight to the module's data, so the engine stays live.
+  // The panel is anchored over its module on the canvas (one per composer).
 
-  let open = $state(false);
-  let moduleId: string | null = null;
+  const { moduleId }: { moduleId: string } = $props();
   let title = $state('Composer');
 
+  // Anchored placement (px, viewport-fixed), recomputed each frame.
+  const GAP = 8;
+  let panelLeft = $state(0);
+  let panelTop = $state(0);
+  let onScreen = $state(true);
+  let active = $state(true);
+
   // Resizable panel (drag the corner handle).
-  let panelW = $state(Math.min(window.innerWidth - 60, 1000));
-  let panelH = $state(Math.min(window.innerHeight - 80, 620));
+  let panelW = $state(620);
+  let panelH = $state(420);
 
   // View: zoom in px/beat and px/semitone, scroll in px.
   let zoomX = $state(56);
@@ -41,7 +55,6 @@
   let notes: ComposerNote[] = [];
   let clipLength = $state(16);
   let selected = new Set<ComposerNote>();
-  let clipboard: ComposerNote[] = [];
   let lastNoteLen = 1;
 
   let snap = $state('1/16');
@@ -78,34 +91,42 @@
   let raf = 0;
 
   onMount(() => {
-    const offOpen = appState.on('composerChanged', syncOpen);
-    const offGraph = appState.on('graphChanged', () => {
-      if (open && !suppressSync) syncNotes(true);
+    const mod = appState.graph.modules.get(moduleId);
+    title = mod?.label ?? 'Composer';
+    syncNotes(true);
+    active = appState.composerActive === moduleId;
+    const offActive = appState.on('composerChanged', () => {
+      active = appState.composerActive === moduleId;
     });
+    const offGraph = appState.on('graphChanged', () => {
+      if (!suppressSync) syncNotes(true);
+    });
+    const tick = () => {
+      drawAll();
+      reposition();
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
     return () => {
-      offOpen();
+      offActive();
       offGraph();
       cancelAnimationFrame(raf);
     };
   });
 
-  function syncOpen() {
-    moduleId = appState.composerOpen;
-    if (!moduleId) {
-      open = false;
-      cancelAnimationFrame(raf);
+  /** Pin the panel over its module each frame (Q1=b: position only, not scale). */
+  function reposition() {
+    const r = patchCanvas.clientRectFor(moduleId);
+    if (!r || !r.onScreen) {
+      onScreen = false;
       return;
     }
-    const mod = appState.graph.modules.get(moduleId);
-    title = mod?.label ?? 'Composer';
-    syncNotes(true);
-    open = true;
-    const tick = () => {
-      drawAll();
-      raf = requestAnimationFrame(tick);
-    };
-    cancelAnimationFrame(raf);
-    raf = requestAnimationFrame(tick);
+    onScreen = true;
+    // Prefer top-right of the module; flip left if it would overflow.
+    let l = r.left + r.width + GAP;
+    if (l + panelW > window.innerWidth - 4) l = r.left - panelW - GAP;
+    panelLeft = Math.max(4, Math.min(window.innerWidth - panelW - 4, l));
+    panelTop = Math.max(4, Math.min(window.innerHeight - panelH - 4, r.top));
   }
 
   /** Pull notes from the module data (open, undo/redo, external change). */
@@ -113,7 +134,7 @@
     if (!moduleId) return;
     const mod = appState.graph.modules.get(moduleId);
     if (!mod) {
-      appState.closeComposer();
+      appState.closeComposer(moduleId);
       return;
     }
     const clip = clipFromData(mod.data);
@@ -140,7 +161,7 @@
   }
 
   function close() {
-    appState.closeComposer();
+    appState.closeComposer(moduleId);
   }
 
   // -- coordinate helpers -----------------------------------------------------
@@ -669,7 +690,8 @@
   // -- keyboard shortcuts -----------------------------------------------------
 
   function onKeyDown(e: KeyboardEvent) {
-    if (!open) return;
+    // Only the active (topmost) panel responds to global shortcuts.
+    if (!active) return;
     const tag = (document.activeElement?.tagName ?? '').toLowerCase();
     if (tag === 'input' || tag === 'select') return;
     if (quantOpen || importOpen) {
@@ -721,9 +743,12 @@
 
 <svelte:window onkeydown={onKeyDown} />
 
-{#if open}
-  <div class="editor-backdrop">
-    <div class="piano-roll" style="width:{panelW}px;height:{panelH}px">
+<div
+  class="piano-roll"
+  class:active
+  style="left:{panelLeft}px;top:{panelTop}px;width:{panelW}px;height:{panelH}px;visibility:{onScreen ? 'visible' : 'hidden'}"
+  onpointerdown={() => appState.raiseComposer(moduleId)}
+>
       <div class="header">
         <span class="title">Piano Roll — {title}</span>
         <label title="Loop length in beats (4 per bar)">
@@ -873,21 +898,12 @@
         </div>
       </div>
     {/if}
-  </div>
-{/if}
 
 <style>
-  .editor-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 60;
-  }
   .piano-roll {
-    position: relative;
+    position: fixed;
+    z-index: 60;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
     background: var(--panel);
     border: 1px solid var(--panel-border);
     border-radius: 10px;
@@ -896,6 +912,11 @@
     flex-direction: column;
     gap: 8px;
     box-sizing: border-box;
+  }
+  .piano-roll.active {
+    z-index: 61;
+    border-color: var(--accent);
+    box-shadow: 0 8px 34px rgba(0, 0, 0, 0.55);
   }
   .header,
   .toolbar-row {

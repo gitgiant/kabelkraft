@@ -17,10 +17,10 @@ Reply with ONE JSON code block, no prose inside it:
   "formatVersion": 1,
   "name": "Short patch name",
   "modules": [
-    { "id": "a", "type": "synth", "params": { "mode": 2, "level": 0.7 }, "x": 0, "y": 0 }
+    { "id": "osc1", "type": "osc", "params": { "wave": 3 }, "x": 0, "y": 0 }
   ],
   "wires": [
-    { "from": { "module": "a", "port": "out" }, "to": { "module": "b", "port": "in" } }
+    { "from": { "module": "osc1", "port": "out" }, "to": { "module": "out", "port": "in" } }
   ]
 }
 \`\`\`
@@ -28,11 +28,41 @@ Reply with ONE JSON code block, no prose inside it:
 Rules:
 - \`id\` is any string unique within the patch; wires reference these ids.
 - \`params\` may list only the params you change; everything else gets its default. Values are numbers; for option params use the option's INDEX (0-based).
+- A few modules carry a \`data\` object instead of params for their pattern (e.g. \`composer\` holds \`"data": { "notes": [...], "length": 4 }\`, each note \`{ "start": beats, "length": beats, "pitch": midi, "vel": 0..1 }\`).
 - \`x\`/\`y\` are layout hints in pixels (module tiles are 160–400 wide); the app auto-layouts to avoid overlap, so rough positions are fine.
 - Wire type compatibility: a wire connects an OUT port to an IN port of the SAME signal type (audio→audio, note→note, control→control).
 - A CONTROL input accepts at most ONE wire (single fan-in). Audio inputs sum multiple wires. Note outputs may fan out to many inputs.
 - Audio must reach an \`audioOut\` module to be heard — include one unless the user says otherwise.
 - Tempo-aware modules sync to the Master Transport implicitly; you rarely need a \`transport\` module inside a group.
+`;
+
+const SIGNAL_FLOW = `
+## Building instruments from components
+
+There is no single "synth" or "drum" module — you build instruments by wiring
+small components. Learn these signal-flow patterns and combine them.
+
+Wire types: notes (cyan), control (magenta, single fan-in), audio (amber, sums).
+
+- **Subtractive synth voice**: \`note source → voice → osc → vcf → vca → audioOut\`.
+  The \`voice\` turns a note stream into per-voice \`pitch\` (wire to \`osc.pitch\`) and
+  \`gate\` (wire to an \`adsr.gate\`). The amp envelope drives loudness:
+  \`adsr.out → vca.cv\`. A second \`adsr.out → vcf.mod\` gives a filter envelope
+  (depth = the vcf \`amt\` param, in octaves). \`lfo.out → vcf.mod\` instead for a
+  sweep. Set \`voice.voices\` to 1 for a mono/bass patch, higher for polyphony.
+- **Two-oscillator / detune**: two \`osc\` both fed \`voice.pitch\`, both \`→ vcf.in\`
+  (audio sums). Detune one with its \`fine\` param.
+- **FM**: wire one \`osc.out → another osc.fm\` (audio). The carrier's \`fmAmt\` sets
+  depth; the modulator's \`semi\`/\`fine\` set the ratio. Chain more for complex FM.
+- **Wavetable**: use \`wtosc\` (Position param + posMod input) in place of \`osc\`.
+- **Sampler**: \`note source → smpl → audioOut\`. \`smpl\` has its own amp envelope.
+- **Drum kit**: one \`composer\` (its \`data.notes\` are the beat; each note's \`pitch\`
+  selects a drum) fanned out to several \`smpl\`, one per drum. Give each \`smpl\` a
+  \`trigNote\` (the pitch that fires it), \`fixedPitch\` = 1 (play at root, ignore
+  pitch) and \`voices\` = 1. Hi-hats share a \`chokeGroup\` so open/closed cut each
+  other. All \`smpl.out → audioOut.in\`.
+- Always end audio at an \`audioOut\`. Effects (delay/reverb/etc.) sit in the audio
+  path before it.
 `;
 
 const FACE_RULES = `
@@ -70,81 +100,116 @@ Rules:
 const EXAMPLES = `
 ## Annotated examples
 
-### 1. Moody bass with sidechain pumping
+### 1. Subtractive bass (sequencer → voice → filter)
 \`\`\`json
 {
-  "kind": "kkgroup", "formatVersion": 1, "name": "Sidechain Bass",
+  "kind": "kkgroup", "formatVersion": 1, "name": "Subtractive Bass",
   "modules": [
-    { "id": "seq", "type": "sequencer", "params": { "division": 1 } },
-    { "id": "bass", "type": "synth", "params": { "waveform": 3, "octave": -2, "fType": 1, "cutoff": 600, "res": 0.5 } },
-    { "id": "kick", "type": "drum" },
-    { "id": "comp", "type": "compressor", "params": { "threshold": -35, "ratio": 8, "release": 180 } },
+    { "id": "seq", "type": "sequencer", "params": { "division": 2 } },
+    { "id": "voice", "type": "voice", "params": { "voices": 1, "glide": 0.04 } },
+    { "id": "osc", "type": "osc", "params": { "wave": 3, "octave": -1 } },
+    { "id": "ampEnv", "type": "adsr", "params": { "attack": 0.005, "decay": 0.12, "sustain": 0.2, "release": 0.12 } },
+    { "id": "filtEnv", "type": "adsr", "params": { "attack": 0.005, "decay": 0.18, "sustain": 0, "release": 0.12 } },
+    { "id": "vcf", "type": "vcf", "params": { "cutoff": 500, "res": 0.45, "amt": 2.5 } },
+    { "id": "vca", "type": "vca" },
     { "id": "out", "type": "audioOut" }
   ],
   "wires": [
-    { "from": { "module": "seq", "port": "notes" }, "to": { "module": "bass", "port": "notes" } },
-    { "from": { "module": "bass", "port": "out" }, "to": { "module": "comp", "port": "in" } },
-    { "from": { "module": "kick", "port": "out" }, "to": { "module": "comp", "port": "sc" } },
-    { "from": { "module": "kick", "port": "out" }, "to": { "module": "out", "port": "in" } },
-    { "from": { "module": "comp", "port": "out" }, "to": { "module": "out", "port": "in" } }
-  ]
-}
-\`\`\`
-The kick drives the compressor's sidechain input, so the bass ducks on every hit.
-
-### 2. Evolving FM pad
-\`\`\`json
-{
-  "kind": "kkgroup", "formatVersion": 1, "name": "FM Pad",
-  "modules": [
-    { "id": "kb", "type": "keyboard" },
-    { "id": "pad", "type": "synth", "params": { "mode": 2, "algo": 3, "l2": 0.4, "r2": 3.01, "attack": 0.8, "release": 2.5, "voices": 8 } },
-    { "id": "lfo", "type": "lfo", "params": { "rate": 0.15, "depth": 0.6 } },
-    { "id": "verb", "type": "reverb", "params": { "algo": 1, "decay": 0.8, "mix": 0.45 } },
-    { "id": "out", "type": "audioOut" }
-  ],
-  "wires": [
-    { "from": { "module": "kb", "port": "notes" }, "to": { "module": "pad", "port": "notes" } },
-    { "from": { "module": "lfo", "port": "out" }, "to": { "module": "pad", "port": "posMod" } },
-    { "from": { "module": "pad", "port": "out" }, "to": { "module": "verb", "port": "in" } },
-    { "from": { "module": "verb", "port": "out" }, "to": { "module": "out", "port": "in" } }
+    { "from": { "module": "seq", "port": "notes" }, "to": { "module": "voice", "port": "notes" } },
+    { "from": { "module": "voice", "port": "pitch" }, "to": { "module": "osc", "port": "pitch" } },
+    { "from": { "module": "voice", "port": "gate" }, "to": { "module": "ampEnv", "port": "gate" } },
+    { "from": { "module": "voice", "port": "gate" }, "to": { "module": "filtEnv", "port": "gate" } },
+    { "from": { "module": "osc", "port": "out" }, "to": { "module": "vcf", "port": "in" } },
+    { "from": { "module": "filtEnv", "port": "out" }, "to": { "module": "vcf", "port": "mod" } },
+    { "from": { "module": "vcf", "port": "out" }, "to": { "module": "vca", "port": "in" } },
+    { "from": { "module": "ampEnv", "port": "out" }, "to": { "module": "vca", "port": "cv" } },
+    { "from": { "module": "vca", "port": "out" }, "to": { "module": "out", "port": "in" } }
   ],
   "face": {
     "width": 360, "height": 200,
     "elements": [
-      { "kind": "label", "x": 16, "y": 4, "text": "FM PAD" },
-      { "kind": "knob", "x": 16, "y": 28, "label": "Attack", "module": "pad", "param": "attack" },
-      { "kind": "knob", "x": 96, "y": 28, "label": "Release", "module": "pad", "param": "release" },
-      { "kind": "knob", "x": 176, "y": 28, "label": "Voices", "module": "pad", "param": "voices" },
-      { "kind": "knob", "x": 256, "y": 28, "label": "Reverb", "module": "verb", "param": "mix" },
+      { "kind": "label", "x": 16, "y": 4, "text": "BASS" },
+      { "kind": "knob", "x": 16, "y": 28, "label": "Cutoff", "module": "vcf", "param": "cutoff" },
+      { "kind": "knob", "x": 96, "y": 28, "label": "Q", "module": "vcf", "param": "res" },
+      { "kind": "knob", "x": 176, "y": 28, "label": "Env Amt", "module": "vcf", "param": "amt" },
+      { "kind": "knob", "x": 256, "y": 28, "label": "Decay", "module": "ampEnv", "param": "decay" },
       { "kind": "meter", "x": 16, "y": 150, "w": 320, "label": "Out", "module": "out" }
     ]
   }
 }
 \`\`\`
-The LFO on posMod slowly sweeps FM modulation depth; hall reverb glues it. The
-face exposes the four knobs that matter, so the whole patch collapses to one panel.
+One \`voice\` (mono) drives the \`osc\`; the amp \`adsr\` shapes the \`vca\`, a second
+\`adsr\` sweeps the \`vcf\` cutoff. This is the core subtractive recipe.
 
-### 3. Generative bleeps
+### 2. FM pad (osc → osc.fm)
 \`\`\`json
 {
-  "kind": "kkgroup", "formatVersion": 1, "name": "Random Bleeps",
+  "kind": "kkgroup", "formatVersion": 1, "name": "FM Pad",
   "modules": [
-    { "id": "seq", "type": "sequencer", "params": { "division": 2, "gate": 0.2 } },
-    { "id": "arpx", "type": "arp", "params": { "mode": 3, "octaves": 3, "division": 3 } },
-    { "id": "blip", "type": "synth", "params": { "waveform": 0, "decay": 0.08, "sustain": 0 } },
-    { "id": "dly", "type": "delay", "params": { "sync": 2, "pingpong": 1, "feedback": 0.55, "mix": 0.4 } },
+    { "id": "kb", "type": "keyboard" },
+    { "id": "voice", "type": "voice", "params": { "voices": 8, "glide": 0 } },
+    { "id": "modop", "type": "osc", "params": { "wave": 0, "semi": 12 } },
+    { "id": "carrier", "type": "osc", "params": { "wave": 0, "fmAmt": 0.5 } },
+    { "id": "env", "type": "adsr", "params": { "attack": 0.8, "decay": 0.5, "sustain": 0.7, "release": 2.5 } },
+    { "id": "vca", "type": "vca" },
+    { "id": "verb", "type": "reverb", "params": { "algo": 1, "decay": 0.8, "mix": 0.45 } },
     { "id": "out", "type": "audioOut" }
   ],
   "wires": [
-    { "from": { "module": "seq", "port": "notes" }, "to": { "module": "arpx", "port": "notes" } },
-    { "from": { "module": "arpx", "port": "out" }, "to": { "module": "blip", "port": "notes" } },
-    { "from": { "module": "blip", "port": "out" }, "to": { "module": "dly", "port": "in" } },
-    { "from": { "module": "dly", "port": "out" }, "to": { "module": "out", "port": "in" } }
+    { "from": { "module": "kb", "port": "notes" }, "to": { "module": "voice", "port": "notes" } },
+    { "from": { "module": "voice", "port": "pitch" }, "to": { "module": "modop", "port": "pitch" } },
+    { "from": { "module": "voice", "port": "pitch" }, "to": { "module": "carrier", "port": "pitch" } },
+    { "from": { "module": "modop", "port": "out" }, "to": { "module": "carrier", "port": "fm" } },
+    { "from": { "module": "voice", "port": "gate" }, "to": { "module": "env", "port": "gate" } },
+    { "from": { "module": "carrier", "port": "out" }, "to": { "module": "vca", "port": "in" } },
+    { "from": { "module": "env", "port": "out" }, "to": { "module": "vca", "port": "cv" } },
+    { "from": { "module": "vca", "port": "out" }, "to": { "module": "verb", "port": "in" } },
+    { "from": { "module": "verb", "port": "out" }, "to": { "module": "out", "port": "in" } }
   ]
 }
 \`\`\`
-Sequencer gates feed a random-mode arpeggiator into a plucky sine through synced ping-pong delay.
+\`modop\` (one octave up) phase-modulates \`carrier\` through its \`fm\` audio input —
+that is FM, no special module needed. Polyphonic via an 8-voice \`voice\`.
+
+### 3. Drum kit (composer → sample voices)
+\`\`\`json
+{
+  "kind": "kkgroup", "formatVersion": 1, "name": "Drum Kit",
+  "modules": [
+    { "id": "beat", "type": "composer", "data": { "length": 4, "notes": [
+      { "start": 0, "length": 0.1, "pitch": 36, "vel": 0.9 },
+      { "start": 1, "length": 0.1, "pitch": 36, "vel": 0.9 },
+      { "start": 2, "length": 0.1, "pitch": 36, "vel": 0.9 },
+      { "start": 3, "length": 0.1, "pitch": 36, "vel": 0.9 },
+      { "start": 1, "length": 0.1, "pitch": 37, "vel": 0.8 },
+      { "start": 3, "length": 0.1, "pitch": 37, "vel": 0.8 },
+      { "start": 0, "length": 0.1, "pitch": 40, "vel": 0.6 },
+      { "start": 0.5, "length": 0.1, "pitch": 40, "vel": 0.5 },
+      { "start": 1, "length": 0.1, "pitch": 40, "vel": 0.6 },
+      { "start": 1.5, "length": 0.1, "pitch": 40, "vel": 0.5 },
+      { "start": 2, "length": 0.1, "pitch": 40, "vel": 0.6 },
+      { "start": 2.5, "length": 0.1, "pitch": 40, "vel": 0.5 },
+      { "start": 3, "length": 0.1, "pitch": 40, "vel": 0.6 },
+      { "start": 3.5, "length": 0.1, "pitch": 40, "vel": 0.5 }
+    ] } },
+    { "id": "kick", "type": "smpl", "params": { "trigNote": 36, "fixedPitch": 1, "voices": 1 } },
+    { "id": "snare", "type": "smpl", "params": { "trigNote": 37, "fixedPitch": 1, "voices": 1 } },
+    { "id": "hat", "type": "smpl", "params": { "trigNote": 40, "fixedPitch": 1, "voices": 1, "chokeGroup": 1 } },
+    { "id": "out", "type": "audioOut" }
+  ],
+  "wires": [
+    { "from": { "module": "beat", "port": "notes" }, "to": { "module": "kick", "port": "notes" } },
+    { "from": { "module": "beat", "port": "notes" }, "to": { "module": "snare", "port": "notes" } },
+    { "from": { "module": "beat", "port": "notes" }, "to": { "module": "hat", "port": "notes" } },
+    { "from": { "module": "kick", "port": "out" }, "to": { "module": "out", "port": "in" } },
+    { "from": { "module": "snare", "port": "out" }, "to": { "module": "out", "port": "in" } },
+    { "from": { "module": "hat", "port": "out" }, "to": { "module": "out", "port": "in" } }
+  ]
+}
+\`\`\`
+The \`composer\` clip is the beat: each note's pitch picks a drum (36=kick, 37=snare,
+40=hat). One note bus fans out to three \`smpl\` voices, each firing only on its
+\`trigNote\`. The user loads samples onto each voice; the kit ships with defaults.
 `;
 
 export function generateSpecPack(): string {
@@ -156,6 +221,7 @@ export function generateSpecPack(): string {
       'Modules are connected with typed wires. Produce a single JSON code block in the format below.',
   );
   lines.push(FORMAT_RULES);
+  lines.push(SIGNAL_FLOW);
   lines.push('## Module catalog');
   lines.push('');
   for (const def of MODULE_DEFS.values()) {

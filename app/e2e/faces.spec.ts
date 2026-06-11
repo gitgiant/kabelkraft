@@ -13,7 +13,8 @@ async function start(page: Page): Promise<{ synth: string; lfo: string }> {
   // collide with the shipping starter patch's pre-made faced group.
   const rig = await classicRig(page);
   await page.waitForTimeout(200); // let the rebuilt canvas render
-  return { synth: rig.synth, lfo: rig.lfo };
+  // These specs bind a "cutoff" param, so the stand-in module is the filter.
+  return { synth: rig.vcf, lfo: rig.lfo };
 }
 
 /** Group synth+lfo and return the group id (selected afterwards). */
@@ -40,7 +41,9 @@ test('design a face in the editor; the collapsed tile knob drives the inner para
   // Add a knob, bind it to the synth's cutoff, caption it.
   await page.locator('.kinds button', { hasText: 'Knob' }).click();
   await expect(page.locator('.surface .el.knob')).toBeVisible();
-  await page.locator('.inspector select').first().selectOption(`${ids.synth}:cutoff`);
+  // `.inspector` also holds the Group Poles "add" dropdown; the element binding
+  // select is the first non-pole one.
+  await page.locator('.inspector select:not(.add-pole)').first().selectOption(`${ids.synth}:cutoff`);
   await page.locator('.inspector label.full', { hasText: 'Caption' }).locator('input').fill('Cutoff');
   await page.locator('button', { hasText: 'Save Face' }).click();
   await expect(page.locator('.face-editor')).toBeHidden();
@@ -141,6 +144,8 @@ test('.kkmod export/import re-creates the faced group with fresh ids', async ({ 
 });
 
 test('learn mode binds by clicking a param row on an inner module', async ({ page }) => {
+  // Larger modules push the LFO's rate knob below the default 720px viewport.
+  await page.setViewportSize({ width: 1440, height: 1000 });
   const ids = await start(page);
   const groupId = await makeGroup(page, ids);
 
@@ -153,8 +158,11 @@ test('learn mode binds by clicking a param row on an inner module', async ({ pag
   await expect
     .poll(() => page.evaluate((g) => window.__kk.graph.groups.get(g)!.collapsed, groupId))
     .toBe(false);
-  const lfoPt = await page.evaluate((i) => window.__kkCanvas.clientPointFor(i), ids.lfo);
-  await page.mouse.click(lfoPt!.x - 10, lfoPt!.y - 65 + 52 + 10); // LFO is 180×130; rate row
+  await page.waitForTimeout(400); // freshly rebuilt tiles need a rendered frame before hit-testing
+  const ratePt = await page.evaluate(
+    (i) => window.__kkCanvas.clientPointForParam(i, 'rate'), ids.lfo,
+  );
+  await page.mouse.click(ratePt!.x, ratePt!.y); // LFO rate knob
   await expect(page.locator('.learn-banner')).toBeHidden();
 
   await page.locator('button', { hasText: 'Save Face' }).click();

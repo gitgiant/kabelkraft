@@ -61,6 +61,9 @@ export interface ModuleInstance {
   type: string;
   x: number;
   y: number;
+  /** User-resized tile size (world units); undefined = the def's default. */
+  w?: number;
+  h?: number;
   label?: string;
   /** User tint color (PRD §6) as 24-bit RGB, undefined = theme default. */
   color?: number;

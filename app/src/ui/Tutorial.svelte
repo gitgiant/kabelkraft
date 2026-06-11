@@ -29,37 +29,38 @@
 
   const steps: Step[] = [
     {
-      title: 'Add a Synth',
-      body: 'Open the module menu on the left and click "Synth" (under Generator) to place it on the canvas.',
-      check: () => hasModule('synth'),
-    },
-    {
-      title: 'Add a Keyboard',
-      body: 'Now add a "Keyboard" from the Controller category — an on-screen piano you can play.',
-      check: () => hasModule('keyboard'),
-    },
-    {
-      title: 'Wire some notes',
-      body: 'Drag from the Keyboard’s cyan Notes output (right edge) to the Synth’s cyan Notes input (left edge). Cyan ports carry note data. Release on the port — it snaps.',
-      check: () => hasWire('keyboard', 'synth', 'notes'),
+      title: 'Add an Oscillator',
+      body: 'Instruments here are built from small parts. Open the module menu on the left and click "Oscillator" (under Component) to place one. Unwired, it drones at C4.',
+      check: () => hasModule('osc'),
     },
     {
       title: 'Wire the audio',
-      body: 'Drag from the Synth’s amber Audio output to the Audio Out module’s amber input. Amber ports carry sound itself.',
-      check: () => hasWire('synth', 'audioOut', 'in'),
+      body: 'Drag from the Oscillator’s amber Audio output (right edge) to the Audio Out module’s amber input. Amber ports carry sound itself — you should hear a steady tone.',
+      check: () => hasWire('osc', 'audioOut', 'in'),
     },
     {
-      title: 'Play!',
-      body: 'Click the piano keys, or use your computer keyboard (A S D F G H J K = white keys). Watch the amber wire pulse with the sound level — and the cyan wire flash with each note. That’s the difference: audio wires carry sound, data wires carry events and control.',
+      title: 'Play the drone',
+      body: 'Press the transport ▶ (or just listen). Watch the amber wire pulse with the sound level. Audio wires carry sound; the next steps add note and control wires.',
       check: () => {
         const out = [...appState.graph.modules.values()].find((m) => m.type === 'audioOut');
         return out ? (appState.meters[out.id]?.peak ?? 0) > 0.02 : false;
       },
     },
     {
-      title: 'Modulate with data',
-      body: 'Add an LFO (Data category) and wire its magenta Control output to the Synth’s Pitch Mod input. Magenta wires glow with their value. Play a note — vibrato!',
-      check: () => hasWire('lfo', 'synth', 'pitchMod'),
+      title: 'Add a Keyboard and a Voice',
+      body: 'Add a "Keyboard" (Controller) and a "Voice" (Component). The Voice turns incoming notes into a per-voice pitch the Oscillator can follow.',
+      check: () => hasModule('keyboard') && hasModule('voice'),
+    },
+    {
+      title: 'Wire notes → voice → pitch',
+      body: 'Drag the Keyboard’s cyan Notes output to the Voice’s cyan Notes input, then the Voice’s magenta Pitch output to the Oscillator’s magenta Pitch input. Now the keys play the oscillator.',
+      check: () =>
+        hasWire('keyboard', 'voice', 'notes') && hasWire('voice', 'osc', 'pitch'),
+    },
+    {
+      title: 'Modulate with an LFO',
+      body: 'Add a Filter (vcf, Component) and an LFO (Data). Wire the LFO’s magenta Control output to the Filter’s Mod input. Magenta wires glow with their value — patch the filter between Oscillator and Audio Out to hear it sweep.',
+      check: () => hasWire('lfo', 'vcf', 'mod'),
     },
   ];
 

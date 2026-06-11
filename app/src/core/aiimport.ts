@@ -70,8 +70,9 @@ export function closest(name: string, candidates: Iterable<string>): string | nu
 
 /** Common AI vocabulary → real module types, when edit distance can't help. */
 const TYPE_ALIASES: Record<string, string> = {
-  saw: 'synth', supersaw: 'synth', osc: 'synth', oscillator: 'synth', pad: 'synth', bass: 'synth', lead: 'synth',
-  drums: 'drum', drummachine: 'drum', kick: 'drum', beat: 'drum',
+  saw: 'osc', supersaw: 'osc', oscillator: 'osc', wavetable: 'wtosc', wt: 'wtosc',
+  sampler: 'smpl', sample: 'smpl', drum: 'smpl', drums: 'smpl', kick: 'smpl', snare: 'smpl', hat: 'smpl',
+  filterm: 'vcf', amp: 'vca', voicealloc: 'voice',
   echo: 'delay', filter: 'eq', comp: 'compressor', verb: 'reverb',
   piano: 'keyboard', keys: 'keyboard', output: 'audioOut', master: 'audioOut', speaker: 'audioOut',
   env: 'adsr', envelope: 'adsr', noise: 'random', seq: 'sequencer', arpeggiator: 'arp',

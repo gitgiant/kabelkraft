@@ -1,30 +1,28 @@
 /**
- * One module's visual on the patch canvas: tile body, typed port dots
- * (inputs left, outputs right — PRD §5), generic param rows (drag to change,
- * click to cycle options), plus type-specific faces (keyboard keys,
- * transport buttons, meter bars).
+ * One module's visual on the patch canvas: resizable tile body, typed port
+ * dots (inputs left, outputs right — PRD §5), knob/selector/fader controls
+ * for every param (drag to change, double-click resets to default,
+ * shift-double-click types a value), plus type-specific faces (keyboard keys,
+ * transport buttons, meter bars, step grids…). Faces stretch with the tile.
  */
 
 import { Container, FederatedPointerEvent, Graphics, Text } from 'pixi.js';
 import type { ModuleDef, ParamSpec, PortSpec } from '../core/module';
 import type { ModuleInstance } from '../core/module';
+import type { ControlCurve } from '../core/types';
 import { PORT_TYPE_COLORS } from '../core/types';
 import {
-  DRUM_DECAY_MAX,
-  DRUM_PADS,
   SEQ_PITCH_MAX,
   SEQ_PITCH_MIN,
-  SYNTH_MODES,
   WAVEFORMS,
-  type DrumPad,
-  type DrumStep,
   type SeqStep,
 } from '../core/registry';
 import { clipFromData } from '../core/composer';
+import { hexToRgbInt, hslToRgbInt, rgbIntToHex, rgbIntToHsl } from '../core/color';
 import { bandCoefs, biquadResponseDb, chainResponseDb, vcfCoefs } from '../core/eqmath';
-import { sampleKey } from '../core/samples';
 import { appState } from '../state';
 import { theme } from '../theme';
+import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import type { Tooltip } from './Tooltip';
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -45,12 +43,39 @@ function noteName(pitch: number): string {
 
 export const PORT_RADIUS = 7;
 const TITLE_H = 24;
-const ROW_H = 20;
+/** Minimum knob-grid cell width / nominal fixed-band cell height. */
+const CELL_W = 64;
+const CELL_H = 60;
+
+const CTRL_HINT =
+  'Drag. Double-click: default. Shift-double-click: type. Alt-click: MIDI learn.';
 
 export interface PortHandlers {
   onPortDown(moduleId: string, portId: string, e: FederatedPointerEvent): void;
   onPortUp(moduleId: string, portId: string, e: FederatedPointerEvent): void;
   onBodyDown(view: ModuleView, e: FederatedPointerEvent): void;
+}
+
+/**
+ * A drawable, draggable scalar control — a ParamSpec, a drum-pad field, or a
+ * Knob/Slider module's scaled value. All knob/selector/fader widgets speak
+ * this interface so gestures (drag, default, typing, learn) stay uniform.
+ */
+interface CtrlSpec {
+  key: string;
+  label: string;
+  min: number;
+  max: number;
+  default: number;
+  curve?: ControlCurve;
+  unit?: string;
+  options?: string[];
+  integer?: boolean;
+  format?: (v: number) => string;
+  get(): number;
+  set(v: number): void;
+  /** Param id for MIDI/face learn; undefined disables learn on this control. */
+  learnId?: string;
 }
 
 interface KeySpec {
@@ -71,14 +96,25 @@ const KEYS: KeySpec[] = [
 export class ModuleView extends Container {
   readonly portCenters = new Map<string, { x: number; y: number }>();
   private body = new Graphics();
-  private paramTexts = new Map<string, Text>();
-  private meterBar: Graphics | null = null;
-  private clipDot: Graphics | null = null;
   private portDots = new Map<string, Graphics>();
+  /** Eight persistent resize hit-zones — created once, never destroyed mid-
+   * gesture (re-added on every rebuild) so PixiJS hover/cursor never wedges. */
+  private resizeHandles: Graphics[] = [];
   private flashTimers = new Map<string, number>();
+  private selected = false;
   private popUntil = 0;
   private popFrom = { x: 0, y: 0 };
   private static readonly POP_MS = 340;
+
+  /** Redraw closures for every control widget; run on any param change. */
+  private ctrlRedraws: Array<() => void> = [];
+  /** Control centers by param id — e2e and tools aim pointers with this. */
+  private paramAnchors = new Map<string, { x: number; y: number }>();
+  /** Live tint from an incoming color wire (packed RGB); null = none. */
+  private liveColor: number | null = null;
+
+  /** Faces whose fixed layout cannot shrink below the def's default size. */
+  private static readonly FIXED_MIN_TYPES = new Set(['transport']);
 
   constructor(
     readonly instance: ModuleInstance,
@@ -88,27 +124,118 @@ export class ModuleView extends Container {
   ) {
     super();
     this.position.set(instance.x, instance.y);
+    this.rebuild();
+  }
+
+  // -- size ----------------------------------------------------------------
+
+  /** Current tile width: instance override clamped to sane bounds. */
+  get w(): number {
+    return this.clampSize(this.instance.w ?? this.def.width, this.def.width);
+  }
+
+  get h(): number {
+    return this.clampSize(this.instance.h ?? this.def.height, this.def.height);
+  }
+
+  private clampSize(v: number, base: number): number {
+    const lo = ModuleView.FIXED_MIN_TYPES.has(this.instance.type)
+      ? base
+      : Math.max(80, base * 0.7);
+    return Math.min(base * 3, Math.max(lo, v));
+  }
+
+  // -- construction ----------------------------------------------------------
+
+  /** Tear down and re-create all children — after a resize or theme change. */
+  rebuild(): void {
+    for (const t of this.flashTimers.values()) clearTimeout(t);
+    this.flashTimers.clear();
+    const kids = [...this.children];
+    this.removeChildren();
+    for (const k of kids) {
+      if (this.resizeHandles.includes(k as Graphics)) continue; // persistent — survive rebuild
+      k.destroy({ children: true });
+    }
+
+    this.portCenters.clear();
+    this.portDots.clear();
+    this.ctrlRedraws = [];
+    this.paramAnchors.clear();
+    this.meterBar = null;
+    this.clipDot = null;
+    this.clipped = false;
+    this.grBar = null;
+    this.vcfCurveG = null;
+    this.ctrlG = null;
+    this.ctrlText = null;
+    this.compG = null;
+    this.lastCompPos = -1;
+    this.lastCompData = null;
+    this.visG = null;
+    this.midiDeviceText = null;
+    this.peqPlot = null;
+    this.peqSpectrumG = null;
+    this.peqDots = [];
+    this.lastSpectrum = null;
+    this.wtRowText = null;
+    this.recButton = null;
+    this.recLabel = null;
+    this.recElapsed = null;
+    this.waveform = null;
+    this.sampleNameText = null;
+    this.stepGrid = null;
+    this.lastDrawnStep = -1;
+    this.colorPrevG = null;
+    this.lastPrevColor = -2;
+
+    this.body = new Graphics();
     this.addChild(this.body);
-    this.drawBody(false);
+    this.drawBody(this.selected);
+    // Handles sit just above the body so ports/face/title (added next) win hit
+    // priority in their bands, while the handles still beat body-drag on edges.
+    this.mountResizeHandles();
     this.buildTitle();
     this.buildPorts();
     this.buildFace();
   }
 
-  // -- construction -------------------------------------------------------
-
   private drawBody(selected: boolean): void {
-    const { width: w, height: h } = this.def;
+    const w = this.w;
+    const h = this.h;
+    const glow = this.liveColor;
     this.body.clear();
     this.body
       .roundRect(0, 0, w, h, 8)
       .fill(selected ? theme.moduleBodySelected : theme.moduleBody)
-      .stroke({ width: selected ? 2 : 1, color: selected ? theme.selectedStroke : theme.moduleStroke });
+      .stroke({
+        width: selected ? 2 : glow !== null ? 1.5 : 1,
+        color: selected ? theme.selectedStroke : glow ?? theme.moduleStroke,
+      });
     this.body.roundRect(0, 0, w, TITLE_H, 8).fill(theme.moduleTitle);
     this.body.rect(0, TITLE_H - 8, w, 8).fill(theme.moduleTitle);
-    if (this.instance.color !== undefined) {
-      this.body.rect(0, TITLE_H, w, 3).fill(this.instance.color);
+    const stripe = glow ?? this.instance.color;
+    if (stripe !== undefined) {
+      this.body.rect(0, TITLE_H, w, 3).fill(stripe);
     }
+    // Resize grip glyph (se corner) — discoverability for the all-sides handles.
+    this.body.moveTo(w - 13, h - 4).lineTo(w - 4, h - 13)
+      .stroke({ width: 1.5, color: theme.textDim, alpha: 0.8 });
+    this.body.moveTo(w - 8, h - 4).lineTo(w - 4, h - 8)
+      .stroke({ width: 1.5, color: theme.textDim, alpha: 0.8 });
+  }
+
+  /** Tint from an incoming color wire; redraws accent + body when it changes. */
+  setLiveColor(color: number | null): void {
+    if (color === this.liveColor) return;
+    this.liveColor = color;
+    this.drawBody(this.selected);
+    this.refreshParams();
+  }
+
+  /** Accent for controller faces: the live color wire, else the type color. */
+  private accent(): number {
+    return this.liveColor ?? PORT_TYPE_COLORS.control;
   }
 
   private buildTitle(): void {
@@ -167,7 +294,7 @@ export class ModuleView extends Container {
       });
     };
     place(inputs, 0);
-    place(outputs, this.def.width);
+    place(outputs, this.w);
   }
 
   private drawPortDot(dot: Graphics, port: PortSpec, highlight: boolean): void {
@@ -196,6 +323,83 @@ export class ModuleView extends Container {
       window.setTimeout(() => this.setPortHighlight(portId, false), 350),
     );
   }
+
+  // -- resize ------------------------------------------------------------------
+
+  /** Create the 8 persistent hit-zones once, then (re-)attach them on top of
+   * the body. Their hit-tests read this.w/this.h live, so no per-frame layout. */
+  private mountResizeHandles(): void {
+    if (this.resizeHandles.length === 0) {
+      for (const dir of RESIZE_DIRS) {
+        const g = new Graphics();
+        g.eventMode = 'static';
+        g.cursor = resizeCursor(dir);
+        g.hitArea = { contains: (px, py) => inResizeBand(dir, px, py, this.w, this.h) };
+        g.on('pointerdown', (e) => {
+          e.stopPropagation();
+          if (e.detail >= 2) {
+            appState.beginUndoable();
+            delete this.instance.w;
+            delete this.instance.h;
+            this.rebuild();
+            return;
+          }
+          this.beginResize(dir, e);
+        });
+        g.on('pointerover', (ev) =>
+          this.tooltip.show(['Resize', 'Drag any edge or corner. Double-click: default size.'], ev.clientX, ev.clientY),
+        );
+        g.on('pointerout', () => this.tooltip.hide());
+        this.resizeHandles.push(g);
+      }
+    }
+    for (const g of this.resizeHandles) this.addChild(g);
+  }
+
+  private beginResize(dir: ResizeDir, e: FederatedPointerEvent): void {
+    appState.beginUndoable(); // whole resize = one undo step
+    const startW = this.w;
+    const startH = this.h;
+    const startX = this.instance.x;
+    const startY = this.instance.y;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const scale = this.worldTransform.a || 1;
+    let raf = 0;
+    // Anchor the opposite edge for n/w drags using the *clamped* size, so a
+    // size hitting its min/max doesn't drift the fixed edge.
+    const anchor = () => {
+      if (dir.includes('w')) this.instance.x = startX + startW - this.w;
+      if (dir.includes('n')) this.instance.y = startY + startH - this.h;
+      this.position.set(this.instance.x, this.instance.y);
+    };
+    const onMove = (ev: PointerEvent) => {
+      const { w, h } = resizeSize(dir, (ev.clientX - sx) / scale, (ev.clientY - sy) / scale, startW, startH);
+      this.instance.w = w;
+      this.instance.h = h;
+      if (!raf) {
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          anchor();
+          this.rebuild();
+        });
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      if (raf) cancelAnimationFrame(raf);
+      // Store the clamped size so saved patches stay in bounds.
+      this.instance.w = this.w;
+      this.instance.h = this.h;
+      anchor();
+      this.rebuild();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  // -- pop-in animation ----------------------------------------------------------
 
   /** Pop a freshly inserted module into existence (AI import, PRD §10). */
   popIn(): void {
@@ -232,125 +436,138 @@ export class ModuleView extends Container {
     this.alpha = Math.min(1, t * 3);
     // Scale about the tile centre without disturbing the logical position.
     this.position.set(
-      this.popFrom.x + (1 - s) * (this.def.width / 2),
-      this.popFrom.y + (1 - s) * (this.def.height / 2),
+      this.popFrom.x + (1 - s) * (this.w / 2),
+      this.popFrom.y + (1 - s) * (this.h / 2),
     );
   }
 
-  /** Synth mode the face was built for — mode switch rebuilds the view. */
-  private builtSynthMode = -1;
+  // -- control specs -----------------------------------------------------------
 
-  /** Mode-scoped params (ParamSpec.group) filtered by the synth's mode. */
+  /** Visible params for the face (no mode-scoping now the monolith synth is gone). */
   private visibleParams(): ParamSpec[] {
-    if (this.instance.type !== 'synth') return this.def.params;
-    const mode = SYNTH_MODES[Math.round(this.instance.params.mode ?? 0)] ?? 'classic';
-    return this.def.params.filter((p) => !p.group || p.group === mode);
+    return this.def.params;
   }
 
-  /** True when the built face no longer matches the instance (synth mode switch). */
+  /** No module rebuilds its face on a param change since the monolith synth left. */
   faceStale(): boolean {
-    return (
-      this.instance.type === 'synth' &&
-      Math.round(this.instance.params.mode ?? 0) !== this.builtSynthMode
-    );
+    return false;
   }
 
-  private buildFace(): void {
-    let y = TITLE_H + 8;
-    const x = 18;
-    const w = this.def.width - 36;
-
-    const params = this.def.customFace ? [] : this.visibleParams();
-    if (this.instance.type === 'synth' || this.def.twoColumn) {
-      if (this.instance.type === 'synth') {
-        this.builtSynthMode = Math.round(this.instance.params.mode ?? 0);
-      }
-      // Two columns — too many params for one.
-      const colW = (this.def.width - 48) / 2;
-      const half = Math.ceil(params.length / 2);
-      params.forEach((param, i) => {
-        const col = i < half ? 0 : 1;
-        const row = col === 0 ? i : i - half;
-        this.buildParamRow(param, 18 + col * (colW + 12), y + row * ROW_H, colW);
-      });
-      if (this.instance.type === 'synth' && this.builtSynthMode === 1) {
-        this.buildWavetableRow(x, this.def.height - 22, w);
-      }
-      if (this.instance.type === 'mbcomp') {
-        this.buildGrMeter(x, this.def.height - 16, w);
-      }
-      return;
-    }
-
-    for (const param of params) {
-      this.buildParamRow(param, x, y, w);
-      y += ROW_H;
-    }
-
-    if (this.instance.type === 'peq') this.buildPeqFace(x, y + 2, w);
-    if (this.instance.type === 'midiIn' || this.instance.type === 'midiOut') {
-      this.buildMidiDeviceRow(x, this.def.height - 22, w);
-    }
-    if (this.instance.type === 'keyboard') this.buildKeys(x, y + 2, w);
-    if (this.instance.type === 'transport') this.buildTransportButtons(x, y + 4);
-    if (
-      this.instance.type === 'levels' ||
-      this.instance.type === 'audioOut' ||
-      this.instance.type === 'recorder'
-    ) {
-      this.buildMeter(x, this.def.height - 18, w);
-    }
-    if (this.instance.type === 'sequencer') this.buildStepGrid(x, y + 4, w);
-    if (this.instance.type === 'sampler') this.buildSamplerFace(x, y + 4, w);
-    if (this.instance.type === 'recorder') this.buildRecorderFace(x, y + 4, w);
-    if (this.instance.type === 'drum') this.buildDrumFace(x, y + 4, w);
-    if (this.instance.type === 'compressor' || this.instance.type === 'limiter') {
-      this.buildGrMeter(x, this.def.height - 16, w);
-    }
-    if (this.instance.type === 'visualizer') this.buildVisFace(x, y + 4, w);
-    if (this.instance.type === 'composer') this.buildComposerFace(x, y + 4, w);
-    if (this.instance.type === 'vcf') this.buildVcfFace(x, y, w);
-    if (this.instance.type === 'knob') this.buildKnobFace();
-    if (this.instance.type === 'slider') this.buildSliderFace();
-    if (this.instance.type === 'xy') this.buildXyFace();
-    if (this.instance.type === 'button') this.buildButtonFace();
+  private paramCtrl(p: ParamSpec): CtrlSpec {
+    return {
+      key: p.id,
+      label: p.label,
+      min: p.min,
+      max: p.max,
+      default: p.default,
+      curve: p.curve,
+      unit: p.unit,
+      options: p.options,
+      get: () => this.instance.params[p.id] ?? p.default,
+      set: (v) => appState.setParam(this.instance.id, p.id, v),
+      learnId: p.id,
+    };
   }
 
-  // -- filter (vcf) face: knobs + response curve -----------------------------
-
-  private vcfRedraws: Array<() => void> = [];
-  private vcfCurveG: Graphics | null = null;
-  private vcfCurveRect = { x: 0, y: 0, w: 0, h: 0 };
-
-  /** Normalized 0–1 position of a param value, honoring its display curve. */
-  private paramNorm(p: ParamSpec, v: number): number {
-    if (p.curve === 'exp' && p.min > 0) return Math.log(v / p.min) / Math.log(p.max / p.min);
-    return (v - p.min) / (p.max - p.min);
+  private paramSpec(id: string): ParamSpec {
+    return this.def.params.find((p) => p.id === id)!;
   }
 
-  private paramFromNorm(p: ParamSpec, n: number): number {
+  /** Control center for a param id (e2e drives the mouse with this). */
+  paramAnchor(paramId: string): { x: number; y: number } | null {
+    return this.paramAnchors.get(paramId) ?? null;
+  }
+
+  /** Normalized 0–1 position of a control value, honoring its display curve. */
+  private ctrlNorm(c: CtrlSpec, v: number): number {
+    if (c.curve === 'exp' && c.min > 0) return Math.log(v / c.min) / Math.log(c.max / c.min);
+    return (v - c.min) / (c.max - c.min);
+  }
+
+  private ctrlFromNorm(c: CtrlSpec, n: number): number {
     const k = Math.min(1, Math.max(0, n));
-    if (p.curve === 'exp' && p.min > 0) return p.min * Math.pow(p.max / p.min, k);
-    return p.min + k * (p.max - p.min);
+    let v: number;
+    if (c.curve === 'exp' && c.min > 0) v = c.min * Math.pow(c.max / c.min, k);
+    else v = c.min + k * (c.max - c.min);
+    if (c.options || c.integer) v = Math.round(v);
+    return v;
   }
 
-  /** Rotary knob for one param (PRD: filters get cutoff/Q knobs). */
-  private buildMiniKnob(param: ParamSpec, cx: number, cy: number, r: number): void {
+  private formatCtrl(c: CtrlSpec): string {
+    const v = c.get();
+    if (c.format) return c.format(v);
+    if (c.options) return c.options[Math.round(v)] ?? String(v);
+    const text = Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+    return c.unit ? `${text} ${c.unit}` : text;
+  }
+
+  /** Raw position readout: "62/100", selectors "3/5". */
+  private ctrlRaw(c: CtrlSpec): string {
+    if (c.options) return `${Math.round(c.get()) + 1}/${c.options.length}`;
+    const n = Math.min(1, Math.max(0, this.ctrlNorm(c, c.get())));
+    return `${Math.round(n * 100)}/100`;
+  }
+
+  private ctrlTipTitle(c: CtrlSpec): string {
+    return `${c.label}: ${this.formatCtrl(c)} (${this.ctrlRaw(c)})`;
+  }
+
+  private runCtrlRedraws(): void {
+    for (const fn of this.ctrlRedraws) fn();
+  }
+
+  /**
+   * Shared gesture preamble: face learn, MIDI learn (alt), double-click
+   * default, shift-double-click typed entry. True = event consumed.
+   */
+  private ctrlPreamble(c: CtrlSpec, e: FederatedPointerEvent): boolean {
+    if (c.learnId && appState.faceLearn && appState.completeFaceLearn(this.instance.id, c.learnId)) {
+      return true;
+    }
+    if (e.altKey && c.learnId) {
+      appState.armMidiLearn(this.instance.id, c.learnId);
+      return true;
+    }
+    if (e.detail >= 2) {
+      if (e.shiftKey && !c.options) {
+        const raw = window.prompt(
+          `${c.label} (${c.min}–${c.max}${c.unit ? ' ' + c.unit : ''})`,
+          String(c.get()),
+        );
+        const v = Number(raw);
+        if (raw === null || !Number.isFinite(v)) return true;
+        appState.beginUndoable();
+        c.set(Math.min(c.max, Math.max(c.min, v)));
+      } else {
+        appState.beginUndoable();
+        c.set(c.default);
+      }
+      this.refreshParams();
+      return true;
+    }
+    return false;
+  }
+
+  // -- control widgets -----------------------------------------------------------
+
+  /** Rotary knob for a continuous control. */
+  private buildKnob(c: CtrlSpec, cx: number, cy: number, r: number): void {
+    this.paramAnchors.set(c.key, { x: cx, y: cy });
     const g = new Graphics();
     this.addChild(g);
-    const value = new Text({ text: '', style: { fontSize: 10, fill: theme.text } });
-    value.anchor.set(0.5, 0);
-    value.position.set(cx, cy + r + 4);
-    this.addChild(value);
-    const label = new Text({ text: param.label, style: { fontSize: 10, fill: theme.textDim } });
+    const label = new Text({ text: c.label, style: { fontSize: 9, fill: theme.textDim } });
     label.anchor.set(0.5, 1);
-    label.position.set(cx, cy - r - 4);
+    label.position.set(cx, cy - r - 3);
     label.eventMode = 'none';
     this.addChild(label);
+    const value = new Text({ text: '', style: { fontSize: 9, fill: theme.text } });
+    value.anchor.set(0.5, 0);
+    value.position.set(cx, cy + r + 2);
+    value.eventMode = 'none';
+    this.addChild(value);
 
     const redraw = () => {
-      const v = this.instance.params[param.id] ?? param.default;
-      const n = Math.min(1, Math.max(0, this.paramNorm(param, v)));
+      const n = Math.min(1, Math.max(0, this.ctrlNorm(c, c.get())));
       const a0 = Math.PI * 0.75;
       const a1 = Math.PI * 2.25;
       const av = a0 + (a1 - a0) * n;
@@ -361,43 +578,123 @@ export class ModuleView extends Container {
       g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
       g.arc(cx, cy, r, a0, a1).stroke({ width: 3, color: theme.inset });
       g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
-      g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: PORT_TYPE_COLORS.audio });
+      g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: PORT_TYPE_COLORS.control });
       g.moveTo(cx + Math.cos(av) * r * 0.25, cy + Math.sin(av) * r * 0.25)
         .lineTo(cx + Math.cos(av) * r * 0.66, cy + Math.sin(av) * r * 0.66)
         .stroke({ width: 2, color: theme.text });
-      value.text = this.formatParam(param);
+      value.text = this.formatCtrl(c);
     };
     redraw();
-    this.vcfRedraws.push(redraw);
+    this.ctrlRedraws.push(redraw);
 
     const hit = new Graphics().circle(cx, cy, r + 6).fill({ color: 0xffffff, alpha: 0.001 });
     hit.eventMode = 'static';
     hit.cursor = 'ns-resize';
     hit.on('pointerdown', (e) => {
       e.stopPropagation();
-      if (e.altKey) {
-        appState.armMidiLearn(this.instance.id, param.id);
-        return;
-      }
+      if (this.ctrlPreamble(c, e)) return;
       appState.beginUndoable();
-      const start = this.paramNorm(param, this.instance.params[param.id] ?? param.default);
+      const start = this.ctrlNorm(c, c.get());
       const startY = e.clientY;
       const scale = this.worldTransform.a || 1;
       const onMove = (ev: PointerEvent) => {
-        const n = start + (startY - ev.clientY) / scale / 120;
-        appState.setParam(this.instance.id, param.id, this.paramFromNorm(param, n));
+        c.set(this.ctrlFromNorm(c, start + (startY - ev.clientY) / scale / 120));
         this.refreshParams();
+        this.tooltip.showNow([this.ctrlTipTitle(c)], ev.clientX, ev.clientY);
       };
       const onUp = () => {
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
+        this.tooltip.hide();
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    });
+    hit.on('pointerover', (ev) =>
+      this.tooltip.show([this.ctrlTipTitle(c), CTRL_HINT], ev.clientX, ev.clientY),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  /** Stepped selector knob for an options control (waveform, mode, …). */
+  private buildSelector(c: CtrlSpec, cx: number, cy: number, r: number): void {
+    this.paramAnchors.set(c.key, { x: cx, y: cy });
+    const opts = c.options!;
+    const g = new Graphics();
+    this.addChild(g);
+    const label = new Text({ text: c.label, style: { fontSize: 9, fill: theme.textDim } });
+    label.anchor.set(0.5, 1);
+    label.position.set(cx, cy - r - 3);
+    label.eventMode = 'none';
+    this.addChild(label);
+    const value = new Text({ text: '', style: { fontSize: 9, fill: theme.text } });
+    value.anchor.set(0.5, 0);
+    value.position.set(cx, cy + r + 2);
+    value.eventMode = 'none';
+    this.addChild(value);
+
+    const a0 = Math.PI * 0.75;
+    const a1 = Math.PI * 2.25;
+    const angleFor = (i: number) => a0 + (a1 - a0) * (opts.length > 1 ? i / (opts.length - 1) : 0.5);
+
+    const redraw = () => {
+      const idx = Math.min(opts.length - 1, Math.max(0, Math.round(c.get())));
+      g.clear();
+      g.circle(cx, cy, r * 0.74).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
+      // Detent ticks, the active one highlighted.
+      for (let i = 0; i < opts.length; i++) {
+        const a = angleFor(i);
+        g.moveTo(cx + Math.cos(a) * r * 0.92, cy + Math.sin(a) * r * 0.92)
+          .lineTo(cx + Math.cos(a) * r * 1.15, cy + Math.sin(a) * r * 1.15)
+          .stroke({ width: 2, color: i === idx ? PORT_TYPE_COLORS.control : theme.moduleStroke });
+      }
+      const av = angleFor(idx);
+      g.moveTo(cx + Math.cos(av) * r * 0.2, cy + Math.sin(av) * r * 0.2)
+        .lineTo(cx + Math.cos(av) * r * 0.66, cy + Math.sin(av) * r * 0.66)
+        .stroke({ width: 2.5, color: theme.text });
+      value.text = opts[idx] ?? '';
+    };
+    redraw();
+    this.ctrlRedraws.push(redraw);
+
+    const hit = new Graphics().circle(cx, cy, r + 8).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      if (this.ctrlPreamble(c, e)) return;
+      appState.beginUndoable();
+      const startIdx = Math.min(opts.length - 1, Math.max(0, Math.round(c.get())));
+      const startY = e.clientY;
+      let moved = false;
+      const onMove = (ev: PointerEvent) => {
+        const dy = startY - ev.clientY;
+        if (Math.abs(dy) > 3) moved = true;
+        if (!moved) return;
+        const idx = Math.min(opts.length - 1, Math.max(0, startIdx + Math.round(dy / 28)));
+        if (idx !== Math.round(c.get())) {
+          c.set(idx);
+          this.refreshParams();
+        }
+        this.tooltip.showNow([this.ctrlTipTitle(c)], ev.clientX, ev.clientY);
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        this.tooltip.hide();
+        if (!moved) {
+          // Plain click steps to the next option.
+          c.set((startIdx + 1) % opts.length);
+          this.refreshParams();
+        }
       };
       window.addEventListener('pointermove', onMove);
       window.addEventListener('pointerup', onUp);
     });
     hit.on('pointerover', (ev) =>
       this.tooltip.show(
-        [`${param.label}: ${this.formatParam(param)}`, 'Drag up/down. Alt-click: MIDI learn.'],
+        [this.ctrlTipTitle(c), 'Click: next option. Drag: select. Double-click: default. Alt-click: MIDI learn.'],
         ev.clientX,
         ev.clientY,
       ),
@@ -406,33 +703,240 @@ export class ModuleView extends Container {
     this.addChild(hit);
   }
 
-  private buildVcfFace(x: number, y: number, w: number): void {
-    this.vcfRedraws = [];
-    const spec = (id: string) => this.def.params.find((p) => p.id === id)!;
-    this.buildParamRow(spec('mode'), x, y, w);
-    const knobY = y + ROW_H + 44;
-    this.buildMiniKnob(spec('cutoff'), x + w * 0.28, knobY, 24);
-    this.buildMiniKnob(spec('res'), x + w * 0.72, knobY, 24);
-    this.buildParamRow(spec('amt'), x, knobY + 44, w);
+  /** Vertical fader for a continuous control (mixer channel strips). */
+  private buildFader(c: CtrlSpec, x: number, y: number, w: number, h: number): void {
+    this.paramAnchors.set(c.key, { x: x + w / 2, y: y + h / 2 });
+    const g = new Graphics();
+    this.addChild(g);
+    const label = new Text({ text: c.label, style: { fontSize: 9, fill: theme.textDim } });
+    label.anchor.set(0.5, 1);
+    label.position.set(x + w / 2, y - 4);
+    label.eventMode = 'none';
+    this.addChild(label);
+    const value = new Text({ text: '', style: { fontSize: 9, fill: theme.text } });
+    value.anchor.set(0.5, 0);
+    value.position.set(x + w / 2, y + h + 4);
+    value.eventMode = 'none';
+    this.addChild(value);
 
-    const cy = knobY + 44 + ROW_H + 4;
-    this.vcfCurveRect = { x, y: cy, w, h: this.def.height - cy - 12 };
+    const redraw = () => {
+      const n = Math.min(1, Math.max(0, this.ctrlNorm(c, c.get())));
+      g.clear();
+      g.roundRect(x, y, w, h, 4).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
+      g.roundRect(x, y + h * (1 - n), w, h * n, 4).fill(PORT_TYPE_COLORS.control);
+      g.roundRect(x - 6, y + h * (1 - n) - 5, w + 12, 10, 3)
+        .fill(theme.button)
+        .stroke({ width: 1, color: theme.text });
+      value.text = this.formatCtrl(c);
+    };
+    redraw();
+    this.ctrlRedraws.push(redraw);
+
+    const hit = new Graphics().rect(x - 8, y - 6, w + 16, h + 12).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      if (this.ctrlPreamble(c, e)) return;
+      appState.beginUndoable();
+      // Jump to the click position, then track relatively.
+      const local = this.toLocal(e.global);
+      c.set(this.ctrlFromNorm(c, 1 - (local.y - y) / h));
+      this.refreshParams();
+      const start = this.ctrlNorm(c, c.get());
+      const startY = e.clientY;
+      const scale = this.worldTransform.a || 1;
+      const onMove = (ev: PointerEvent) => {
+        c.set(this.ctrlFromNorm(c, start + (startY - ev.clientY) / scale / h));
+        this.refreshParams();
+        this.tooltip.showNow([this.ctrlTipTitle(c)], ev.clientX, ev.clientY);
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        this.tooltip.hide();
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    });
+    hit.on('pointerover', (ev) =>
+      this.tooltip.show([this.ctrlTipTitle(c), CTRL_HINT], ev.clientX, ev.clientY),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  /** Lay controls out in a grid filling the given rect; knobs scale to fit. */
+  private buildCtrlGrid(ctrls: CtrlSpec[], x: number, y: number, w: number, h: number): void {
+    if (!ctrls.length) return;
+    const cols = Math.max(1, Math.min(ctrls.length, Math.floor(w / CELL_W)));
+    const rows = Math.ceil(ctrls.length / cols);
+    const cellW = w / cols;
+    const cellH = h / rows;
+    const r = Math.max(10, Math.min(20, (Math.min(cellW, cellH) - 28) / 2));
+    ctrls.forEach((c, i) => {
+      const cx = x + (i % cols) * cellW + cellW / 2;
+      const cy = y + Math.floor(i / cols) * cellH + cellH / 2 + 2;
+      if (c.options) this.buildSelector(c, cx, cy, r);
+      else this.buildKnob(c, cx, cy, r);
+    });
+  }
+
+  /** Height of a fixed knob band for n controls in the given width. */
+  private ctrlBandH(n: number, w: number): number {
+    if (!n) return 0;
+    const cols = Math.max(1, Math.min(n, Math.floor(w / CELL_W)));
+    return Math.ceil(n / cols) * CELL_H;
+  }
+
+  // -- face dispatch -----------------------------------------------------------
+
+  private buildFace(): void {
+    const type = this.instance.type;
+    const x = 18;
+    const w = this.w - 36;
+    const top = TITLE_H + 10;
+
+    // Fully custom faces.
+    if (type === 'peq') {
+      this.buildPeqFace(x, top, w);
+      return;
+    }
+    if (type === 'vcf') {
+      this.buildVcfFace(x, top, w);
+      return;
+    }
+    if (type === 'knob') {
+      this.buildKnobFace();
+      return;
+    }
+    if (type === 'slider') {
+      this.buildSliderFace();
+      return;
+    }
+    if (type === 'xy') {
+      this.buildXyFace();
+      return;
+    }
+    if (type === 'button') {
+      this.buildButtonFace();
+      return;
+    }
+    if (type === 'mixer') {
+      this.buildMixerFace(x, top + 12, w);
+      return;
+    }
+    if (type === 'composer') {
+      this.buildComposerFace(x, top, w);
+      return;
+    }
+    if (type === 'levels') {
+      this.buildVMeter(this.w / 2 - 12, top + 12, 24, this.h - top - 26);
+      return;
+    }
+    if (type === 'recorder') {
+      this.buildRecorderFace(x, top + 4, w - 36);
+      this.buildVMeter(this.w - 32, top + 12, 14, this.h - top - 26);
+      return;
+    }
+    if (type === 'colorgen') {
+      this.buildColorGenFace(x, top, w);
+      return;
+    }
+
+    const ctrls = this.visibleParams().map((p) => this.paramCtrl(p));
+
+    // Vertical meters live in a right-edge column.
+    let right = this.w - 18;
+    if (type === 'audioOut') {
+      this.buildVMeter(this.w - 30, top + 12, 14, this.h - top - 26);
+      right = this.w - 44;
+    }
+    if (type === 'compressor' || type === 'limiter' || type === 'mbcomp') {
+      this.buildGrMeter(this.w - 28, top + 12, 12, this.h - top - 26);
+      right = this.w - 42;
+    }
+
+    // Bottom-anchored utility rows.
+    let bottom = this.h - 12;
+    if (type === 'wtosc') {
+      this.buildWavetableRow(x, this.h - 22, w);
+      bottom -= 24;
+    }
+    if (type === 'midiIn' || type === 'midiOut') {
+      this.buildMidiDeviceRow(x, this.h - 24, w);
+      bottom -= 26;
+    }
+
+    const gw = right - x;
+
+    // Modules with a stretching extra face get a fixed knob band on top.
+    if (type === 'keyboard') {
+      const band = this.ctrlBandH(ctrls.length, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      this.buildKeys(x, top + band + 4, gw);
+      return;
+    }
+    if (type === 'transport') {
+      const band = this.ctrlBandH(ctrls.length, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      this.buildTransportButtons(this.w / 2 - 84, top + band + 10);
+      return;
+    }
+    if (type === 'sequencer') {
+      const band = this.ctrlBandH(ctrls.length, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      this.buildStepGrid(x, top + band + 6, gw);
+      return;
+    }
+    if (type === 'smpl') {
+      const band = this.ctrlBandH(ctrls.length, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      this.buildSamplerFace(x, top + band + 6, gw);
+      return;
+    }
+    if (type === 'visualizer') {
+      const band = this.ctrlBandH(ctrls.length, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      this.buildVisFace(x, top + band + 4, gw);
+      return;
+    }
+
+    // Pure param modules: the knob grid stretches over the whole face.
+    this.buildCtrlGrid(ctrls, x, top, gw, bottom - top);
+  }
+
+  // -- filter (vcf) face: knobs + response curve -----------------------------
+
+  private vcfCurveG: Graphics | null = null;
+  private vcfCurveRect = { x: 0, y: 0, w: 0, h: 0 };
+
+  private buildVcfFace(x: number, y: number, w: number): void {
+    const r = Math.max(12, Math.min(20, w / 11));
+    const knobY = y + r + 16;
+    this.buildSelector(this.paramCtrl(this.paramSpec('mode')), x + w * 0.125, knobY, r);
+    this.buildKnob(this.paramCtrl(this.paramSpec('cutoff')), x + w * 0.375, knobY, r);
+    this.buildKnob(this.paramCtrl(this.paramSpec('res')), x + w * 0.625, knobY, r);
+    this.buildKnob(this.paramCtrl(this.paramSpec('amt')), x + w * 0.875, knobY, r);
+
+    const cy = knobY + r + 26;
+    this.vcfCurveRect = { x, y: cy, w, h: this.h - cy - 12 };
     this.vcfCurveG = new Graphics();
     this.addChild(this.vcfCurveG);
     this.drawVcfCurve();
 
-    const r = this.vcfCurveRect;
-    const hit = new Graphics().rect(r.x, r.y, r.w, r.h).fill({ color: 0xffffff, alpha: 0.001 });
+    const rect = this.vcfCurveRect;
+    const hit = new Graphics().rect(rect.x, rect.y, rect.w, rect.h).fill({ color: 0xffffff, alpha: 0.001 });
     hit.eventMode = 'static';
     hit.cursor = 'crosshair';
     hit.on('pointerdown', (e) => {
       e.stopPropagation();
       appState.beginUndoable();
-      const cutoff = spec('cutoff');
-      const res = spec('res');
+      const cutoff = this.paramCtrl(this.paramSpec('cutoff'));
+      const res = this.paramCtrl(this.paramSpec('res'));
       const apply = (lx: number, ly: number) => {
-        appState.setParam(this.instance.id, 'cutoff', this.paramFromNorm(cutoff, (lx - r.x) / r.w));
-        appState.setParam(this.instance.id, 'res', this.paramFromNorm(res, 1 - (ly - r.y) / r.h));
+        cutoff.set(this.ctrlFromNorm(cutoff, (lx - rect.x) / rect.w));
+        res.set(this.ctrlFromNorm(res, 1 - (ly - rect.y) / rect.h));
         this.refreshParams();
       };
       const first = this.toLocal(e.global);
@@ -508,55 +1012,72 @@ export class ModuleView extends Container {
   private ctrlG: Graphics | null = null;
   private ctrlText: Text | null = null;
 
-  private ctrlSpec(id: string): ParamSpec {
-    return this.def.params.find((p) => p.id === id)!;
-  }
-
   private setCtrl(paramId: string, v: number): void {
     appState.setParam(this.instance.id, paramId, Math.min(1, Math.max(0, v)));
   }
 
-  /** Relative drag shared by knob/slider/XY; one undo step per gesture. */
-  private beginCtrlDrag(
-    e: FederatedPointerEvent,
-    apply: (dxLocal: number, dyLocal: number) => void,
-    onDone?: () => void,
-  ): void {
-    appState.beginUndoable();
-    const startX = e.clientX;
-    const startY = e.clientY;
-    // Client px → canvas-local px (canvas zoom lives in the world transform).
-    const scale = this.worldTransform.a || 1;
-    const onMove = (ev: PointerEvent) => {
-      apply((ev.clientX - startX) / scale, (ev.clientY - startY) / scale);
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      onDone?.();
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
+  /**
+   * Display range for Knob/Slider modules (instance.data.cfg). Display-only:
+   * the Control output always stays normalized 0–1.
+   */
+  private ctrlCfg(): { min: number; max: number; def: number } {
+    const c = (this.instance.data?.cfg ?? {}) as Record<string, unknown>;
+    const min = typeof c.min === 'number' && Number.isFinite(c.min) ? c.min : 0;
+    let max = typeof c.max === 'number' && Number.isFinite(c.max) ? c.max : 1;
+    if (max === min) max = min + 1;
+    const def = typeof c.def === 'number' && Number.isFinite(c.def) ? c.def : min + 0.5 * (max - min);
+    return { min, max, def: Math.min(max, Math.max(min, def)) };
   }
 
-  /** Double-click value entry (PRD §8.6 "double-click to type a value"). */
-  private promptCtrl(paramId: string, redraw: () => void): void {
-    const cur = this.instance.params[paramId] ?? 0;
-    const raw = window.prompt(`${this.def.name} value (0–1)`, cur.toFixed(3));
-    if (raw === null) return;
-    const v = Number(raw);
-    if (!Number.isFinite(v)) return;
-    appState.beginUndoable();
-    this.setCtrl(paramId, v);
-    redraw();
+  /** The Knob/Slider value as a CtrlSpec in the configured display range. */
+  private ctrlValueSpec(redraw: () => void): CtrlSpec {
+    const cfg = this.ctrlCfg();
+    return {
+      key: 'value',
+      label: this.instance.label ?? this.def.name,
+      min: cfg.min,
+      max: cfg.max,
+      default: cfg.def,
+      get: () => cfg.min + Math.min(1, Math.max(0, this.instance.params.value ?? 0)) * (cfg.max - cfg.min),
+      set: (s) => {
+        this.setCtrl('value', (s - cfg.min) / (cfg.max - cfg.min));
+        redraw();
+      },
+      learnId: 'value',
+    };
+  }
+
+  private ctrlScaledText(): string {
+    const cfg = this.ctrlCfg();
+    const v = cfg.min + Math.min(1, Math.max(0, this.instance.params.value ?? 0)) * (cfg.max - cfg.min);
+    return Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+  }
+
+  /** ⚙ opens the range-config popup (Knob/Slider modules). */
+  private buildCtrlConfigButton(): void {
+    const gear = new Text({ text: '⚙', style: { fontSize: 13, fill: theme.textDim } });
+    gear.anchor.set(1, 0);
+    gear.position.set(this.w - 6, TITLE_H + 4);
+    gear.eventMode = 'static';
+    gear.cursor = 'pointer';
+    gear.on('pointerdown', (e) => {
+      e.stopPropagation();
+      appState.openRangeConfig(this.instance.id);
+    });
+    gear.on('pointerover', (e) =>
+      this.tooltip.show(['Range', 'Configure min, max and default. Display only — the output stays 0–1.'], e.clientX, e.clientY),
+    );
+    gear.on('pointerout', () => this.tooltip.hide());
+    this.addChild(gear);
   }
 
   private knobCenter(): { cx: number; cy: number } {
-    return { cx: this.def.width / 2, cy: TITLE_H + 56 };
+    return { cx: this.w / 2, cy: TITLE_H + 56 };
   }
 
   private buildKnobFace(): void {
     const { cx, cy } = this.knobCenter();
+    this.paramAnchors.set('value', { x: cx, y: cy });
     this.ctrlG = new Graphics();
     this.addChild(this.ctrlG);
     this.ctrlText = new Text({ text: '', style: { fontSize: 12, fill: theme.text } });
@@ -564,33 +1085,36 @@ export class ModuleView extends Container {
     this.ctrlText.position.set(cx, cy + 44);
     this.addChild(this.ctrlText);
     this.drawKnob();
+    this.buildCtrlConfigButton();
 
     const hit = new Graphics().circle(cx, cy, 40).fill({ color: 0xffffff, alpha: 0.001 });
     hit.eventMode = 'static';
     hit.cursor = 'ns-resize';
     hit.on('pointerdown', (e) => {
       e.stopPropagation();
-      if (e.altKey) {
-        appState.armMidiLearn(this.instance.id, 'value');
-        return;
-      }
-      if (e.detail >= 2) {
-        this.promptCtrl('value', () => this.drawKnob());
-        return;
-      }
+      const c = this.ctrlValueSpec(() => this.drawKnob());
+      if (this.ctrlPreamble(c, e)) return;
+      appState.beginUndoable();
       const start = this.instance.params.value ?? 0;
-      this.beginCtrlDrag(e, (_dx, dy) => {
-        this.setCtrl('value', start - dy / 120);
+      const startY = e.clientY;
+      const scale = this.worldTransform.a || 1;
+      const onMove = (ev: PointerEvent) => {
+        this.setCtrl('value', start + (startY - ev.clientY) / scale / 120);
         this.drawKnob();
-      });
+        this.tooltip.showNow([this.ctrlTipTitle(c)], ev.clientX, ev.clientY);
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        this.tooltip.hide();
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
     });
-    hit.on('pointerover', (ev) =>
-      this.tooltip.show(
-        ['Knob: drag up/down. Double-click: type a value. Alt-click: MIDI learn.'],
-        ev.clientX,
-        ev.clientY,
-      ),
-    );
+    hit.on('pointerover', (ev) => {
+      const c = this.ctrlValueSpec(() => this.drawKnob());
+      this.tooltip.show([this.ctrlTipTitle(c), `${CTRL_HINT} ⚙: range.`], ev.clientX, ev.clientY);
+    });
     hit.on('pointerout', () => this.tooltip.hide());
     this.addChild(hit);
   }
@@ -610,20 +1134,20 @@ export class ModuleView extends Container {
     g.moveTo(cx + Math.cos(a0) * 36, cy + Math.sin(a0) * 36);
     g.arc(cx, cy, 36, a0, a1).stroke({ width: 4, color: theme.inset });
     g.moveTo(cx + Math.cos(a0) * 36, cy + Math.sin(a0) * 36);
-    g.arc(cx, cy, 36, a0, av).stroke({ width: 4, color: PORT_TYPE_COLORS.control });
+    g.arc(cx, cy, 36, a0, av).stroke({ width: 4, color: this.accent() });
     g.moveTo(cx + Math.cos(av) * 10, cy + Math.sin(av) * 10)
       .lineTo(cx + Math.cos(av) * 26, cy + Math.sin(av) * 26)
       .stroke({ width: 3, color: theme.text });
-    if (this.ctrlText) this.ctrlText.text = v.toFixed(2);
+    if (this.ctrlText) this.ctrlText.text = this.ctrlScaledText();
   }
 
   private sliderTrack(): { x: number; y: number; w: number; h: number; horiz: boolean } {
     const horiz = Math.round(this.instance.params.orient ?? 0) === 1;
     const pad = 18;
     if (horiz) {
-      return { x: pad, y: TITLE_H + 40, w: this.def.width - pad * 2, h: 12, horiz };
+      return { x: pad, y: TITLE_H + 40, w: this.w - pad * 2, h: 12, horiz };
     }
-    return { x: this.def.width / 2 - 6, y: TITLE_H + 14, w: 12, h: this.def.height - TITLE_H - 70, horiz };
+    return { x: this.w / 2 - 6, y: TITLE_H + 14, w: 12, h: this.h - TITLE_H - 112, horiz };
   }
 
   private buildSliderFace(): void {
@@ -631,26 +1155,23 @@ export class ModuleView extends Container {
     this.addChild(this.ctrlG);
     this.ctrlText = new Text({ text: '', style: { fontSize: 12, fill: theme.text } });
     this.ctrlText.anchor.set(0.5, 0);
-    this.ctrlText.position.set(this.def.width / 2, this.def.height - 48);
+    this.ctrlText.position.set(this.w / 2, this.h - 90);
     this.addChild(this.ctrlText);
     this.drawSlider();
+    this.buildCtrlConfigButton();
+    const t0 = this.sliderTrack();
+    this.paramAnchors.set('value', { x: t0.x + t0.w / 2, y: t0.y + t0.h / 2 });
 
     // Hit area covers both orientations; drawing follows the orient param.
     const hit = new Graphics()
-      .rect(8, TITLE_H + 6, this.def.width - 16, this.def.height - TITLE_H - 56)
+      .rect(8, TITLE_H + 6, this.w - 16, this.h - TITLE_H - 98)
       .fill({ color: 0xffffff, alpha: 0.001 });
     hit.eventMode = 'static';
     hit.cursor = 'pointer';
     hit.on('pointerdown', (e) => {
       e.stopPropagation();
-      if (e.altKey) {
-        appState.armMidiLearn(this.instance.id, 'value');
-        return;
-      }
-      if (e.detail >= 2) {
-        this.promptCtrl('value', () => this.drawSlider());
-        return;
-      }
+      const c = this.ctrlValueSpec(() => this.drawSlider());
+      if (this.ctrlPreamble(c, e)) return;
       const t = this.sliderTrack();
       appState.beginUndoable();
       // Jump to the click position, then track relatively.
@@ -658,22 +1179,32 @@ export class ModuleView extends Container {
       this.setCtrl('value', t.horiz ? (local.x - t.x) / t.w : 1 - (local.y - t.y) / t.h);
       this.drawSlider();
       const start = this.instance.params.value ?? 0;
-      this.beginCtrlDrag(e, (dx, dy) => {
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const scale = this.worldTransform.a || 1;
+      const onMove = (ev: PointerEvent) => {
+        const dx = (ev.clientX - startX) / scale;
+        const dy = (ev.clientY - startY) / scale;
         this.setCtrl('value', start + (t.horiz ? dx / t.w : -dy / t.h));
         this.drawSlider();
-      });
+        this.tooltip.showNow([this.ctrlTipTitle(c)], ev.clientX, ev.clientY);
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        this.tooltip.hide();
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
     });
-    hit.on('pointerover', (ev) =>
-      this.tooltip.show(
-        ['Slider: click or drag. Double-click: type a value. Alt-click: MIDI learn.'],
-        ev.clientX,
-        ev.clientY,
-      ),
-    );
+    hit.on('pointerover', (ev) => {
+      const c = this.ctrlValueSpec(() => this.drawSlider());
+      this.tooltip.show([this.ctrlTipTitle(c), `${CTRL_HINT} ⚙: range.`], ev.clientX, ev.clientY);
+    });
     hit.on('pointerout', () => this.tooltip.hide());
     this.addChild(hit);
 
-    this.buildParamRow(this.ctrlSpec('orient'), 18, this.def.height - 28, this.def.width - 36);
+    this.buildSelector(this.paramCtrl(this.paramSpec('orient')), this.w / 2, this.h - 42, 12);
   }
 
   drawSlider(): void {
@@ -684,25 +1215,25 @@ export class ModuleView extends Container {
     g.clear();
     g.roundRect(t.x, t.y, t.w, t.h, 5).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
     if (t.horiz) {
-      g.roundRect(t.x, t.y, t.w * v, t.h, 5).fill(PORT_TYPE_COLORS.control);
+      g.roundRect(t.x, t.y, t.w * v, t.h, 5).fill(this.accent());
       g.roundRect(t.x + t.w * v - 7, t.y - 6, 14, t.h + 12, 4)
         .fill(theme.button)
         .stroke({ width: 1, color: theme.text });
     } else {
-      g.roundRect(t.x, t.y + t.h * (1 - v), t.w, t.h * v, 5).fill(PORT_TYPE_COLORS.control);
+      g.roundRect(t.x, t.y + t.h * (1 - v), t.w, t.h * v, 5).fill(this.accent());
       g.roundRect(t.x - 12, t.y + t.h * (1 - v) - 7, t.w + 24, 14, 4)
         .fill(theme.button)
         .stroke({ width: 1, color: theme.text });
     }
-    if (this.ctrlText) this.ctrlText.text = v.toFixed(2);
+    if (this.ctrlText) this.ctrlText.text = this.ctrlScaledText();
   }
 
   private xyPad(): { x: number; y: number; w: number; h: number } {
     return {
       x: 18,
       y: TITLE_H + 8,
-      w: this.def.width - 36,
-      h: this.def.height - TITLE_H - 8 - 34,
+      w: this.w - 36,
+      h: this.h - TITLE_H - 8 - 58,
     };
   }
 
@@ -712,6 +1243,8 @@ export class ModuleView extends Container {
     this.drawXy();
 
     const r = this.xyPad();
+    this.paramAnchors.set('x', { x: r.x + r.w / 2, y: r.y + r.h / 2 });
+    this.paramAnchors.set('y', { x: r.x + r.w / 2, y: r.y + r.h / 2 });
     const hit = new Graphics().rect(r.x, r.y, r.w, r.h).fill({ color: 0xffffff, alpha: 0.001 });
     hit.eventMode = 'static';
     hit.cursor = 'crosshair';
@@ -724,21 +1257,25 @@ export class ModuleView extends Container {
       this.drawXy();
       const sx = this.instance.params.x ?? 0.5;
       const sy = this.instance.params.y ?? 0.5;
-      this.beginCtrlDrag(
-        e,
-        (dx, dy) => {
-          this.setCtrl('x', sx + dx / r.w);
-          this.setCtrl('y', sy - dy / r.h);
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const scale = this.worldTransform.a || 1;
+      const onMove = (ev: PointerEvent) => {
+        this.setCtrl('x', sx + (ev.clientX - startX) / scale / r.w);
+        this.setCtrl('y', sy - (ev.clientY - startY) / scale / r.h);
+        this.drawXy();
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        if (Math.round(this.instance.params.spring ?? 0) === 1) {
+          this.setCtrl('x', 0.5);
+          this.setCtrl('y', 0.5);
           this.drawXy();
-        },
-        () => {
-          if (Math.round(this.instance.params.spring ?? 0) === 1) {
-            this.setCtrl('x', 0.5);
-            this.setCtrl('y', 0.5);
-            this.drawXy();
-          }
-        },
-      );
+        }
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
     });
     hit.on('pointerover', (ev) =>
       this.tooltip.show(['XY pad: drag the puck. X and Y are separate control outputs.'], ev.clientX, ev.clientY),
@@ -746,7 +1283,7 @@ export class ModuleView extends Container {
     hit.on('pointerout', () => this.tooltip.hide());
     this.addChild(hit);
 
-    this.buildParamRow(this.ctrlSpec('spring'), 18, this.def.height - 26, this.def.width - 36);
+    this.buildSelector(this.paramCtrl(this.paramSpec('spring')), this.w / 2, this.h - 32, 12);
   }
 
   drawXy(): void {
@@ -763,11 +1300,11 @@ export class ModuleView extends Container {
     g.moveTo(r.x, r.y + r.h / 2).lineTo(r.x + r.w, r.y + r.h / 2).stroke({ width: 1, color: theme.moduleStroke });
     g.moveTo(px, r.y).lineTo(px, r.y + r.h).stroke({ width: 1, color: theme.textDim, alpha: 0.4 });
     g.moveTo(r.x, py).lineTo(r.x + r.w, py).stroke({ width: 1, color: theme.textDim, alpha: 0.4 });
-    g.circle(px, py, 9).fill(PORT_TYPE_COLORS.control).stroke({ width: 2, color: theme.text });
+    g.circle(px, py, 9).fill(this.accent()).stroke({ width: 2, color: theme.text });
   }
 
   private buttonRect(): { x: number; y: number; w: number; h: number } {
-    return { x: 22, y: TITLE_H + 10, w: this.def.width - 44, h: this.def.height - TITLE_H - 48 };
+    return { x: 22, y: TITLE_H + 10, w: this.w - 44, h: this.h - TITLE_H - 72 };
   }
 
   private buildButtonFace(): void {
@@ -776,6 +1313,7 @@ export class ModuleView extends Container {
     this.drawButton();
 
     const r = this.buttonRect();
+    this.paramAnchors.set('value', { x: r.x + r.w / 2, y: r.y + r.h / 2 });
     const hit = new Graphics().rect(r.x, r.y, r.w, r.h).fill({ color: 0xffffff, alpha: 0.001 });
     hit.eventMode = 'static';
     hit.cursor = 'pointer';
@@ -804,7 +1342,7 @@ export class ModuleView extends Container {
     hit.on('pointerout', () => this.tooltip.hide());
     this.addChild(hit);
 
-    this.buildParamRow(this.ctrlSpec('mode'), 18, this.def.height - 28, this.def.width - 36);
+    this.buildSelector(this.paramCtrl(this.paramSpec('mode')), this.w / 2, this.h - 34, 12);
   }
 
   drawButton(): void {
@@ -814,8 +1352,93 @@ export class ModuleView extends Container {
     const g = this.ctrlG;
     g.clear();
     g.roundRect(r.x, r.y, r.w, r.h, 10)
-      .fill(on ? PORT_TYPE_COLORS.control : theme.button)
+      .fill(on ? this.accent() : theme.button)
       .stroke({ width: 2, color: on ? theme.text : theme.moduleStroke });
+  }
+
+  // -- Color Gen face: param grid + live preview + base/flash swatches -----------
+
+  private colorPrevG: Graphics | null = null;
+  private colorPrevRect = { x: 0, y: 0, w: 0, h: 0 };
+  private lastPrevColor = -2;
+
+  private buildColorGenFace(x: number, y: number, w: number): void {
+    const ctrls = this.def.params.map((p) => this.paramCtrl(p));
+    const band = this.ctrlBandH(ctrls.length, w);
+    this.buildCtrlGrid(ctrls, x, y, w, band);
+
+    // Live output strip, with the base/flash picker swatches on the right.
+    const py = y + band + 8;
+    const ph = Math.max(18, this.h - py - 14);
+    this.colorPrevRect = { x, y: py, w: w - 60, h: ph };
+    this.colorPrevG = new Graphics();
+    this.addChild(this.colorPrevG);
+    this.lastPrevColor = -2;
+
+    const buildSwatch = (
+      sx: number,
+      tip: string[],
+      get: () => number,
+      apply: (h: number, s: number) => void,
+    ) => {
+      const g = new Graphics();
+      const draw = () => {
+        g.clear();
+        g.roundRect(sx, py, 24, ph, 4).fill(get()).stroke({ width: 1, color: theme.moduleStroke });
+      };
+      draw();
+      this.ctrlRedraws.push(draw);
+      g.eventMode = 'static';
+      g.cursor = 'pointer';
+      g.on('pointerdown', (e) => {
+        e.stopPropagation();
+        const input = document.createElement('input');
+        input.type = 'color';
+        input.value = rgbIntToHex(get());
+        input.onchange = () => {
+          const { h, s } = rgbIntToHsl(hexToRgbInt(input.value));
+          appState.beginUndoable();
+          apply(h, s);
+          this.refreshParams();
+        };
+        input.click();
+      });
+      g.on('pointerover', (e) => this.tooltip.show(tip, e.clientX, e.clientY));
+      g.on('pointerout', () => this.tooltip.hide());
+      this.addChild(g);
+    };
+
+    buildSwatch(
+      x + w - 52,
+      ['Base color', 'Click to pick — writes the Hue/Sat params.'],
+      () => hslToRgbInt(this.instance.params.hue ?? 0.6, this.instance.params.sat ?? 0.85, 0.5),
+      (h, s) => {
+        appState.setParam(this.instance.id, 'hue', h);
+        appState.setParam(this.instance.id, 'sat', s);
+      },
+    );
+    buildSwatch(
+      x + w - 24,
+      ['Flash color', 'Click to pick — writes the Flash Hue param (flash mode).'],
+      () => hslToRgbInt(this.instance.params.hue2 ?? 0, this.instance.params.sat ?? 0.85, 0.5),
+      (h) => appState.setParam(this.instance.id, 'hue2', h),
+    );
+  }
+
+  // -- mixer face: channel faders + pan knobs ------------------------------------
+
+  private buildMixerFace(x: number, y: number, w: number): void {
+    const chW = w / 5;
+    const panR = Math.max(11, Math.min(16, chW * 0.28));
+    const faderH = this.h - y - panR * 2 - 64;
+    const faderW = Math.max(10, Math.min(16, chW * 0.25));
+    for (let ch = 1; ch <= 4; ch++) {
+      const cx = x + (ch - 1) * chW + chW / 2;
+      this.buildFader(this.paramCtrl(this.paramSpec(`lvl${ch}`)), cx - faderW / 2, y, faderW, faderH);
+      this.buildKnob(this.paramCtrl(this.paramSpec(`pan${ch}`)), cx, y + faderH + panR + 30, panR);
+    }
+    const mx = x + 4 * chW + chW / 2;
+    this.buildFader(this.paramCtrl(this.paramSpec('master')), mx - faderW / 2 - 1, y, faderW + 2, faderH);
   }
 
   // -- composer face (PRD §8.3, piano roll) --------------------------------------
@@ -826,7 +1449,7 @@ export class ModuleView extends Container {
   private lastCompData: unknown = null;
 
   private buildComposerFace(x: number, y: number, w: number): void {
-    const h = this.def.height - y - 46; // room for the open button below
+    const h = this.h - y - 12;
     this.compRect = { x, y, w, h };
     const bg = new Graphics().roundRect(x, y, w, h, 4).fill(0x0c0c12);
     bg.eventMode = 'static';
@@ -837,7 +1460,7 @@ export class ModuleView extends Container {
     });
     bg.on('pointerover', (e) =>
       this.tooltip.show(
-        ['Composer clip', 'Preview of the piano-roll clip. Click to open the editor.'],
+        ['Composer clip', 'Click to open the piano-roll editor: notes, tools, MIDI import/export.'],
         e.clientX,
         e.clientY,
       ),
@@ -847,28 +1470,6 @@ export class ModuleView extends Container {
     this.compG = new Graphics();
     this.compG.eventMode = 'none';
     this.addChild(this.compG);
-
-    const btnY = y + h + 8;
-    const btn = new Graphics()
-      .roundRect(x, btnY, w, 26, 4)
-      .fill(theme.button)
-      .stroke({ width: 1, color: theme.moduleStroke });
-    btn.eventMode = 'static';
-    btn.cursor = 'pointer';
-    btn.on('pointerdown', (e) => {
-      e.stopPropagation();
-      appState.openComposer(this.instance.id);
-    });
-    btn.on('pointerover', (e) =>
-      this.tooltip.show(['Piano Roll', 'Open the full editor: notes, tools, MIDI import/export.'], e.clientX, e.clientY),
-    );
-    btn.on('pointerout', () => this.tooltip.hide());
-    this.addChild(btn);
-    const label = new Text({ text: 'Open Piano Roll ▸', style: { fontSize: 12, fill: theme.text } });
-    label.anchor.set(0.5);
-    label.position.set(x + w / 2, btnY + 13);
-    label.eventMode = 'none';
-    this.addChild(label);
 
     this.drawCompPreview(-1);
   }
@@ -922,7 +1523,7 @@ export class ModuleView extends Container {
   private visParticles: Array<{ x: number; y: number; vx: number; vy: number; life: number; hue: number }> = [];
 
   private buildVisFace(x: number, y: number, w: number): void {
-    const h = this.def.height - y - 12;
+    const h = this.h - y - 12;
     this.visRect = { x, y, w, h };
     const bg = new Graphics().roundRect(x, y, w, h, 4).fill(0x0c0c12);
     this.addChild(bg);
@@ -1078,7 +1679,7 @@ export class ModuleView extends Container {
   }
 
   private buildPeqFace(x: number, y: number, w: number): void {
-    const h = this.def.height - y - 14;
+    const h = this.h - y - 14;
     this.peqRect = { x, y, w, h };
 
     const bg = new Graphics().roundRect(x, y, w, h, 4).fill(theme.inset);
@@ -1226,371 +1827,25 @@ export class ModuleView extends Container {
     g.fill({ color: 0x3dd9ff, alpha: 0.16 });
   }
 
-  // -- gain-reduction meter (compressor/limiter, PRD §8.4) ---------------------
+  // -- gain-reduction meter (compressor/limiter/mbcomp): vertical red bar -------
 
   private grBar: Graphics | null = null;
-  private grRect = { x: 0, y: 0, w: 0 };
+  private grRect = { x: 0, y: 0, w: 0, h: 0 };
 
-  private buildGrMeter(x: number, y: number, w: number): void {
+  private buildGrMeter(x: number, y: number, w: number, h: number): void {
     const label = new Text({ text: 'GR', style: { fontSize: 9, fill: theme.textDim } });
-    label.position.set(x, y - 1);
+    label.anchor.set(0.5, 1);
+    label.position.set(x + w / 2, y - 2);
     this.addChild(label);
-    const bg = new Graphics().roundRect(x + 20, y, w - 20, 8, 3).fill(theme.inset);
+    const bg = new Graphics().roundRect(x, y, w, h, 3).fill(theme.inset);
     this.addChild(bg);
     this.grBar = new Graphics();
     this.addChild(this.grBar);
-    this.grRect = { x: x + 20, y, w: w - 20 };
+    this.grRect = { x, y, w, h };
   }
 
   // -- drum machine face -----------------------------------------------------
 
-  private drumSel = 0;
-  private drumPadsG: Graphics | null = null;
-  private drumStepsG: Graphics | null = null;
-  private drumPadLabels: Text[] = [];
-  private drumNameText: Text | null = null;
-  private drumRowTexts = new Map<string, Text>();
-  private drumPadGridRect = { x: 0, y: 0, cell: 0, gap: 0 };
-  private drumStepRect = { x: 0, y: 0, w: 0, h: 0 };
-  private lastDrumStep = -1;
-
-  private static readonly DRUM_PAD_FIELDS: Array<{
-    id: string;
-    label: string;
-    min: number;
-    max: number;
-    options?: string[];
-  }> = [
-    { id: 'level', label: 'Level', min: 0, max: 1 },
-    { id: 'pan', label: 'Pan', min: -1, max: 1 },
-    { id: 'pitch', label: 'Pitch', min: -12, max: 12 },
-    { id: 'choke', label: 'Choke', min: 0, max: 4, options: ['off', '1', '2', '3', '4'] },
-    { id: 'attack', label: 'Attack', min: 0.0005, max: 0.1 },
-    { id: 'decay', label: 'Decay', min: 0.02, max: DRUM_DECAY_MAX },
-  ];
-
-  private drumPads(): DrumPad[] {
-    return (this.instance.data?.pads as DrumPad[]) ?? [];
-  }
-
-  private drumPattern(): DrumStep[][] {
-    return (this.instance.data?.pattern as DrumStep[][]) ?? [];
-  }
-
-  private buildDrumFace(x: number, y: number, w: number): void {
-    const cell = 35;
-    const gap = 3;
-    const gridSize = 4 * cell + 3 * gap;
-    this.drumPadGridRect = { x, y, cell, gap };
-
-    this.drumPadsG = new Graphics();
-    this.addChild(this.drumPadsG);
-    for (let i = 0; i < DRUM_PADS; i++) {
-      const t = new Text({ text: '', style: { fontSize: 8, fill: theme.text } });
-      t.anchor.set(0.5);
-      t.position.set(
-        x + (i % 4) * (cell + gap) + cell / 2,
-        y + Math.floor(i / 4) * (cell + gap) + cell / 2,
-      );
-      t.eventMode = 'none';
-      this.addChild(t);
-      this.drumPadLabels.push(t);
-    }
-    const padHit = new Graphics().rect(x, y, gridSize, gridSize).fill({ color: 0xffffff, alpha: 0.001 });
-    padHit.eventMode = 'static';
-    padHit.cursor = 'pointer';
-    padHit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      const local = this.toLocal(e.global);
-      const col = Math.min(3, Math.max(0, Math.floor((local.x - x) / (cell + gap))));
-      const row = Math.min(3, Math.max(0, Math.floor((local.y - y) / (cell + gap))));
-      this.drumSel = row * 4 + col;
-      appState.padTrigger(this.instance.id, this.drumSel);
-      this.refreshDrumFace();
-    });
-    padHit.on('pointerover', (e) =>
-      this.tooltip.show(['Pads', 'Click: select + audition. Steps and pad controls follow the selected pad.'], e.clientX, e.clientY),
-    );
-    padHit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(padHit);
-
-    // Right column: selected pad name (click to load a sample) + pad controls.
-    const colX = x + gridSize + 8;
-    const colW = w - gridSize - 8;
-    this.drumNameText = new Text({ text: '', style: { fontSize: 11, fill: theme.text, fontWeight: 'bold' } });
-    this.drumNameText.position.set(colX, y);
-    this.addChild(this.drumNameText);
-    const loadHit = new Graphics().rect(colX - 2, y - 2, colW + 4, 18).fill({ color: 0xffffff, alpha: 0.001 });
-    loadHit.eventMode = 'static';
-    loadHit.cursor = 'pointer';
-    loadHit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'audio/*';
-      input.onchange = () => {
-        const file = input.files?.[0];
-        if (file) void appState.loadSampleFile(this.instance.id, file, this.drumSel);
-      };
-      input.click();
-    });
-    loadHit.on('pointerover', (e) =>
-      this.tooltip.show(['Pad sample', 'Click to load an audio file onto the selected pad.'], e.clientX, e.clientY),
-    );
-    loadHit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(loadHit);
-
-    // ✎ opens the Sample Editor for the selected pad (sits above loadHit).
-    const editBtn = new Text({ text: '✎', style: { fontSize: 12, fill: theme.textDim } });
-    editBtn.anchor.set(1, 0);
-    editBtn.position.set(colX + colW, y);
-    editBtn.eventMode = 'static';
-    editBtn.cursor = 'pointer';
-    editBtn.on('pointerdown', (e) => {
-      e.stopPropagation();
-      appState.openSampleEditor(this.instance.id, this.drumSel);
-    });
-    editBtn.on('pointerover', (e) =>
-      this.tooltip.show(['Sample Editor', 'Edit the selected pad: trim, normalize, fades…'], e.clientX, e.clientY),
-    );
-    editBtn.on('pointerout', () => this.tooltip.hide());
-    this.addChild(editBtn);
-
-    let rowY = y + 22;
-    for (const field of ModuleView.DRUM_PAD_FIELDS) {
-      this.buildDrumPadRow(field, colX, rowY, colW);
-      rowY += ROW_H;
-    }
-
-    // Step row for the selected pad.
-    const stepY = y + gridSize + 6;
-    this.drumStepRect = { x, y: stepY, w, h: 32 };
-    this.drumStepsG = new Graphics();
-    this.addChild(this.drumStepsG);
-    const stepHit = new Graphics().rect(x, stepY, w, 32).fill({ color: 0xffffff, alpha: 0.001 });
-    stepHit.eventMode = 'static';
-    stepHit.cursor = 'pointer';
-    stepHit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      this.beginDrumStepEdit(e);
-    });
-    stepHit.on('pointerover', (e) =>
-      this.tooltip.show(['Steps (selected pad)', 'Click: toggle step. Drag up/down: set velocity.'], e.clientX, e.clientY),
-    );
-    stepHit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(stepHit);
-
-    this.refreshDrumFace();
-  }
-
-  private buildDrumPadRow(
-    field: { id: string; label: string; min: number; max: number; options?: string[] },
-    x: number,
-    y: number,
-    w: number,
-  ): void {
-    const label = new Text({ text: field.label, style: { fontSize: 11, fill: theme.textDim } });
-    label.position.set(x, y + 3);
-    this.addChild(label);
-
-    const value = new Text({ text: '', style: { fontSize: 11, fill: theme.text } });
-    value.anchor.set(1, 0);
-    value.position.set(x + w, y + 3);
-    this.addChild(value);
-    this.drumRowTexts.set(field.id, value);
-
-    const hit = new Graphics().rect(x - 4, y, w + 8, ROW_H).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'ew-resize';
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      this.beginDrumPadRowDrag(field, e);
-    });
-    hit.on('pointerover', (e) =>
-      this.tooltip.show(
-        [`${field.label}: ${this.formatDrumField(field)}`,
-          field.options ? 'Click to cycle' : `Drag to change (${field.min}–${field.max})`],
-        e.clientX,
-        e.clientY,
-      ),
-    );
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-  }
-
-  private drumFieldValue(id: string): number {
-    const pad = this.drumPads()[this.drumSel] as unknown as Record<string, number> | undefined;
-    return pad?.[id] ?? 0;
-  }
-
-  private commitDrumField(id: string, v: number): void {
-    const pads = [...this.drumPads()];
-    const cur = pads[this.drumSel];
-    if (!cur) return;
-    pads[this.drumSel] = { ...cur, [id]: v };
-    appState.setModuleData(this.instance.id, 'pads', pads);
-  }
-
-  private beginDrumPadRowDrag(
-    field: { id: string; label: string; min: number; max: number; options?: string[] },
-    e: FederatedPointerEvent,
-  ): void {
-    appState.beginUndoable();
-    const startX = e.clientX;
-    const startValue = this.drumFieldValue(field.id);
-    let moved = false;
-
-    const onMove = (ev: PointerEvent) => {
-      const dx = ev.clientX - startX;
-      if (Math.abs(dx) > 2) moved = true;
-      if (field.options) return;
-      const range = field.max - field.min;
-      let v = startValue + (dx / 150) * range;
-      v = Math.min(field.max, Math.max(field.min, v));
-      if (field.id === 'pitch') v = Math.round(v);
-      this.commitDrumField(field.id, v);
-      this.updateDrumRowText(field);
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      if (!moved && field.options) {
-        const next = (Math.round(this.drumFieldValue(field.id)) + 1) % field.options.length;
-        this.commitDrumField(field.id, next);
-        this.updateDrumRowText(field);
-      }
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-
-  private formatDrumField(field: { id: string; min: number; max: number; options?: string[] }): string {
-    const v = this.drumFieldValue(field.id);
-    if (field.options) return field.options[Math.round(v)] ?? String(v);
-    if (field.id === 'pitch') return `${v > 0 ? '+' : ''}${Math.round(v)} st`;
-    if (field.id === 'decay' && v >= DRUM_DECAY_MAX) return 'full';
-    return Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
-  }
-
-  private updateDrumRowText(field: { id: string; min: number; max: number; options?: string[] }): void {
-    const t = this.drumRowTexts.get(field.id);
-    if (t) t.text = this.formatDrumField(field);
-  }
-
-  private beginDrumStepEdit(e: FederatedPointerEvent): void {
-    const pattern = this.drumPattern();
-    const row = pattern[this.drumSel];
-    if (!row || row.length === 0) return;
-    appState.beginUndoable();
-    const local = this.toLocal(e.global);
-    const { x, w } = this.drumStepRect;
-    const idx = Math.min(row.length - 1, Math.max(0, Math.floor(((local.x - x) / w) * row.length)));
-    const step = row[idx];
-    const startY = e.clientY;
-    const startVel = step.vel;
-    let moved = false;
-
-    const commit = () => {
-      appState.setModuleData(this.instance.id, 'pattern', [...pattern]);
-      this.drawDrumSteps(this.lastDrumStep);
-    };
-    const onMove = (ev: PointerEvent) => {
-      const dy = startY - ev.clientY;
-      if (Math.abs(dy) > 3) moved = true;
-      if (!moved) return;
-      step.on = true;
-      step.vel = Math.min(1, Math.max(0.05, startVel + dy / 60));
-      this.tooltip.showNow([`vel ${Math.round(step.vel * 100)}%`], ev.clientX, ev.clientY);
-      commit();
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      this.tooltip.hide();
-      if (!moved) {
-        step.on = !step.on;
-        commit();
-      }
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-
-  private drawDrumPads(): void {
-    if (!this.drumPadsG) return;
-    const { x, y, cell, gap } = this.drumPadGridRect;
-    const pads = this.drumPads();
-    const g = this.drumPadsG;
-    g.clear();
-    for (let i = 0; i < DRUM_PADS; i++) {
-      const cx = x + (i % 4) * (cell + gap);
-      const cy = y + Math.floor(i / 4) * (cell + gap);
-      const loaded = appState.samples.has(sampleKey(this.instance.id, i));
-      const selected = i === this.drumSel;
-      g.roundRect(cx, cy, cell, cell, 4)
-        .fill(loaded ? theme.button : theme.inset)
-        .stroke({ width: selected ? 2 : 1, color: selected ? theme.selectedStroke : theme.moduleStroke });
-      const label = this.drumPadLabels[i];
-      if (label) {
-        label.text = pads[i]?.name?.slice(0, 5) ?? '';
-        label.style.fill = loaded ? theme.text : theme.textDim;
-      }
-    }
-  }
-
-  private drawDrumSteps(playhead = -1): void {
-    if (!this.drumStepsG) return;
-    const { x, y, w, h } = this.drumStepRect;
-    const row = this.drumPattern()[this.drumSel] ?? [];
-    if (row.length === 0) return;
-    const cellW = w / row.length;
-    const g = this.drumStepsG;
-    g.clear();
-    for (let i = 0; i < row.length; i++) {
-      const cx = x + i * cellW;
-      g.roundRect(cx + 1, y, cellW - 2, h, 2).fill(theme.inset);
-      if (i % 4 === 0) {
-        g.rect(cx + 1, y, 2, h).fill({ color: 0xffffff, alpha: 0.08 });
-      }
-      if (i === playhead) {
-        g.roundRect(cx + 1, y, cellW - 2, h, 2).fill({ color: 0xffffff, alpha: 0.12 });
-      }
-      const step = row[i];
-      if (step?.on) {
-        const barH = 4 + step.vel * (h - 8);
-        g.roundRect(cx + 2, y + h - barH - 2, cellW - 4, barH, 2)
-          .fill(i === playhead ? 0x7fe9ff : 0x3dd9ff);
-      }
-    }
-  }
-
-  /** Drum pad index at module-local coords (sample-library drops), else null. */
-  padIndexAt(localX: number, localY: number): number | null {
-    if (this.instance.type !== 'drum' || !this.drumPadsG) return null;
-    const { x, y, cell, gap } = this.drumPadGridRect;
-    const pitch = cell + gap;
-    const col = Math.floor((localX - x) / pitch);
-    const row = Math.floor((localY - y) / pitch);
-    if (col < 0 || col > 3 || row < 0 || row > 3) return null;
-    if (localX - x - col * pitch > cell || localY - y - row * pitch > cell) return null; // in the gap
-    return row * 4 + col;
-  }
-
-  /** Currently selected drum pad (drop fallback when not over the grid). */
-  get selectedPad(): number {
-    return this.drumSel;
-  }
-
-  private refreshDrumFace(): void {
-    if (!this.drumPadsG) return;
-    this.drawDrumPads();
-    this.drawDrumSteps(this.lastDrumStep);
-    if (this.drumNameText) {
-      const pad = this.drumPads()[this.drumSel];
-      this.drumNameText.text = `${this.drumSel + 1}: ${pad?.name ?? ''}`;
-    }
-    for (const field of ModuleView.DRUM_PAD_FIELDS) this.updateDrumRowText(field);
-  }
 
   // -- synth wavetable loader --------------------------------------------------
 
@@ -1652,8 +1907,8 @@ export class ModuleView extends Container {
     this.addChild(this.recLabel);
 
     this.recElapsed = new Text({ text: '0.0 s', style: { fontSize: 12, fill: theme.textDim } });
-    this.recElapsed.anchor.set(1, 0);
-    this.recElapsed.position.set(x + w, y + 8);
+    this.recElapsed.anchor.set(0, 0);
+    this.recElapsed.position.set(x, y + 38);
     this.addChild(this.recElapsed);
 
     const hit = new Graphics().rect(x, y, 90, 30).fill({ color: 0xffffff, alpha: 0.001 });
@@ -1695,7 +1950,7 @@ export class ModuleView extends Container {
   private waveRect = { x: 0, y: 0, w: 0, h: 0 };
 
   private buildSamplerFace(x: number, y: number, w: number): void {
-    const h = this.def.height - y - 28;
+    const h = Math.max(40, this.h - y - 28);
     this.waveRect = { x, y, w, h };
     this.waveform = new Graphics();
     this.addChild(this.waveform);
@@ -1748,7 +2003,6 @@ export class ModuleView extends Container {
   }
 
   refreshSample(): void {
-    if (this.drumPadsG) this.refreshDrumFace();
     this.updateWtRowText();
     if (!this.waveform) return;
     const { x, y, w, h } = this.waveRect;
@@ -1797,7 +2051,7 @@ export class ModuleView extends Container {
   }
 
   private buildStepGrid(x: number, y: number, w: number): void {
-    const h = this.def.height - y - 12;
+    const h = Math.max(30, this.h - y - 12);
     this.stepGridRect = { x, y, w, h };
     this.stepGrid = new Graphics();
     this.addChild(this.stepGrid);
@@ -1872,7 +2126,6 @@ export class ModuleView extends Container {
     g.clear();
     for (let i = 0; i < steps.length; i++) {
       const cx = x + i * cellW;
-      const isBeat = i % 4 === 0;
       g.roundRect(cx + 1, y, cellW - 2, h, 2).fill(theme.inset);
       if (i === playhead) {
         g.roundRect(cx + 1, y, cellW - 2, h, 2).fill({ color: 0xffffff, alpha: 0.12 });
@@ -1887,95 +2140,10 @@ export class ModuleView extends Container {
     }
   }
 
-  private buildParamRow(param: ParamSpec, x: number, y: number, w: number): void {
-    const label = new Text({ text: param.label, style: { fontSize: 11, fill: theme.textDim } });
-    label.position.set(x, y + 3);
-    this.addChild(label);
-
-    const value = new Text({
-      text: this.formatParam(param),
-      style: { fontSize: 11, fill: theme.text },
-    });
-    value.anchor.set(1, 0);
-    value.position.set(x + w, y + 3);
-    this.addChild(value);
-    this.paramTexts.set(param.id, value);
-
-    const hit = new Graphics().rect(x - 4, y, w + 8, ROW_H).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'ew-resize';
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      if (e.altKey) {
-        // MIDI learn (PRD Phase 2): alt-click a param, then move a hardware CC.
-        appState.armMidiLearn(this.instance.id, param.id);
-        return;
-      }
-      this.beginParamDrag(param, e);
-    });
-    hit.on('pointerover', (e) => {
-      this.tooltip.show(
-        [`${param.label}: ${this.formatParam(param)}`,
-          (param.options ? 'Click to cycle' : `Drag to change (${param.min}–${param.max}${param.unit ?? ''})`) +
-            '. Alt-click: MIDI learn.'],
-        e.clientX,
-        e.clientY,
-      );
-    });
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-  }
-
-  private beginParamDrag(param: ParamSpec, e: FederatedPointerEvent): void {
-    // Face-learn (PRD §6 macro controls): armed editor captures this param.
-    if (appState.faceLearn && appState.completeFaceLearn(this.instance.id, param.id)) return;
-    appState.beginUndoable(); // whole drag (or option cycle) = one undo step
-    const startX = e.clientX;
-    const startValue = this.instance.params[param.id];
-    let moved = false;
-
-    const onMove = (ev: PointerEvent) => {
-      const dx = ev.clientX - startX;
-      if (Math.abs(dx) > 2) moved = true;
-      if (param.options) return; // options cycle on click, not drag
-      const range = param.max - param.min;
-      let v = startValue + (dx / 150) * range;
-      v = Math.min(param.max, Math.max(param.min, v));
-      appState.setParam(this.instance.id, param.id, v);
-      this.updateParamText(param);
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      if (!moved && param.options) {
-        const next = (Math.round(this.instance.params[param.id]) + 1) % param.options.length;
-        appState.setParam(this.instance.id, param.id, next);
-        this.updateParamText(param);
-      }
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-
-  private formatParam(param: ParamSpec): string {
-    const v = this.instance.params[param.id];
-    if (param.options) return param.options[Math.round(v)] ?? String(v);
-    const text = Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
-    return param.unit ? `${text} ${param.unit}` : text;
-  }
-
-  private updateParamText(param: ParamSpec): void {
-    const t = this.paramTexts.get(param.id);
-    if (t) t.text = this.formatParam(param);
-  }
-
   refreshParams(): void {
-    for (const p of this.def.params) this.updateParamText(p);
+    this.runCtrlRedraws();
     if (this.instance.type === 'peq') this.drawPeqCurve();
-    if (this.instance.type === 'vcf') {
-      for (const fn of this.vcfRedraws) fn();
-      this.drawVcfCurve();
-    }
+    if (this.instance.type === 'vcf') this.drawVcfCurve();
     if (this.instance.type === 'knob') this.drawKnob();
     if (this.instance.type === 'slider') this.drawSlider();
     if (this.instance.type === 'xy') this.drawXy();
@@ -1986,7 +2154,7 @@ export class ModuleView extends Container {
 
   private buildKeys(x: number, y: number, w: number): void {
     const keyW = w / KEYS.length;
-    const keyH = this.def.height - y - 10;
+    const keyH = Math.max(30, this.h - y - 12);
     KEYS.forEach((key, i) => {
       const g = new Graphics()
         .roundRect(0, 0, keyW - 2, key.black ? keyH * 0.6 : keyH, 3)
@@ -2030,25 +2198,25 @@ export class ModuleView extends Container {
     });
   }
 
-  private buildMeter(x: number, y: number, w: number): void {
-    const bg = new Graphics().roundRect(x, y, w, 8, 3).fill(theme.inset);
+  // -- vertical peak meter (levels / audioOut / recorder) ------------------------
+
+  private meterBar: Graphics | null = null;
+  private clipDot: Graphics | null = null;
+  private meterRect = { x: 0, y: 0, w: 0, h: 0 };
+  private clipped = false;
+
+  private buildVMeter(x: number, y: number, w: number, h: number): void {
+    const bg = new Graphics().roundRect(x, y, w, h, 3).fill(theme.inset);
     this.addChild(bg);
     this.meterBar = new Graphics();
     this.addChild(this.meterBar);
     this.clipDot = new Graphics();
-    this.clipDot.circle(x + w + 8, y + 4, 4).fill(0x550000);
+    this.clipDot.circle(x + w / 2, y - 8, 4).fill(0x550000);
     this.clipDot.eventMode = 'static';
     this.clipDot.cursor = 'pointer';
     this.addChild(this.clipDot);
-    this.meterX = x;
-    this.meterY = y;
-    this.meterW = w;
+    this.meterRect = { x, y, w, h };
   }
-
-  private meterX = 0;
-  private meterY = 0;
-  private meterW = 0;
-  private clipped = false;
 
   /** Called from the canvas ticker: live meters + sequencer playhead. */
   updateLive(): void {
@@ -2071,6 +2239,18 @@ export class ModuleView extends Container {
       }
     }
     if (this.visG) this.drawVisScene();
+    if (this.colorPrevG) {
+      const cur = appState.colorValues[this.instance.id] ?? -1;
+      if (cur !== this.lastPrevColor) {
+        this.lastPrevColor = cur;
+        const r = this.colorPrevRect;
+        this.colorPrevG.clear();
+        this.colorPrevG
+          .roundRect(r.x, r.y, r.w, r.h, 5)
+          .fill(cur >= 0 ? cur : theme.inset)
+          .stroke({ width: 1, color: theme.moduleStroke });
+      }
+    }
     if (this.compG) {
       let pos = -1;
       if (appState.transport.playing) {
@@ -2093,22 +2273,14 @@ export class ModuleView extends Container {
       }
     }
     if (this.grBar) {
-      // Gain reduction grows right-to-left, red, scaled to 24 dB full width.
+      // Gain reduction grows downward, red, scaled to 24 dB full height.
       const gr = appState.gainReduction[this.instance.id] ?? 0;
-      const w = Math.min(1, gr / 24) * this.grRect.w;
+      const bh = Math.min(1, gr / 24) * this.grRect.h;
       this.grBar.clear();
-      if (w > 0.5) {
+      if (bh > 0.5) {
         this.grBar
-          .roundRect(this.grRect.x + this.grRect.w - w, this.grRect.y, w, 8, 3)
+          .roundRect(this.grRect.x, this.grRect.y, this.grRect.w, bh, 3)
           .fill(0xff5050);
-      }
-    }
-    if (this.drumStepsG) {
-      const step = appState.seqSteps[this.instance.id] ?? -1;
-      const current = appState.transport.playing ? step : -1;
-      if (current !== this.lastDrumStep) {
-        this.lastDrumStep = current;
-        this.drawDrumSteps(current);
       }
     }
     if (!this.meterBar) return;
@@ -2116,14 +2288,16 @@ export class ModuleView extends Container {
     const peak = reading?.peak ?? 0;
     if (reading?.clipped) this.clipped = true;
     this.meterBar.clear();
-    const w = Math.min(1, peak) * this.meterW;
-    if (w > 0.5) {
+    const { x, y, w, h } = this.meterRect;
+    const bh = Math.min(1, peak) * h;
+    if (bh > 0.5) {
+      // Vertical bar grows bottom→top, green/amber/red by level.
       this.meterBar
-        .roundRect(this.meterX, this.meterY, w, 8, 3)
+        .roundRect(x, y + h - bh, w, bh, 3)
         .fill(peak > 1 ? 0xff3030 : peak > 0.85 ? 0xffb13d : 0x52e07a);
     }
     if (this.clipDot) {
-      this.clipDot.clear().circle(this.meterX + this.meterW + 8, this.meterY + 4, 4)
+      this.clipDot.clear().circle(x + w / 2, y - 8, 4)
         .fill(this.clipped ? 0xff2020 : 0x550000);
       this.clipDot.off('pointerdown');
       this.clipDot.on('pointerdown', (e) => {
@@ -2134,6 +2308,7 @@ export class ModuleView extends Container {
   }
 
   setSelected(on: boolean): void {
+    this.selected = on;
     this.drawBody(on);
   }
 

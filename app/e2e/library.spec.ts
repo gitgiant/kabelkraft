@@ -65,13 +65,13 @@ test('favorites star, filter, and persist in localStorage', async ({ page }) => 
   await page.evaluate(() => localStorage.removeItem('kk-lib-favs'));
 });
 
-test('drag a library row onto a Sampler loads the sample', async ({ page }) => {
+test('drag a library row onto a Sample Voice loads the sample', async ({ page }) => {
   await openWithFiles(page);
 
   const samplerId = await page.evaluate(() => {
     const s = window.__kk;
     for (const m of [...s.graph.modules.values()]) s.removeModule(m.id); // clean slate
-    return s.addModule('sampler', 0, 0).id;
+    return s.addModule('smpl', 0, 0).id;
   });
 
   const row = page.locator('.library .entry', { hasText: 'kickme' });
@@ -87,36 +87,6 @@ test('drag a library row onto a Sampler loads the sample', async ({ page }) => {
   await expect
     .poll(() => page.evaluate((id) => window.__kk.samples.get(id)?.name ?? '', samplerId))
     .toBe('kickme.wav');
-});
-
-test('drag onto a Drum Machine replaces the selected pad sample', async ({ page }) => {
-  await openWithFiles(page);
-
-  const drumId = await page.evaluate(() => {
-    const s = window.__kk;
-    for (const m of [...s.graph.modules.values()]) s.removeModule(m.id);
-    return s.addModule('drum', 0, 0).id;
-  });
-
-  const row = page.locator('.library .entry', { hasText: 'snare-x' });
-  const rowBox = (await row.boundingBox())!;
-  // Module center sits right of the pad grid → drop lands on the selected pad (0).
-  const target = await page.evaluate((id) => window.__kkCanvas.clientPointFor(id)!, drumId);
-
-  await page.mouse.move(rowBox.x + rowBox.width / 2, rowBox.y + rowBox.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(target.x, target.y, { steps: 12 });
-  await page.mouse.up();
-
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.samples.get(`${id}#0`)?.name ?? '', drumId))
-    .toBe('snare-x.wav');
-  // Pad label follows the file name.
-  const padName = await page.evaluate(
-    (id) => (window.__kk.graph.modules.get(id)?.data?.pads as Array<{ name: string }>)[0].name,
-    drumId,
-  );
-  expect(padName).toBe('snare-x');
 });
 
 test('clicking a row auditions without errors', async ({ page }) => {

@@ -6,11 +6,13 @@ const PATCH = JSON.stringify({
   name: 'Bleep Group',
   modules: [
     { id: 'seq', type: 'sequencer' },
-    { id: 's', type: 'synth', params: { waveform: 0, level: 0.6 } },
+    { id: 'v', type: 'voice', params: { voices: 1 } },
+    { id: 's', type: 'osc', params: { wave: 0, level: 0.6 } },
     { id: 'o', type: 'audioOut' },
   ],
   wires: [
-    { from: { module: 'seq', port: 'notes' }, to: { module: 's', port: 'notes' } },
+    { from: { module: 'seq', port: 'notes' }, to: { module: 'v', port: 'notes' } },
+    { from: { module: 'v', port: 'pitch' }, to: { module: 's', port: 'pitch' } },
     { from: { module: 's', port: 'out' }, to: { module: 'o', port: 'in' } },
   ],
 });
@@ -37,11 +39,11 @@ test('AI import dialog: paste, import as group, audio flows', async ({ page }) =
     return {
       modules: s.graph.modules.size,
       groups: s.graph.groups.size,
-      groupOk: !!group && group.moduleIds.length === 3,
+      groupOk: !!group && group.moduleIds.length === 4,
       selected: group ? s.selectedGroupIds.has(group.id) : false,
     };
   });
-  expect(after.modules).toBe(before.modules + 3);
+  expect(after.modules).toBe(before.modules + 4);
   expect(after.groups).toBe(before.groups + 1);
   expect(after.groupOk).toBe(true);
   expect(after.selected).toBe(true);
@@ -56,7 +58,7 @@ test('AI import dialog: paste, import as group, audio flows', async ({ page }) =
           const group = [...s.graph.groups.values()].find((g) => g.name === 'Bleep Group')!;
           const synthId = group.moduleIds
             .map((id) => s.graph.modules.get(id)!)
-            .find((m) => m.type === 'synth')!.id;
+            .find((m) => m.type === 'osc')!.id;
           return s.meters[synthId]?.peak ?? 0;
         }),
       { timeout: 5000 },

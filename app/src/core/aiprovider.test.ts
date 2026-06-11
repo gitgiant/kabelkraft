@@ -23,7 +23,7 @@ const validPatch = JSON.stringify({
   formatVersion: 1,
   name: 'Test',
   modules: [
-    { id: 'a', type: 'synth' },
+    { id: 'a', type: 'smpl' },
     { id: 'b', type: 'audioOut' },
   ],
   wires: [{ from: { module: 'a', port: 'out' }, to: { module: 'b', port: 'in' } }],

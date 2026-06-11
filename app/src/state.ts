@@ -7,8 +7,6 @@
 import { Graph, type PortRef, type Wire } from './core/graph';
 import { createInstance, type ModuleInstance } from './core/module';
 import { MODULE_DEFS } from './core/registry';
-import type { DrumPad } from './core/drumkit';
-import { DRUM_BASE_NOTE, renderDefaultKit } from './core/drumkit';
 import { decodeSample, encodeSample, parseSampleKey, sampleKey, type SampleData } from './core/samples';
 import { deserializeProject, serializeProject } from './core/serialize';
 import { parseKkGroup } from './core/aiimport';
@@ -37,7 +35,8 @@ export type StateEvent =
   | 'visualizerChanged' // big visualizer overlay opened/closed
   | 'faceEditorChanged' // face editor opened/closed
   | 'faceLearnChanged' // face learn armed/canceled/completed
-  | 'composerChanged'; // piano-roll editor opened/closed
+  | 'composerChanged' // piano-roll editor opened/closed
+  | 'rangeConfigChanged'; // knob/slider range popup opened/closed
 
 type Listener = () => void;
 
@@ -59,6 +58,8 @@ export class AppState {
   spectra: Record<string, number[]> = {};
   /** Live visualizer feeds: waveform, spectrum, recent note pitches, control. */
   visData: Record<string, { wave: number[]; spectrum: number[]; notes: number[]; ctrl: number }> = {};
+  /** Live Color Gen outputs (packed 24-bit RGB) per module, for UI tints. */
+  colorValues: Record<string, number> = {};
   /** Module id shown in the big visualizer overlay; null = closed. */
   visualizerOpen: string | null = null;
 
@@ -72,18 +73,48 @@ export class AppState {
     this.emit('visualizerChanged');
   }
 
-  /** Composer module open in the piano-roll editor; null = closed. */
-  composerOpen: string | null = null;
+  /** Composer modules with an anchored piano-roll panel open. */
+  composerOpen = new Set<string>();
+  /** Topmost/active panel — receives keyboard shortcuts, raised z-order. */
+  composerActive: string | null = null;
 
   openComposer(moduleId: string): void {
     if (this.graph.modules.get(moduleId)?.type !== 'composer') return;
-    this.composerOpen = moduleId;
+    this.composerOpen.add(moduleId);
+    this.composerActive = moduleId;
     this.emit('composerChanged');
   }
 
-  closeComposer(): void {
-    this.composerOpen = null;
+  /** Close one panel (or all when no id is given). */
+  closeComposer(moduleId?: string): void {
+    if (moduleId === undefined) this.composerOpen.clear();
+    else this.composerOpen.delete(moduleId);
+    if (this.composerActive === moduleId || moduleId === undefined) {
+      this.composerActive = [...this.composerOpen][this.composerOpen.size - 1] ?? null;
+    }
     this.emit('composerChanged');
+  }
+
+  /** Bring a panel to the front and make it the keyboard target. */
+  raiseComposer(moduleId: string): void {
+    if (this.composerActive === moduleId) return;
+    this.composerActive = moduleId;
+    this.emit('composerChanged');
+  }
+
+  /** Knob/Slider module shown in the range-config popup; null = closed. */
+  rangeConfigOpen: string | null = null;
+
+  openRangeConfig(moduleId: string): void {
+    const type = this.graph.modules.get(moduleId)?.type;
+    if (type !== 'knob' && type !== 'slider') return;
+    this.rangeConfigOpen = moduleId;
+    this.emit('rangeConfigChanged');
+  }
+
+  closeRangeConfig(): void {
+    this.rangeConfigOpen = null;
+    this.emit('rangeConfigChanged');
   }
   /** moduleId → performance.now() of last note-on, for data-wire pulses. */
   noteFlash = new Map<string, number>();
@@ -132,6 +163,7 @@ export class AppState {
       this.gainReduction = status.gainReduction ?? {};
       this.spectra = status.spectra ?? {};
       this.visData = status.visData ?? {};
+      this.colorValues = status.colorValues ?? {};
       const now = performance.now();
       for (const id of status.noteActivity) this.noteFlash.set(id, now);
       this.transport.songPosition = status.songPosition;
@@ -160,31 +192,19 @@ export class AppState {
     }
   }
 
-  /**
-   * Install PCM into a sampler module or drum pad (UI file loads and tests
-   * both land here). `pad` set = drum machine pad slot.
-   */
+  /** Install PCM into a Sample Voice module (UI file loads and tests land here). */
   setSample(moduleId: string, sample: SampleData, pad?: number): void {
     const mod = this.graph.modules.get(moduleId);
     if (!mod) return;
     this.samples.set(sampleKey(moduleId, pad), sample);
-    if (pad === undefined) {
-      mod.data = { ...mod.data, sampleName: sample.name };
-    } else {
-      const pads = [...((mod.data?.pads as DrumPad[]) ?? [])];
-      if (pads[pad]) {
-        // Pad takes the file's name (sans extension) so the grid stays readable.
-        pads[pad] = { ...pads[pad], name: sample.name.replace(/\.[^.]+$/, '').slice(0, 12) };
-        this.setModuleData(moduleId, 'pads', pads);
-      }
-    }
+    mod.data = { ...mod.data, sampleName: sample.name };
     if (this.engine.running) {
       this.engine.sendSample(moduleId, sample, pad);
     }
     this.emit('sampleLoaded');
   }
 
-  /** Decode a user-picked audio file and load it into a sampler or drum pad. */
+  /** Decode a user-picked audio file and load it into a Sample Voice. */
   async loadSampleFile(moduleId: string, file: File, pad?: number): Promise<void> {
     await this.ensureEngine(); // file picker click is the user gesture
     const decoded = await this.engine.decode(await file.arrayBuffer());
@@ -322,13 +342,6 @@ export class AppState {
     }
   }
 
-  /** Audition a drum pad directly (pad click), bypassing note wires. */
-  padTrigger(moduleId: string, pad: number): void {
-    void this.ensureEngine().then(() => {
-      this.engine.noteOnModule(moduleId, this.engine.allocVoiceId(), DRUM_BASE_NOTE + pad, 1);
-    });
-    this.noteFlash.set(moduleId, performance.now());
-  }
 
   on(event: StateEvent, fn: Listener): () => void {
     if (!this.listeners.has(event)) this.listeners.set(event, new Set());
@@ -400,23 +413,9 @@ export class AppState {
     const inst = createInstance(this.graph.def(type), x, y);
     this.graph.addModule(inst);
     this.engine.syncGraph(this.graph);
-    // After syncGraph: the worklet module must exist before PCM arrives.
-    if (type === 'drum') this.installDefaultKit(inst.id);
     if (type === 'midiIn' || type === 'midiOut') void this.midi.init();
     this.emit('graphChanged');
     return inst;
-  }
-
-  /** Synthesized starter kit so a fresh Drum Machine makes sound at once. */
-  private installDefaultKit(moduleId: string): void {
-    renderDefaultKit().forEach((sample, pad) => {
-      if (!sample) return;
-      this.samples.set(sampleKey(moduleId, pad), sample);
-      if (this.engine.running) {
-        this.engine.sendSample(moduleId, sample, pad);
-      }
-    });
-    this.emit('sampleLoaded');
   }
 
   removeModule(moduleId: string): void {
@@ -559,6 +558,44 @@ export class AppState {
     this.emit('graphChanged');
   }
 
+  /** Hide a baseline group pole (key `moduleId:portId`). */
+  hideGroupPole(groupId: string, key: string): void {
+    const group = this.graph.groups.get(groupId);
+    if (!group) return;
+    this.beginUndoable();
+    group.poleHidden = [...new Set([...(group.poleHidden ?? []), key])];
+    group.poleAdded = (group.poleAdded ?? []).filter((k) => k !== key);
+    this.emit('graphChanged');
+  }
+
+  /** Un-hide a baseline group pole. */
+  showGroupPole(groupId: string, key: string): void {
+    const group = this.graph.groups.get(groupId);
+    if (!group) return;
+    this.beginUndoable();
+    group.poleHidden = (group.poleHidden ?? []).filter((k) => k !== key);
+    this.emit('graphChanged');
+  }
+
+  /** Surface an extra member port as a pole (e.g. tap an internal output). */
+  addGroupPole(groupId: string, key: string): void {
+    const group = this.graph.groups.get(groupId);
+    if (!group) return;
+    this.beginUndoable();
+    group.poleAdded = [...new Set([...(group.poleAdded ?? []), key])];
+    group.poleHidden = (group.poleHidden ?? []).filter((k) => k !== key);
+    this.emit('graphChanged');
+  }
+
+  /** Remove an explicitly-added group pole. */
+  removeGroupPole(groupId: string, key: string): void {
+    const group = this.graph.groups.get(groupId);
+    if (!group) return;
+    this.beginUndoable();
+    group.poleAdded = (group.poleAdded ?? []).filter((k) => k !== key);
+    this.emit('graphChanged');
+  }
+
   openFaceEditor(groupId: string): void {
     if (!this.graph.groups.has(groupId)) return;
     this.editingFaceGroupId = groupId;
@@ -629,12 +666,10 @@ export class AppState {
     const ys = imported.modules.map((m) => m.y);
     const minX = xs.length ? Math.min(...xs) : 0;
     const minY = ys.length ? Math.min(...ys) : 0;
-    const drumIds: string[] = [];
     for (const inst of imported.modules) {
       inst.x = origin.x + (inst.x - minX) - 200;
       inst.y = origin.y + (inst.y - minY) - 150;
       this.graph.addModule(inst);
-      if (inst.type === 'drum') drumIds.push(inst.id);
     }
     const warnings = [...imported.warnings];
     for (const w of imported.wires) {
@@ -656,7 +691,6 @@ export class AppState {
     }
 
     this.engine.syncGraph(this.graph);
-    for (const id of drumIds) this.installDefaultKit(id);
     this.clearSelection();
     this.selectedGroupIds.add(imported.rootGroupId);
     this.emit('graphChanged');
@@ -738,7 +772,6 @@ export class AppState {
     const useHints = Math.max(...xs) - minX + (Math.max(...ys) - minY) > 100;
 
     const idMap = new Map<string, string>();
-    const drumIds: string[] = [];
     patch.modules.forEach((m, i) => {
       const pos = useHints
         ? { x: origin.x + (m.x - minX) - 300, y: origin.y + (m.y - minY) - 200 }
@@ -749,7 +782,6 @@ export class AppState {
       if (m.label) inst.label = m.label;
       this.graph.addModule(inst);
       idMap.set(m.id, inst.id);
-      if (m.type === 'drum') drumIds.push(inst.id);
     });
 
     for (const w of patch.wires) {
@@ -782,8 +814,6 @@ export class AppState {
     }
 
     this.engine.syncGraph(this.graph);
-    // Default kits only after the worklet knows the new modules.
-    for (const id of drumIds) this.installDefaultKit(id);
     this.clearSelection();
     this.selectedGroupIds.add(group.id);
     this.emit('graphChanged');
@@ -936,6 +966,9 @@ export class AppState {
     if (cmd === 'play') this.transport.playing = true;
     if (cmd === 'pause') this.transport.playing = false;
     if (cmd === 'stop') {
+      // Stop pressed while already stopped = panic: cut all audio, including
+      // self-sustaining feedback loops and reverb/delay tails.
+      if (!this.transport.playing && this.engine.running) this.engine.panic();
       this.transport.playing = false;
       jumpTo = 0;
     }

@@ -20,363 +20,29 @@ const WAVE_SQUARE = 2;
 const WAVE_SAW = 3;
 const WAVE_NOISE = 4;
 
-const MODE_CLASSIC = 0;
-const MODE_WAVETABLE = 1;
-const MODE_FM = 2;
-
 const WT_FRAME = 2048;
-const FM_INDEX = 6; // op level 1.0 → 6 rad of phase modulation
 
-/** FM algorithms: routes are [srcOp → dstOp] (0-based), carriers sum to out. */
-const FM_ALGOS = [
-  { routes: [[3, 2], [2, 1], [1, 0]], carriers: [0] },          // 4→3→2→1
-  { routes: [[2, 1], [1, 0]], carriers: [0, 3] },               // 3→2→1, op4 parallel
-  { routes: [[2, 1], [3, 1], [1, 0]], carriers: [0] },          // (3+4)→2→1
-  { routes: [[1, 0], [2, 0], [3, 0]], carriers: [0] },          // (2+3+4)→1
-  { routes: [[3, 2], [1, 0]], carriers: [0, 2] },               // 4→3, 2→1
-  { routes: [], carriers: [0, 1, 2, 3] },                       // additive
-];
-
-class Voice {
-  constructor() {
-    this.active = false;
-    this.voiceId = -1;
-    this.pitch = 60; // target pitch (glide destination)
-    this.curPitch = 60;
-    this.velocity = 1;
-    this.phase = 0;
-    this.phase2 = 0;
-    this.fmPhase = [0, 0, 0, 0];
-    this.fmPrev3 = 0; // op4 output for feedback
-    this.stage = 'off'; // attack | decay | sustain | release | off
-    this.env = 0;
-    this.fStage = 'off';
-    this.fEnv = 0;
-    this.svfLp = 0;
-    this.svfBp = 0;
-    this.age = 0;
-    // Per-note expression (composer piano roll); neutral defaults.
-    this.pan = 0; // -1..1
-    this.modX = 0; // vibrato depth 0..1
-    this.modY = 0; // cutoff lift 0..1
-    this.relVel = 0.5; // note-off velocity; 0.5 = neutral release time
-    this.vibPhase = 0;
-  }
-
-  noteOn(voiceId, pitch, velocity, glideFrom, extras) {
-    this.active = true;
-    this.voiceId = voiceId;
-    this.pitch = pitch;
-    this.curPitch = glideFrom !== undefined ? glideFrom : pitch;
-    this.velocity = velocity;
-    this.stage = 'attack';
-    this.fStage = 'attack';
-    this.fEnv = 0;
-    this.age = 0;
-    this.pan = extras && extras.pan !== undefined ? extras.pan : 0;
-    this.modX = extras && extras.modX !== undefined ? extras.modX : 0;
-    this.modY = extras && extras.modY !== undefined ? extras.modY : 0;
-    this.relVel = 0.5;
-    this.vibPhase = 0;
-    // amp env continues from current level for click-free retrigger
-  }
-
-  noteOff(release) {
-    if (release !== undefined) this.relVel = release;
-    if (this.stage !== 'off') this.stage = 'release';
-    if (this.fStage !== 'off') this.fStage = 'release';
-  }
-}
-
-class SynthModule {
+/**
+ * Sample-player component voice (replaces the monolithic Sampler). Note-in,
+ * pitched playback with a built-in A/D/S/R amp env and per-voice pan. Extra
+ * component params over the old sampler:
+ *  - voices: poly cap (1 = mono → retrigger steals, the drum-pad behaviour);
+ *  - trigNote: when >= 0, only fire on that incoming pitch (drum-map row);
+ *  - fixedPitch: ignore incoming pitch, always play at root (drum one-shot);
+ *  - chokeGroup: when > 0, a hit cuts active voices of OTHER smpl modules in
+ *    the same group (open/closed hi-hat) — handled by the host via `chokeGroup`.
+ */
+class SmplModule {
   constructor(id, params) {
     this.id = id;
-    this.type = 'synth';
+    this.type = 'smpl';
     this.params = params;
-    /** Live values on control input ports (portId → 0..1). */
     this.controlIn = {};
+    this.host = null; // set by the host for cross-module choke
+    this.sample = null; // { sampleRate, chL, chR, loopStart, loopEnd }
     this.voices = [];
-    for (let i = 0; i < MAX_VOICES; i++) this.voices.push(new Voice());
-    this.outL = new Float32Array(128);
-    this.outR = new Float32Array(128);
-    this.lastPitch = undefined; // glide start for the next note
-    this.wavetable = null; // { data: Float32Array, frames }
-  }
-
-  /** Loadable wavetable (PRD §8.2): PCM is split into 2048-sample frames. */
-  setWavetable(channels) {
-    const pcm = channels[0];
-    if (!pcm || pcm.length === 0) return;
-    if (pcm.length >= WT_FRAME) {
-      const frames = Math.max(1, Math.floor(pcm.length / WT_FRAME));
-      this.wavetable = { data: pcm.subarray(0, frames * WT_FRAME), frames };
-    } else {
-      // Short file: treat it as one cycle, resample to a single frame.
-      const data = new Float32Array(WT_FRAME);
-      for (let i = 0; i < WT_FRAME; i++) {
-        const pos = (i / WT_FRAME) * pcm.length;
-        const i0 = Math.floor(pos);
-        const frac = pos - i0;
-        data[i] = pcm[i0] * (1 - frac) + pcm[(i0 + 1) % pcm.length] * frac;
-      }
-      this.wavetable = { data, frames: 1 };
-    }
-  }
-
-  /** Built-in table so wavetable mode sounds without a file: sine→tri→saw→square. */
-  defaultWavetable() {
-    const frames = 4;
-    const data = new Float32Array(frames * WT_FRAME);
-    for (let i = 0; i < WT_FRAME; i++) {
-      const ph = i / WT_FRAME;
-      data[i] = Math.sin(2 * Math.PI * ph);
-      data[WT_FRAME + i] = 4 * Math.abs(ph - 0.5) - 1;
-      data[2 * WT_FRAME + i] = 2 * ph - 1;
-      data[3 * WT_FRAME + i] = ph < 0.5 ? 1 : -1;
-    }
-    this.wavetable = { data, frames };
-    return this.wavetable;
-  }
-
-  maxVoices() {
-    return Math.min(MAX_VOICES, Math.max(1, Math.round(this.params.voices ?? 8)));
-  }
-
-  noteOn(voiceId, pitch, velocity, extras) {
-    const limit = this.maxVoices();
-    const activeVoices = this.voices.filter((v) => v.active);
-    let voice;
-    if (activeVoices.length >= limit) {
-      voice = activeVoices.reduce((a, b) => (a.age > b.age ? a : b)); // steal oldest
-    } else {
-      voice = this.voices.find((v) => !v.active);
-    }
-    const glide = this.params.glide ?? 0;
-    voice.noteOn(voiceId, pitch, velocity, glide > 0.001 ? this.lastPitch : undefined, extras);
-    this.lastPitch = pitch;
-  }
-
-  noteOff(voiceId, release) {
-    for (const v of this.voices) {
-      if (v.active && v.voiceId === voiceId) v.noteOff(release);
-    }
-  }
-
-  oscClassic(v, phaseStep, wave, wave2, detuneRatio, mix, pwm) {
-    let s1;
-    const ph = v.phase;
-    switch (wave) {
-      case WAVE_SINE: s1 = Math.sin(2 * Math.PI * ph); break;
-      case WAVE_TRIANGLE: s1 = 4 * Math.abs(ph - 0.5) - 1; break;
-      case WAVE_SQUARE: s1 = ph < pwm ? 1 : -1; break;
-      case WAVE_NOISE: s1 = Math.random() * 2 - 1; break;
-      case WAVE_SAW:
-      default: s1 = 2 * ph - 1; break;
-    }
-    v.phase += phaseStep;
-    if (v.phase >= 1) v.phase -= 1;
-    if (mix <= 0.001) return s1;
-    let s2;
-    const ph2 = v.phase2;
-    switch (wave2) {
-      case WAVE_SINE: s2 = Math.sin(2 * Math.PI * ph2); break;
-      case WAVE_TRIANGLE: s2 = 4 * Math.abs(ph2 - 0.5) - 1; break;
-      case WAVE_SQUARE: s2 = ph2 < pwm ? 1 : -1; break;
-      case WAVE_NOISE: s2 = Math.random() * 2 - 1; break;
-      case WAVE_SAW:
-      default: s2 = 2 * ph2 - 1; break;
-    }
-    v.phase2 += phaseStep * detuneRatio;
-    if (v.phase2 >= 1) v.phase2 -= 1;
-    return s1 * (1 - mix) + s2 * mix;
-  }
-
-  oscWavetable(v, phaseStep, framePos) {
-    const wt = this.wavetable || this.defaultWavetable();
-    const f0 = Math.floor(framePos);
-    const f1 = Math.min(wt.frames - 1, f0 + 1);
-    const fFrac = framePos - f0;
-    const idx = v.phase * WT_FRAME;
-    const i0 = Math.floor(idx);
-    const i1 = (i0 + 1) % WT_FRAME;
-    const frac = idx - i0;
-    const a = wt.data[f0 * WT_FRAME + i0] * (1 - frac) + wt.data[f0 * WT_FRAME + i1] * frac;
-    const b = wt.data[f1 * WT_FRAME + i0] * (1 - frac) + wt.data[f1 * WT_FRAME + i1] * frac;
-    v.phase += phaseStep;
-    if (v.phase >= 1) v.phase -= 1;
-    return a * (1 - fFrac) + b * fFrac;
-  }
-
-  oscFm(v, freq, algo, ratios, levels, fb, idxScale) {
-    const outs = [0, 0, 0, 0];
-    for (let op = 3; op >= 0; op--) {
-      let mod = 0;
-      for (const [src, dst] of algo.routes) {
-        if (dst === op) mod += outs[src] * levels[src] * FM_INDEX * idxScale;
-      }
-      if (op === 3 && fb > 0) mod += v.fmPrev3 * fb * 3;
-      outs[op] = Math.sin(2 * Math.PI * v.fmPhase[op] + mod);
-      v.fmPhase[op] += (freq * ratios[op]) / sampleRate;
-      if (v.fmPhase[op] >= 1) v.fmPhase[op] -= 1;
-    }
-    v.fmPrev3 = outs[3];
-    let sum = 0;
-    for (const c of algo.carriers) sum += outs[c] * levels[c];
-    return sum / Math.sqrt(algo.carriers.length);
-  }
-
-  render(blockSize) {
-    const p = this.params;
-    const mode = Math.round(p.mode ?? MODE_CLASSIC);
-    const octave = Math.round(p.octave ?? 0);
-    const coarse = Math.round(p.coarse ?? 0);
-    const fine = (p.fine ?? 0) / 100;
-    const glide = p.glide ?? 0;
-    const level = p.level ?? 0.8;
-    const sustain = p.sustain ?? 0.7;
-    const atkStep = 1 / (Math.max(0.001, p.attack ?? 0.01) * sampleRate);
-    const decStep = 1 / (Math.max(0.001, p.decay ?? 0.15) * sampleRate);
-    const relStep = 1 / (Math.max(0.001, p.release ?? 0.3) * sampleRate);
-    const fSustain = p.fSustain ?? 0.5;
-    const fAtkStep = 1 / (Math.max(0.001, p.fAttack ?? 0.01) * sampleRate);
-    const fDecStep = 1 / (Math.max(0.001, p.fDecay ?? 0.2) * sampleRate);
-    const fRelStep = 1 / (Math.max(0.001, p.fRelease ?? 0.3) * sampleRate);
-
-    // Control inputs (0..1).
-    const pmAmt = p.pmAmt ?? 2;
-    const pitchModSemis =
-      this.controlIn.pitchMod !== undefined ? (this.controlIn.pitchMod - 0.5) * 2 * pmAmt : 0;
-    const cutoffModOct =
-      this.controlIn.cutoffMod !== undefined ? (this.controlIn.cutoffMod - 0.5) * 2 * 3 : 0;
-    const posCtrl = this.controlIn.posMod;
-
-    const fType = Math.round(p.fType ?? 0);
-    const cutoff = p.cutoff ?? 8000;
-    const res = p.res ?? 0.2;
-    const fAmt = p.fAmt ?? 0;
-    const damp = 2 * (1 - Math.min(0.95, res));
-
-    // Mode-specific, hoisted out of the sample loop.
-    const wave = Math.round(p.waveform ?? WAVE_SAW);
-    const wave2 = Math.round(p.wave2 ?? WAVE_SAW);
-    const detuneRatio = Math.pow(2, (p.detune ?? 8) / 1200);
-    const oscMix = p.oscMix ?? 0.3;
-    const pwm = p.pwm ?? 0.5;
-    const wtParam = posCtrl !== undefined ? posCtrl : (p.wtPos ?? 0);
-    const algo = FM_ALGOS[Math.round(p.algo ?? 0)] || FM_ALGOS[0];
-    const ratios = [p.r1 ?? 1, p.r2 ?? 2, p.r3 ?? 1, p.r4 ?? 1];
-    const fmLevels = [p.l1 ?? 1, p.l2 ?? 0.5, p.l3 ?? 0, p.l4 ?? 0];
-    const fmFb = p.fmFb ?? 0;
-    const idxScale = posCtrl !== undefined ? posCtrl * 2 : 1;
-
-    const glideCoef = glide > 0.001 ? 1 - Math.exp(-1 / (glide * 0.2 * sampleRate)) : 1;
-
-    this.outL.fill(0);
-    this.outR.fill(0);
-
-    for (const v of this.voices) {
-      if (!v.active) continue;
-
-      // Per-note expression (composer piano roll): note-off velocity scales
-      // the release time (high = lifted fast = shorter tail), mod Y lifts the
-      // per-voice cutoff up to +2 octaves, mod X adds 5 Hz vibrato, pan uses
-      // a balance law so center stays at unity.
-      const relScale = 0.5 + v.relVel; // 0.5×..1.5× speed, 0.5 = neutral
-      const relStepV = relStep * relScale;
-      const fRelStepV = fRelStep * relScale;
-      const gL = Math.min(1, 1 - v.pan);
-      const gR = Math.min(1, 1 + v.pan);
-
-      // Per-voice cutoff once per block: filter env moves slowly vs. ~3 ms blocks.
-      let f = 0;
-      if (fType > 0) {
-        const cutEff = Math.min(
-          16000,
-          Math.max(20, cutoff * Math.pow(2, v.fEnv * fAmt * 6 + cutoffModOct + v.modY * 2)),
-        );
-        f = Math.min(1, 2 * Math.sin(Math.PI * Math.min(0.45, cutEff / sampleRate)));
-      }
-
-      for (let i = 0; i < blockSize; i++) {
-        if (v.stage === 'attack') {
-          v.env += atkStep;
-          if (v.env >= 1) { v.env = 1; v.stage = 'decay'; }
-        } else if (v.stage === 'decay') {
-          v.env -= decStep;
-          if (v.env <= sustain) { v.env = sustain; v.stage = 'decay-hold'; }
-        } else if (v.stage === 'release') {
-          v.env -= relStepV;
-          if (v.env <= 0) { v.env = 0; v.stage = 'off'; v.active = false; break; }
-        }
-        if (v.fStage === 'attack') {
-          v.fEnv += fAtkStep;
-          if (v.fEnv >= 1) { v.fEnv = 1; v.fStage = 'decay'; }
-        } else if (v.fStage === 'decay') {
-          v.fEnv -= fDecStep;
-          if (v.fEnv <= fSustain) { v.fEnv = fSustain; v.fStage = 'decay-hold'; }
-        } else if (v.fStage === 'release') {
-          v.fEnv -= fRelStepV;
-          if (v.fEnv <= 0) { v.fEnv = 0; v.fStage = 'off'; }
-        }
-
-        if (glideCoef < 1) v.curPitch += (v.pitch - v.curPitch) * glideCoef;
-        else v.curPitch = v.pitch;
-
-        let vib = 0;
-        if (v.modX > 0) {
-          vib = Math.sin(2 * Math.PI * v.vibPhase) * v.modX * 0.5;
-          v.vibPhase += 5 / sampleRate;
-          if (v.vibPhase >= 1) v.vibPhase -= 1;
-        }
-
-        const freq =
-          440 * Math.pow(2, (v.curPitch + octave * 12 + coarse + fine + pitchModSemis + vib - 69) / 12);
-        const phaseStep = freq / sampleRate;
-
-        let sample;
-        if (mode === MODE_WAVETABLE) {
-          const wt = this.wavetable || this.defaultWavetable();
-          sample = this.oscWavetable(v, phaseStep, wtParam * (wt.frames - 1));
-        } else if (mode === MODE_FM) {
-          sample = this.oscFm(v, freq, algo, ratios, fmLevels, fmFb, idxScale);
-        } else {
-          sample = this.oscClassic(v, phaseStep, wave, wave2, detuneRatio, oscMix, pwm);
-        }
-
-        if (fType > 0) {
-          // Chamberlin state-variable filter, one per voice.
-          v.svfLp += f * v.svfBp;
-          const hp = sample - v.svfLp - damp * v.svfBp;
-          v.svfBp += f * hp;
-          sample = fType === 1 ? v.svfLp : fType === 2 ? hp : v.svfBp;
-        }
-
-        const out = sample * v.env * v.velocity * 0.3;
-        this.outL[i] += out * gL;
-        this.outR[i] += out * gR;
-      }
-      v.age++;
-    }
-
-    if (level !== 1) {
-      for (let i = 0; i < blockSize; i++) {
-        this.outL[i] *= level;
-        this.outR[i] *= level;
-      }
-    }
-  }
-}
-
-class SamplerModule {
-  constructor(id, params) {
-    this.id = id;
-    this.type = 'sampler';
-    this.params = params;
-    this.controlIn = {};
-    this.sample = null; // { sampleRate, chL, chR }
-    this.voices = []; // { active, voiceId, pos, rate, velocity, stage, env, age }
     for (let i = 0; i < MAX_VOICES; i++) {
-      this.voices.push({ active: false, voiceId: -1, pos: 0, rate: 1, velocity: 1, stage: 'off', env: 0, age: 0 });
+      this.voices.push({ active: false, voiceId: -1, pos: 0, rate: 1, velocity: 1, stage: 'off', env: 0, age: 0, pan: 0, relVel: 0.5, choked: false });
     }
     this.outL = new Float32Array(128);
     this.outR = new Float32Array(128);
@@ -388,26 +54,38 @@ class SamplerModule {
       chL: channels[0],
       chR: channels[1] || channels[0],
       loopStart: Math.max(0, loopStart || 0),
-      loopEnd: loopEnd || 0, // 0 = no explicit loop region
+      loopEnd: loopEnd || 0,
     };
     for (const v of this.voices) v.active = false;
   }
 
   noteOn(voiceId, pitch, velocity, extras) {
     if (!this.sample) return;
+    const tn = Math.round(this.params.trigNote ?? -1);
+    if (tn >= 0 && Math.round(pitch) !== tn) return; // drum-map: only my row
+    // Cross-module choke: cut same-group voices on other smpl modules.
+    const group = Math.round(this.params.chokeGroup ?? 0);
+    if (group > 0 && this.host) this.host.chokeGroup(this.id, group);
+    // Poly cap (voices=1 → mono, retrigger steals).
+    const cap = Math.max(1, Math.min(MAX_VOICES, Math.round(this.params.voices ?? 8)));
+    let active = 0;
+    for (const v of this.voices) if (v.active) active++;
     let voice = this.voices.find((v) => !v.active);
-    if (!voice) voice = this.voices.reduce((a, b) => (a.age > b.age ? a : b));
+    if (!voice || active >= cap) {
+      voice = this.voices.reduce((a, b) => (a.age > b.age ? a : b));
+    }
     const root = this.params.root ?? 60;
+    const fixed = (this.params.fixedPitch ?? 0) >= 0.5;
+    const playPitch = fixed ? root : pitch;
     voice.active = true;
+    voice.choked = false;
     voice.voiceId = voiceId;
     voice.pos = 0;
-    // Pitch tracking + source/engine sample-rate compensation.
-    voice.rate = Math.pow(2, (pitch - root) / 12) * (this.sample.sampleRate / sampleRate);
+    voice.rate = Math.pow(2, (playPitch - root) / 12) * (this.sample.sampleRate / sampleRate);
     voice.velocity = velocity;
     voice.stage = 'attack';
     voice.env = 0;
     voice.age = 0;
-    // Per-note expression: pan (balance law) + release velocity.
     voice.pan = extras && extras.pan !== undefined ? extras.pan : 0;
     voice.relVel = 0.5;
   }
@@ -421,6 +99,11 @@ class SamplerModule {
     }
   }
 
+  /** Mark all sounding voices for a fast choke fade (called by the host). */
+  choke() {
+    for (const v of this.voices) if (v.active) v.choked = true;
+  }
+
   render(blockSize) {
     this.outL.fill(0);
     this.outR.fill(0);
@@ -432,9 +115,9 @@ class SamplerModule {
     const decStep = 1 / (Math.max(0.001, p.decay ?? 0.1) * sampleRate);
     const sustain = p.sustain ?? 1;
     const relStep = 1 / (Math.max(0.001, p.release ?? 0.2) * sampleRate);
+    const chokeCoef = Math.exp(-1 / (0.003 * sampleRate)); // ~3 ms choke fade
     const { chL, chR, loopStart } = this.sample;
     const len = chL.length;
-    // Explicit loop region from the Sample Editor; default = whole sample.
     const loopEnd =
       this.sample.loopEnd > loopStart + 1 ? Math.min(this.sample.loopEnd, len - 1) : len - 1;
 
@@ -445,7 +128,10 @@ class SamplerModule {
       const gPanL = Math.min(1, 1 - pan);
       const gPanR = Math.min(1, 1 + pan);
       for (let i = 0; i < blockSize; i++) {
-        if (v.stage === 'attack') {
+        if (v.choked) {
+          v.env *= chokeCoef;
+          if (v.env < 0.001) { v.env = 0; v.stage = 'off'; v.active = false; break; }
+        } else if (v.stage === 'attack') {
           v.env += atkStep;
           if (v.env >= 1) { v.env = 1; v.stage = 'decay'; }
         } else if (v.stage === 'decay') {
@@ -473,126 +159,6 @@ class SamplerModule {
       }
       v.age++;
     }
-  }
-}
-
-const DRUM_PADS = 16;
-const DRUM_BASE_NOTE = 36;
-
-/**
- * 16-pad drum machine: one-shot sample playback, mono per pad (retrigger
- * cuts), per-pad level/pan/pitch/choke/attack/decay from the data blob,
- * built-in step sequencer (velocity + swing) driven by runSequencers.
- */
-class DrumModule {
-  constructor(id, params, data) {
-    this.id = id;
-    this.type = 'drum';
-    this.params = params;
-    this.data = data || { pads: [], pattern: [] };
-    this.samples = new Array(DRUM_PADS).fill(null); // { sampleRate, chL, chR }
-    this.voices = [];
-    for (let i = 0; i < DRUM_PADS; i++) {
-      this.voices.push({
-        active: false, pos: 0, rate: 1, gain: 0, gL: 0.707, gR: 0.707,
-        env: 0, stage: 'off', atkStep: 1, decayCoef: 1, choked: false, sample: null,
-      });
-    }
-    this.outL = new Float32Array(128);
-    this.outR = new Float32Array(128);
-    this.lastStepIndex = -1;
-    this.currentStep = 0;
-    /** Swing-delayed hits: { atSample, pad, vel }. */
-    this.pendingHits = [];
-  }
-
-  setSample(pad, sampleRate, channels) {
-    if (pad < 0 || pad >= DRUM_PADS) return;
-    this.samples[pad] = { sampleRate, chL: channels[0], chR: channels[1] || channels[0] };
-    this.voices[pad].active = false;
-  }
-
-  padCfg(i) {
-    return (this.data.pads || [])[i] || null;
-  }
-
-  noteOn(voiceId, pitch, velocity) {
-    const pad = (((Math.round(pitch) - DRUM_BASE_NOTE) % DRUM_PADS) + DRUM_PADS) % DRUM_PADS;
-    this.trigger(pad, velocity);
-  }
-
-  noteOff() {} // one-shots: gate end is meaningless
-
-  trigger(pad, vel) {
-    const smp = this.samples[pad];
-    if (!smp) return;
-    const cfg = this.padCfg(pad) || {};
-    const choke = cfg.choke || 0;
-    if (choke > 0) {
-      for (let i = 0; i < DRUM_PADS; i++) {
-        if (i === pad) continue;
-        const other = this.padCfg(i);
-        if (other && other.choke === choke && this.voices[i].active) this.voices[i].choked = true;
-      }
-    }
-    const v = this.voices[pad];
-    v.active = true;
-    v.choked = false;
-    v.pos = 0;
-    v.sample = smp;
-    v.rate = Math.pow(2, (cfg.pitch || 0) / 12) * (smp.sampleRate / sampleRate);
-    v.gain = vel * (cfg.level !== undefined ? cfg.level : 0.8);
-    // Equal-power pan, same law as the mixer.
-    const angle = (((cfg.pan || 0) + 1) * Math.PI) / 4;
-    v.gL = Math.cos(angle);
-    v.gR = Math.sin(angle);
-    v.atkStep = 1 / (Math.max(0.0005, cfg.attack !== undefined ? cfg.attack : 0.001) * sampleRate);
-    v.decayCoef = Math.exp(-1 / (Math.max(0.01, cfg.decay !== undefined ? cfg.decay : 2) * sampleRate));
-    v.env = 0;
-    v.stage = 'attack';
-  }
-
-  render(blockSize) {
-    this.outL.fill(0);
-    this.outR.fill(0);
-    const master = this.params.level !== undefined ? this.params.level : 0.8;
-    const chokeCoef = Math.exp(-1 / (0.003 * sampleRate)); // ~3 ms choke fade
-    for (let pi = 0; pi < DRUM_PADS; pi++) {
-      const v = this.voices[pi];
-      if (!v.active || !v.sample) continue;
-      const { chL, chR } = v.sample;
-      const len = chL.length;
-      for (let i = 0; i < blockSize; i++) {
-        if (v.choked) {
-          v.env *= chokeCoef;
-          if (v.env < 0.001) { v.active = false; break; }
-        } else if (v.stage === 'attack') {
-          v.env += v.atkStep;
-          if (v.env >= 1) { v.env = 1; v.stage = 'decay'; }
-        } else {
-          v.env *= v.decayCoef;
-          if (v.env < 0.001) { v.active = false; break; }
-        }
-        const i0 = Math.floor(v.pos);
-        if (i0 >= len - 1) { v.active = false; break; }
-        const frac = v.pos - i0;
-        const g = v.env * v.gain * master;
-        this.outL[i] += (chL[i0] * (1 - frac) + chL[i0 + 1] * frac) * g * v.gL;
-        this.outR[i] += (chR[i0] * (1 - frac) + chR[i0 + 1] * frac) * g * v.gR;
-        v.pos += v.rate;
-      }
-    }
-  }
-
-  stepsPerBeat() {
-    const division = Math.round(this.params.division !== undefined ? this.params.division : 1);
-    return [2, 4, 8][division] || 4;
-  }
-
-  /** Transport stopped: drop scheduled hits, reset the step cursor. */
-  resetSteps() {
-    this.pendingHits = [];
-    this.lastStepIndex = -1;
   }
 }
 
@@ -891,6 +457,114 @@ class OscModule {
           default: s = 2 * pp - 1; break;
         }
         s *= level;
+        L[i] = s;
+        this.outL[i] += s;
+        ph += phaseStep;
+        if (ph >= 1) ph -= 1;
+      }
+      this.polyR[v].set(L);
+      this.phases[v] = ph;
+    }
+    this.outR.set(this.outL);
+  }
+}
+
+/**
+ * Wavetable oscillator component (ported from the Synth's wavetable mode).
+ * Per-voice phase like OscModule; Position (wtPos param + posMod control)
+ * scans across the loaded table's frames. FM audio input phase-modulates.
+ */
+class WtoscModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'wtosc';
+    this.params = params;
+    this.controlIn = {};
+    this.polyIn = { fm: makePolyIn() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.polyL = [];
+    this.polyR = [];
+    this.polyLanes = 0;
+    this.phases = new Float64Array(MAX_VOICES);
+    this.wavetable = null;
+  }
+
+  /** Loadable wavetable: PCM split into 2048-sample frames (mirrors Synth). */
+  setWavetable(channels) {
+    const pcm = channels[0];
+    if (!pcm || pcm.length === 0) return;
+    if (pcm.length >= WT_FRAME) {
+      const frames = Math.max(1, Math.floor(pcm.length / WT_FRAME));
+      this.wavetable = { data: pcm.subarray(0, frames * WT_FRAME), frames };
+    } else {
+      const data = new Float32Array(WT_FRAME);
+      for (let i = 0; i < WT_FRAME; i++) {
+        const pos = (i / WT_FRAME) * pcm.length;
+        const i0 = Math.floor(pos);
+        const frac = pos - i0;
+        data[i] = pcm[i0] * (1 - frac) + pcm[(i0 + 1) % pcm.length] * frac;
+      }
+      this.wavetable = { data, frames: 1 };
+    }
+  }
+
+  defaultWavetable() {
+    const frames = 4;
+    const data = new Float32Array(frames * WT_FRAME);
+    for (let i = 0; i < WT_FRAME; i++) {
+      const ph = i / WT_FRAME;
+      data[i] = Math.sin(2 * Math.PI * ph);
+      data[WT_FRAME + i] = 4 * Math.abs(ph - 0.5) - 1;
+      data[2 * WT_FRAME + i] = 2 * ph - 1;
+      data[3 * WT_FRAME + i] = ph < 0.5 ? 1 : -1;
+    }
+    this.wavetable = { data, frames };
+    return this.wavetable;
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const offs = Math.round(p.octave ?? 0) * 12 + Math.round(p.semi ?? 0) + (p.fine ?? 0) / 100;
+    const fmAmt = p.fmAmt ?? 0;
+    const level = p.level ?? 0.8;
+    const wtPos = p.wtPos ?? 0;
+    const wt = this.wavetable || this.defaultWavetable();
+
+    const pitchIn = this.controlIn.pitch;
+    const posModIn = this.controlIn.posMod;
+    const lanes = Math.min(MAX_VOICES, cwidth(pitchIn));
+    this.polyLanes = lanes;
+    const n = Math.max(1, lanes);
+    ensureLanes(this, n);
+    this.outL.fill(0);
+
+    const fm = this.polyIn.fm;
+    for (let v = 0; v < n; v++) {
+      const base = lanes > 0 ? pitchIn[v] * 127 : pitchIn !== undefined ? pitchIn * 127 : 60;
+      const freq = 440 * Math.pow(2, (base + offs - 69) / 12);
+      const phaseStep = freq / sampleRate;
+      const pm = cval(posModIn, v);
+      const framePos = Math.min(1, Math.max(0, wtPos + (pm !== undefined ? pm : 0))) * (wt.frames - 1);
+      const f0 = Math.floor(framePos);
+      const f1 = Math.min(wt.frames - 1, f0 + 1);
+      const fFrac = framePos - f0;
+      const fmBuf = fm.lanes > 0 ? fm.L[Math.min(v, fm.lanes - 1)] : SILENT_BLOCK;
+      const L = this.polyL[v];
+      let ph = this.phases[v];
+      for (let i = 0; i < blockSize; i++) {
+        let pp = ph;
+        if (fmAmt > 0) {
+          pp += fmAmt * fmBuf[i];
+          pp -= Math.floor(pp);
+        }
+        const idx = pp * WT_FRAME;
+        const i0 = Math.floor(idx);
+        const i1 = (i0 + 1) % WT_FRAME;
+        const frac = idx - i0;
+        const a = wt.data[f0 * WT_FRAME + i0] * (1 - frac) + wt.data[f0 * WT_FRAME + i1] * frac;
+        const b = wt.data[f1 * WT_FRAME + i0] * (1 - frac) + wt.data[f1 * WT_FRAME + i1] * frac;
+        const s = (a * (1 - fFrac) + b * fFrac) * level;
         L[i] = s;
         this.outL[i] += s;
         ph += phaseStep;
@@ -1324,6 +998,23 @@ class SequencerModule {
  * Locks to the transport while playing; free-runs at the master tempo
  * when stopped so keyboard players hear it immediately.
  */
+/** Note relay: re-emits incoming notes to its own out wires (host fan-out). */
+class NotethruModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'notethru';
+    this.params = params;
+  }
+
+  noteOn(voiceId, pitch, velocity, extras) {
+    if (this.host) this.host.routeNoteOn(this.id, voiceId, pitch, velocity, undefined, extras);
+  }
+
+  noteOff(voiceId, release) {
+    if (this.host) this.host.routeNoteOff(this.id, voiceId, release);
+  }
+}
+
 class ArpModule {
   constructor(id, params) {
     this.id = id;
@@ -1504,6 +1195,151 @@ class VisualizerModule {
   }
 }
 
+// -- Color Gen (PRD: dynamic UI colors) ---------------------------------------
+// Reacts to audio/control input and emits a packed 24-bit RGB color in the
+// status stream. Color wires are routed view-side — the engine only computes
+// each generator's current color. Keep hslToRgbInt in sync with core/color.ts.
+
+const COLOR_SYNC_BEATS = [0, 1, 2, 4, 8, 16]; // off, 1/4, 1/2, 1, 2, 4 bars
+
+function hslToRgbInt(h, s, l) {
+  const hh = ((h % 1) + 1) % 1;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n) => {
+    const k = (n + hh * 12) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  return (Math.round(f(0) * 255) << 16) | (Math.round(f(8) * 255) << 8) | Math.round(f(4) * 255);
+}
+
+class ColorGenModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'colorgen';
+    this.params = params;
+    this.inputs = { in: makeStereoBuf() };
+    this.controlIn = {};
+    this.env = 0;
+    this.phase = 0;
+    this.flashAmt = 0;
+    this.randH = Math.random();
+    this.wasAbove = false;
+    this.lastBeat = -1;
+    this.h = 0.6;
+    this.s = 0.85;
+    this.l = 0.5;
+    this.capture = new Float32Array(FFT_N);
+    this.capIdx = 0;
+    this.tempo = 120;
+    this.posBeats = 0;
+    this.playing = false;
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const mode = Math.round(p.mode ?? 0);
+    const depth = p.depth ?? 1;
+
+    // Input level: audio peak, falling back to the Mod control.
+    let peak = 0;
+    const L = this.inputs.in.L;
+    const R = this.inputs.in.R;
+    for (let i = 0; i < blockSize; i++) {
+      const a = Math.abs((L[i] + R[i]) * 0.5);
+      if (a > peak) peak = a;
+    }
+    const modV = this.controlIn.mod !== undefined ? cval(this.controlIn.mod, 0) : 0;
+    const src = Math.max(peak, modV);
+
+    // Spectrum mode keeps a capture ring for the status-rate FFT.
+    if (mode === 4) {
+      for (let i = 0; i < blockSize; i++) {
+        this.capture[this.capIdx] = (L[i] + R[i]) * 0.5;
+        this.capIdx = (this.capIdx + 1) % FFT_N;
+      }
+    }
+
+    // Envelope follower: ~10 ms attack, ~250 ms release.
+    const dt = blockSize / sampleRate;
+    const tau = src > this.env ? 0.01 : 0.25;
+    this.env += (src - this.env) * Math.min(1, dt / tau);
+
+    // Rate: free Hz or synced to the transport tempo.
+    const beats = COLOR_SYNC_BEATS[Math.round(p.sync ?? 0)] || 0;
+    const rate = beats > 0 ? this.tempo / 60 / beats : p.rate ?? 0.4;
+    const prevPhase = this.phase;
+    this.phase = (this.phase + rate * dt) % 1;
+    const wrapped = this.phase < prevPhase;
+
+    // Hits: envelope rising through a threshold, or each beat while playing.
+    const above = this.env > 0.18;
+    const hit = above && !this.wasAbove;
+    this.wasAbove = above;
+    const beat = Math.floor(this.posBeats);
+    const onBeat = this.playing && beat !== this.lastBeat;
+    this.lastBeat = beat;
+
+    let h = p.hue ?? 0.6;
+    let s = p.sat ?? 0.85;
+    let l = 0.5;
+    switch (mode) {
+      case 0: // rainbow — hue cycles, level adds sparkle
+        h = this.phase;
+        l = 0.45 + 0.2 * this.env * depth;
+        break;
+      case 1: // pulse — brightness follows the envelope
+        l = 0.12 + 0.55 * depth * this.env + 0.3 * (1 - depth);
+        break;
+      case 2: { // flash — jump to the flash hue on hits, decay back
+        if (hit || (src < 0.001 && onBeat)) this.flashAmt = 1;
+        this.flashAmt = Math.max(0, this.flashAmt - dt * 3);
+        const k = this.flashAmt * depth;
+        h = h + (((p.hue2 ?? 0) - h + 1.5) % 1 - 0.5) * k; // shortest hue path
+        l = 0.35 + 0.3 * k;
+        break;
+      }
+      case 3: // random — new color per hit/beat, or per cycle when idle
+        if (hit || onBeat || (src < 0.001 && wrapped)) this.randH = Math.random();
+        h = this.randH;
+        l = 0.45 + 0.15 * this.env * depth;
+        break;
+      case 4: // spectrum — hue computed at status time from the FFT
+        l = 0.3 + 0.4 * this.env * depth;
+        break;
+      case 5: // vu — green → red by level
+        h = (1 - Math.min(1, this.env * 1.3 * depth)) * 0.33;
+        s = 0.95;
+        break;
+      case 6: // breathe — slow sine brightness, no input required
+        l = 0.32 + 0.22 * depth * (0.5 + 0.5 * Math.sin(this.phase * 2 * Math.PI));
+        break;
+      case 7: // strobe — hard blink at rate (or per beat when synced)
+        l = this.phase < 0.5 ? 0.08 : 0.08 + 0.57 * depth;
+        break;
+    }
+    this.h = h;
+    this.s = s;
+    this.l = l;
+  }
+
+  /** Packed RGB for the status stream; spectrum mode runs its FFT here (~30 Hz). */
+  colorValue() {
+    if (Math.round(this.params.mode ?? 0) === 4) {
+      const bins = computeSpectrum(this.capture, this.capIdx);
+      let num = 0;
+      let den = 0;
+      for (let b = 0; b < bins.length; b++) {
+        const w = Math.min(1, Math.max(0, (bins[b] + 80) / 80));
+        num += w * b;
+        den += w;
+      }
+      const centroid = den > 0.001 ? num / den / (bins.length - 1) : 0;
+      this.h = centroid * 0.78; // bass = red … treble = violet
+    }
+    return hslToRgbInt(this.h, this.s, this.l);
+  }
+}
+
 class LevelsModule {
   constructor(id, params) {
     this.id = id;
@@ -1581,6 +1417,13 @@ class DelayModule {
     this.toneR = 0;
   }
 
+  panic() {
+    this.bufL.fill(0);
+    this.bufR.fill(0);
+    this.toneL = 0;
+    this.toneR = 0;
+  }
+
   render(blockSize) {
     const len = this.bufL.length;
     const sync = Math.round(this.params.sync ?? 0);
@@ -1637,12 +1480,19 @@ class Comb {
     this.idx = (this.idx + 1) % this.buf.length;
     return y;
   }
+  clear() {
+    this.buf.fill(0);
+    this.store = 0;
+  }
 }
 
 class Allpass {
   constructor(size) {
     this.buf = new Float32Array(size);
     this.idx = 0;
+  }
+  clear() {
+    this.buf.fill(0);
   }
   process(x, g) {
     const y = this.buf[this.idx];
@@ -1672,6 +1522,15 @@ class ReverbModule {
     this.pdIdx = 0;
     this.hpL = 0; this.hpR = 0; // wet low-cut state
     this.lpL = 0; this.lpR = 0; // wet high-cut state
+  }
+
+  panic() {
+    for (const c of this.combsL) c.clear();
+    for (const c of this.combsR) c.clear();
+    for (const a of this.allpassL) a.clear();
+    for (const a of this.allpassR) a.clear();
+    this.predelayBuf.fill(0);
+    this.hpL = this.hpR = this.lpL = this.lpR = 0;
   }
 
   rebuild(scale) {
@@ -2123,6 +1982,11 @@ class ChorusModule {
     this.phase = 0;
   }
 
+  panic() {
+    this.bufL.fill(0);
+    this.bufR.fill(0);
+  }
+
   render(blockSize) {
     const p = this.params;
     const rate = p.rate ?? 0.8;
@@ -2180,6 +2044,11 @@ class FlangerModule {
     this.bufR = new Float32Array(size);
     this.wIdx = 0;
     this.phase = 0;
+  }
+
+  panic() {
+    this.bufL.fill(0);
+    this.bufR.fill(0);
   }
 
   render(blockSize) {
@@ -2448,16 +2317,18 @@ class EngineProcessor extends AudioWorkletProcessor {
             existing.params = m.params; // keep voice/limiter/step state across rewires
             if (m.data) existing.data = m.data;
             next.set(m.id, existing);
-          } else if (m.type === 'synth') {
-            next.set(m.id, new SynthModule(m.id, m.params));
-          } else if (m.type === 'sampler') {
-            next.set(m.id, new SamplerModule(m.id, m.params));
-          } else if (m.type === 'drum') {
-            next.set(m.id, new DrumModule(m.id, m.params, m.data));
+          } else if (m.type === 'smpl') {
+            const inst = new SmplModule(m.id, m.params);
+            inst.host = this;
+            next.set(m.id, inst);
+          } else if (m.type === 'wtosc') {
+            next.set(m.id, new WtoscModule(m.id, m.params));
           } else if (m.type === 'levels') {
             next.set(m.id, new LevelsModule(m.id, m.params));
           } else if (m.type === 'visualizer') {
             next.set(m.id, new VisualizerModule(m.id, m.params));
+          } else if (m.type === 'colorgen') {
+            next.set(m.id, new ColorGenModule(m.id, m.params));
           } else if (m.type === 'audioOut') {
             next.set(m.id, new AudioOutModule(m.id, m.params));
           } else if (m.type === 'lfo') {
@@ -2468,6 +2339,10 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new ArpModule(m.id, m.params));
           } else if (m.type === 'composer') {
             next.set(m.id, new ComposerModule(m.id, m.params, m.data));
+          } else if (m.type === 'notethru') {
+            const inst = new NotethruModule(m.id, m.params);
+            inst.host = this;
+            next.set(m.id, inst);
           } else if (m.type === 'delay') {
             next.set(m.id, new DelayModule(m.id, m.params));
           } else if (m.type === 'reverb') {
@@ -2569,7 +2444,6 @@ class EngineProcessor extends AudioWorkletProcessor {
             if (mod.type === 'sequencer' || mod.type === 'composer') {
               mod.allNotesOff((srcId, voiceId) => this.routeNoteOff(srcId, voiceId));
             }
-            if (mod.type === 'drum') mod.resetSteps();
           }
         }
         break;
@@ -2586,9 +2460,8 @@ class EngineProcessor extends AudioWorkletProcessor {
       }
       case 'sample': {
         const mod = this.modules.get(msg.moduleId);
-        if (mod && mod.type === 'sampler') mod.setSample(msg.sampleRate, msg.channels, msg.loopStart, msg.loopEnd);
-        else if (mod && mod.type === 'drum') mod.setSample(msg.pad || 0, msg.sampleRate, msg.channels);
-        else if (mod && mod.type === 'synth') mod.setWavetable(msg.channels);
+        if (mod && mod.type === 'smpl') mod.setSample(msg.sampleRate, msg.channels, msg.loopStart, msg.loopEnd);
+        else if (mod && mod.type === 'wtosc') mod.setWavetable(msg.channels);
         break;
       }
       case 'control': {
@@ -2609,6 +2482,26 @@ class EngineProcessor extends AudioWorkletProcessor {
         }
         break;
       }
+      case 'panic': {
+        // Kill voices + zero every stateful audio buffer so a runaway feedback
+        // loop (or hung note / reverb tail) is cut instantly.
+        for (const mod of this.modules.values()) {
+          if (mod.allNotesOff) mod.allNotesOff((srcId, voiceId) => this.routeNoteOff(srcId, voiceId));
+          if (mod.panic) mod.panic(); // deep clear for feedback effects
+          if (mod.outL) mod.outL.fill(0);
+          if (mod.outR) mod.outR.fill(0);
+          if (mod.polyL) for (const b of mod.polyL) b.fill(0);
+          if (mod.polyR) for (const b of mod.polyR) b.fill(0);
+          if (mod.inputs) {
+            for (const key in mod.inputs) {
+              const port = mod.inputs[key];
+              if (port && port.L) port.L.fill(0);
+              if (port && port.R) port.R.fill(0);
+            }
+          }
+        }
+        break;
+      }
     }
   }
 
@@ -2622,6 +2515,15 @@ class EngineProcessor extends AudioWorkletProcessor {
       if (target && target.noteOn) target.noteOn(voiceId, pitch, velocity, extras);
     }
     this.noteActivity.add(srcId);
+  }
+
+  /** Choke: a smpl hit cuts same-group voices on every OTHER smpl module. */
+  chokeGroup(exceptId, group) {
+    for (const m of this.modules.values()) {
+      if (m.type === 'smpl' && m.id !== exceptId && Math.round(m.params.chokeGroup ?? 0) === group) {
+        m.choke();
+      }
+    }
   }
 
   routeNoteOff(srcId, voiceId, release) {
@@ -2667,10 +2569,6 @@ class EngineProcessor extends AudioWorkletProcessor {
     const blockEnd = this.sampleCount + blockSize;
 
     for (const mod of this.modules.values()) {
-      if (mod.type === 'drum') {
-        this.runDrum(mod, blockEnd);
-        continue;
-      }
       if (mod.type === 'arp') {
         this.runArp(mod, blockSize, blockEnd);
         continue;
@@ -2812,53 +2710,6 @@ class EngineProcessor extends AudioWorkletProcessor {
   }
 
   /** Advance one drum machine's internal step sequencer across this block. */
-  runDrum(mod, blockEnd) {
-    const t = this.transport;
-
-    // Fire swing-delayed hits that fall inside this block.
-    mod.pendingHits = mod.pendingHits.filter((h) => {
-      if (h.atSample <= blockEnd) {
-        mod.trigger(h.pad, h.vel);
-        this.noteActivity.add(mod.id);
-        return false;
-      }
-      return true;
-    });
-
-    if (!t.playing) return;
-    const pattern = (mod.data && mod.data.pattern) || [];
-    if (pattern.length === 0) return;
-
-    const spb = mod.stepsPerBeat();
-    const idx = Math.floor(t.posBeats * spb);
-    if (idx === mod.lastStepIndex) return;
-    mod.lastStepIndex = idx;
-    const stepCount = (pattern[0] || []).length || 16;
-    const step = ((idx % stepCount) + stepCount) % stepCount;
-    mod.currentStep = step;
-
-    // Swing: off-beat steps land late by swing × step duration.
-    const stepDurSamples = (60 / t.tempo / spb) * sampleRate;
-    const delay = step % 2 === 1 ? (mod.params.swing || 0) * stepDurSamples : 0;
-
-    for (let pad = 0; pad < pattern.length; pad++) {
-      const st = pattern[pad][step];
-      if (!st || !st.on) continue;
-      if (delay > 0) {
-        mod.pendingHits.push({ atSample: this.sampleCount + delay, pad, vel: st.vel });
-      } else {
-        mod.trigger(pad, st.vel);
-        this.noteActivity.add(mod.id);
-      }
-    }
-  }
-
-  /**
-   * Pull control wire values into one module. Runs per module in topo order,
-   * so chained control modules see this block's upstream values. Sources with
-   * multiple/polyphonic outputs expose controlOut[portId]; plain sources
-   * expose .value.
-   */
   pullControls(mod) {
     if (!mod.controlIn) return;
     for (const w of this.controlWires) {
@@ -2943,7 +2794,7 @@ class EngineProcessor extends AudioWorkletProcessor {
         mod.render(blockSize);
         continue;
       }
-      if (mod.type === 'sequencer' || mod.type === 'arp' || mod.type === 'composer' || mod.type === 'midiIn') continue;
+      if (mod.type === 'sequencer' || mod.type === 'arp' || mod.type === 'composer' || mod.type === 'notethru' || mod.type === 'midiIn') continue;
       if (mod.type === 'midiOut') {
         mod.collectCc();
         continue;
@@ -2960,6 +2811,11 @@ class EngineProcessor extends AudioWorkletProcessor {
       }
 
       if (mod.type === 'delay') mod.tempo = this.transport.tempo; // sync mode needs the clock
+      if (mod.type === 'colorgen') {
+        mod.tempo = this.transport.tempo;
+        mod.posBeats = this.transport.posBeats;
+        mod.playing = this.transport.playing;
+      }
       mod.render(blockSize);
 
       if (mod.type === 'audioOut') {
@@ -3041,12 +2897,14 @@ class EngineProcessor extends AudioWorkletProcessor {
     const gainReduction = {};
     const spectra = {};
     const visData = {};
+    const colorValues = {};
     for (const mod of this.modules.values()) {
-      if (mod.type === 'sequencer' || mod.type === 'drum') seqSteps[mod.id] = mod.currentStep;
+      if (mod.type === 'sequencer') seqSteps[mod.id] = mod.currentStep;
       if (mod.value !== undefined) controlValues[mod.id] = mod.value;
       if (mod.grDb !== undefined) gainReduction[mod.id] = mod.grDb;
       if (mod.type === 'peq') spectra[mod.id] = mod.spectrum();
       if (mod.type === 'visualizer') visData[mod.id] = mod.visData();
+      if (mod.type === 'colorgen') colorValues[mod.id] = mod.colorValue();
     }
 
     this.port.postMessage({
@@ -3057,6 +2915,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       gainReduction,
       spectra,
       visData,
+      colorValues,
       noteActivity: [...this.noteActivity],
       songPosition: this.transport.posBeats,
     });

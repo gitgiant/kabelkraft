@@ -33,7 +33,9 @@
   function addModule(type: string) {
     const c = patchCanvas.viewCenter();
     const jitter = () => (Math.random() - 0.5) * 80;
-    appState.addModule(type, c.x + jitter(), c.y + jitter());
+    const inst = appState.addModule(type, c.x + jitter(), c.y + jitter());
+    // A fresh Composer goes straight into the piano roll.
+    if (type === 'composer') appState.openComposer(inst.id);
   }
 
   function onDragStart(e: DragEvent, type: string) {

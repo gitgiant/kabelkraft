@@ -30,6 +30,8 @@ export interface FaceElement {
   y: number;
   w: number;
   h: number;
+  /** Rotation in degrees, clockwise about the element center. */
+  rot?: number;
   /** Caption drawn under controls / used as meter+readout title. */
   label?: string;
   /** Binding target inside the group (param controls, meter, readout). */
@@ -38,6 +40,8 @@ export interface FaceElement {
   /** XY pad: Y-axis target (moduleId/paramId is the X axis). */
   moduleId2?: string;
   paramId2?: string;
+  /** Color Gen inside the group whose live color tints this control. */
+  colorModuleId?: string;
   /** Label elements. */
   text?: string;
   size?: number;
@@ -112,6 +116,17 @@ export function bindableParams(graph: Graph, groupId: string): BindTarget[] {
   return out;
 }
 
+/** Inner Color Gen modules — color-source targets for face elements. */
+export function colorSources(graph: Graph, groupId: string): Array<{ moduleId: string; label: string }> {
+  const out: Array<{ moduleId: string; label: string }> = [];
+  for (const moduleId of graph.modulesInGroup(groupId)) {
+    const mod = graph.modules.get(moduleId);
+    if (!mod || mod.type !== 'colorgen') continue;
+    out.push({ moduleId, label: mod.label ?? graph.def(mod.type).name });
+  }
+  return out;
+}
+
 /** Inner modules with an audio output — meter targets. */
 export function meterTargets(graph: Graph, groupId: string): Array<{ moduleId: string; label: string }> {
   const out: Array<{ moduleId: string; label: string }> = [];
@@ -147,6 +162,9 @@ export function pruneFaceBindings(graph: Graph, groupId: string, face: FaceSpec)
     if (el.kind === 'xy' && !valid(el.moduleId2, el.paramId2)) {
       el.moduleId2 = undefined;
       el.paramId2 = undefined;
+    }
+    if (el.colorModuleId && !members.has(el.colorModuleId)) {
+      el.colorModuleId = undefined;
     }
   }
 }
@@ -291,6 +309,7 @@ export function importKkmod(json: string, defs: Map<string, ModuleDef>): KkmodIm
             ...el,
             moduleId: el.moduleId ? moduleIdMap.get(el.moduleId) : undefined,
             moduleId2: el.moduleId2 ? moduleIdMap.get(el.moduleId2) : undefined,
+            colorModuleId: el.colorModuleId ? moduleIdMap.get(el.colorModuleId) : undefined,
           })),
         }
       : undefined,

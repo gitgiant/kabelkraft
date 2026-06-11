@@ -146,7 +146,7 @@
     }
   }
 
-  /** Click = audition; drag past threshold = drop onto Sampler / Drum pad. */
+  /** Click = audition; drag past threshold = drop onto a Sample Voice. */
   function rowPointerDown(e: PointerEvent, entry: LibraryEntry) {
     if ((e.target as HTMLElement).closest('.fav')) return; // star handles itself
     const startX = e.clientX;
@@ -236,7 +236,7 @@
           role="button"
           tabindex="0"
           onpointerdown={(e) => rowPointerDown(e, entry)}
-          title="Click: audition. Drag onto a Sampler or Drum Machine pad to load."
+          title="Click: audition. Drag onto a Sample Voice to load."
         >
           <span class="entry-name">{entry.name}</span>
           <span class="entry-folder">{entry.folder}</span>

@@ -1,100 +1,90 @@
 import { expect, test } from '@playwright/test';
 
-test('drum machine: default kit beat reaches the output', async ({ page }) => {
+/**
+ * Drums are now built from components: a Composer (piano-roll rows = drum map)
+ * fans out to Sample Voices (smpl), each firing only on its trigNote.
+ */
+
+const click = () => {
+  const pcm = new Float32Array(4410);
+  for (let i = 0; i < 100; i++) pcm[i] = 0.5;
+  return pcm;
+};
+
+test('drum kit: composer drives sample voices to the output', async ({ page }) => {
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
 
-  const drumId = await page.evaluate(() => {
+  const ids = await page.evaluate(() => {
     const s = window.__kk;
-    const audioOut = [...s.graph.modules.values()].find((m) => m.type === 'audioOut')!;
-    const drum = s.addModule('drum', 0, 700);
-    s.connect({ moduleId: drum.id, portId: 'out' }, { moduleId: audioOut.id, portId: 'in' });
-    return drum.id;
+    const out = [...s.graph.modules.values()].find((m) => m.type === 'audioOut')!;
+    const comp = s.addModule('composer', -300, 700);
+    // Kick on every beat (pitch 36), snare on the off-beats (pitch 37).
+    s.setModuleData(comp.id, 'notes', [
+      { start: 0, length: 0.1, pitch: 36, vel: 0.9 },
+      { start: 1, length: 0.1, pitch: 37, vel: 0.8 },
+      { start: 2, length: 0.1, pitch: 36, vel: 0.9 },
+      { start: 3, length: 0.1, pitch: 37, vel: 0.8 },
+    ]);
+    s.setModuleData(comp.id, 'length', 4);
+
+    const mk = (y: number, note: number) => {
+      const v = s.addModule('smpl', 0, y);
+      s.setParam(v.id, 'trigNote', note);
+      s.setParam(v.id, 'fixedPitch', 1);
+      s.setParam(v.id, 'voices', 1);
+      // ~100 ms sustained tone: a 2 ms click is too short to reliably land on
+      // the ~30 Hz peak meter, making the assertion flaky.
+      const pcm = new Float32Array(4410);
+      for (let i = 0; i < pcm.length; i++) pcm[i] = 0.5;
+      s.setSample(v.id, { name: `n${note}.wav`, sampleRate: 44100, channels: [pcm] });
+      s.connect({ moduleId: comp.id, portId: 'notes' }, { moduleId: v.id, portId: 'notes' });
+      s.connect({ moduleId: v.id, portId: 'out' }, { moduleId: out.id, portId: 'in' });
+      return v.id;
+    };
+    return { kick: mk(700, 36), snare: mk(850, 37), out: out.id };
   });
 
-  // Default kit pads carry PCM keyed moduleId#pad.
-  const kitPads = await page.evaluate(
-    (id) => [...window.__kk.samples.keys()].filter((k) => k.startsWith(`${id}#`)).length,
-    drumId,
-  );
-  expect(kitPads).toBe(8);
-
-  // Internal step sequencer drives the default beat — no note wires needed.
   await page.locator('.transport button[title="Play"]').click();
   await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, drumId), { timeout: 5000 })
+    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, ids.out), { timeout: 5000 })
     .toBeGreaterThan(0.01);
-
-  // Playhead is reported like the sequencer's.
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.seqSteps[id] ?? -1, drumId), { timeout: 5000 })
-    .toBeGreaterThanOrEqual(0);
 });
 
-test('drum machine: pad audition makes sound without the transport', async ({ page }) => {
+test('sample voice: PCM is keyed by module id and survives save/load + undo', async ({ page }) => {
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
 
-  const drumId = await page.evaluate(() => {
+  const smplId = await page.evaluate((pcm) => {
     const s = window.__kk;
-    const audioOut = [...s.graph.modules.values()].find((m) => m.type === 'audioOut')!;
-    const drum = s.addModule('drum', 0, 700);
-    s.connect({ moduleId: drum.id, portId: 'out' }, { moduleId: audioOut.id, portId: 'in' });
-    return drum.id;
-  });
-
-  await page.evaluate((id) => window.__kk.padTrigger(id, 0), drumId);
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, drumId), { timeout: 5000 })
-    .toBeGreaterThan(0.01);
-});
-
-test('drum machine: pad samples survive save/load and undo restore', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
-
-  const drumId = await page.evaluate(() => {
-    const s = window.__kk;
-    const drum = s.addModule('drum', 0, 700);
-    // Replace pad 2 with a custom click so we can identify it after reload.
-    const pcm = new Float32Array(4410).fill(0).map((_, i) => (i < 100 ? 0.5 : 0));
-    s.setSample(drum.id, { name: 'click.wav', sampleRate: 44100, channels: [pcm] }, 2);
-    return drum.id;
-  });
+    const v = s.addModule('smpl', 0, 700);
+    s.setSample(v.id, { name: 'click.wav', sampleRate: 44100, channels: [Float32Array.from(pcm)] });
+    return v.id;
+  }, Array.from(click()));
 
   const roundTrip = await page.evaluate((id) => {
     const s = window.__kk;
     const json = s.serializeWithSamples();
     const parsed = JSON.parse(json);
-    const padEntries = (parsed.samples ?? []).filter(
-      (e: { moduleId: string; pad?: number }) => e.moduleId === id && e.pad !== undefined,
+    const entries = (parsed.samples ?? []).filter(
+      (e: { moduleId: string; pad?: number }) => e.moduleId === id && e.pad === undefined,
     );
     s.loadProject(json);
-    const restored = s.samples.get(`${id}#2`);
-    const pads = s.graph.modules.get(id)?.data?.pads as Array<{ name: string }>;
-    return {
-      padEntries: padEntries.length,
-      restoredName: restored?.name,
-      padName: pads?.[2]?.name,
-    };
-  }, drumId);
-  expect(roundTrip.padEntries).toBe(8); // 7 default kit pieces + custom pad 2
+    return { entries: entries.length, restoredName: s.samples.get(id)?.name };
+  }, smplId);
+  expect(roundTrip.entries).toBe(1);
   expect(roundTrip.restoredName).toBe('click.wav');
-  expect(roundTrip.padName).toBe('click');
 
-  // Undo the module add, redo it back: samples must still be in the store.
   const undoRedo = await page.evaluate((id) => {
     const s = window.__kk;
-    // loadProject cleared undo history; delete + undo instead.
     s.select({ moduleId: id });
     s.deleteSelection();
     const gone = !s.graph.modules.has(id);
     s.undo();
-    return { gone, back: s.graph.modules.has(id), sampleKept: s.samples.has(`${id}#2`) };
-  }, drumId);
+    return { gone, back: s.graph.modules.has(id), sampleKept: s.samples.has(id) };
+  }, smplId);
   expect(undoRedo.gone).toBe(true);
   expect(undoRedo.back).toBe(true);
   expect(undoRedo.sampleKept).toBe(true);

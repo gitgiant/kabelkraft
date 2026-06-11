@@ -15,11 +15,11 @@ import { MODULE_DEFS } from './registry';
 
 function makeGraph() {
   const graph = new Graph(MODULE_DEFS);
-  const synth = createInstance(MODULE_DEFS.get('synth')!, 0, 0);
+  const synth = createInstance(MODULE_DEFS.get('vcf')!, 0, 0);
   const lfo = createInstance(MODULE_DEFS.get('lfo')!, 200, 0);
   graph.addModule(synth);
   graph.addModule(lfo);
-  graph.connect({ moduleId: lfo.id, portId: 'out' }, { moduleId: synth.id, portId: 'pitchMod' });
+  graph.connect({ moduleId: lfo.id, portId: 'out' }, { moduleId: synth.id, portId: 'mod' });
   const group = graph.createGroup('Lead', [synth.id, lfo.id], [], 0, 0);
   return { graph, synth, lfo, group };
 }
@@ -97,7 +97,7 @@ describe('kkmod export/import', () => {
     expect(imported.assets.fa1).toContain('base64');
 
     // Binding follows the synth's new id, params survive.
-    const newSynth = imported.modules.find((m) => m.type === 'synth')!;
+    const newSynth = imported.modules.find((m) => m.type === 'vcf')!;
     expect(root.face!.elements[0].moduleId).toBe(newSynth.id);
     expect(newSynth.params.cutoff).toBe(1234);
     expect(root.moduleIds).toContain(newSynth.id);
@@ -107,7 +107,7 @@ describe('kkmod export/import', () => {
     expect(imported.wires).toEqual([
       {
         from: { moduleId: newLfo.id, portId: 'out' },
-        to: { moduleId: newSynth.id, portId: 'pitchMod' },
+        to: { moduleId: newSynth.id, portId: 'mod' },
       },
     ]);
   });

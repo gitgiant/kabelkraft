@@ -8,15 +8,25 @@ async function setup(page: Page): Promise<{ comp: string; synth: string }> {
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
   return page.evaluate(() => {
     const s = window.__kk;
-    // Clean slate: only transport + composer + synth + out.
+    // Clean slate: composer → a gated component voice (voice→osc→vca, ADSR on
+    // the VCA) → out, so stopping the transport actually silences the meter.
     for (const m of [...s.graph.modules.values()]) s.removeModule(m.id);
     s.addModule('transport', -200, -400);
     const comp = s.addModule('composer', -500, 0);
-    const synth = s.addModule('synth', 100, 0);
+    const voice = s.addModule('voice', -250, 0);
+    const osc = s.addModule('osc', 0, -100);
+    const adsr = s.addModule('adsr', -250, 200);
+    const vca = s.addModule('vca', 250, 0);
     const out = s.addModule('audioOut', 600, 0);
-    s.connect({ moduleId: comp.id, portId: 'notes' }, { moduleId: synth.id, portId: 'notes' });
-    s.connect({ moduleId: synth.id, portId: 'out' }, { moduleId: out.id, portId: 'in' });
-    return { comp: comp.id, synth: synth.id };
+    const wire = (f: string, fp: string, t: string, tp: string) =>
+      s.connect({ moduleId: f, portId: fp }, { moduleId: t, portId: tp });
+    wire(comp.id, 'notes', voice.id, 'notes');
+    wire(voice.id, 'pitch', osc.id, 'pitch');
+    wire(voice.id, 'gate', adsr.id, 'gate');
+    wire(osc.id, 'out', vca.id, 'in');
+    wire(adsr.id, 'out', vca.id, 'cv');
+    wire(vca.id, 'out', out.id, 'in');
+    return { comp: comp.id, synth: vca.id };
   });
 }
 

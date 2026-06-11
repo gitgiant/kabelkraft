@@ -19,6 +19,16 @@ export interface PortRef {
   portId: string;
 }
 
+/** A group's exposed boundary port (pole). Shape matches canvas BoundaryPort. */
+export interface GroupPole {
+  key: string; // `${moduleId}:${portId}`
+  moduleId: string;
+  portId: string;
+  direction: 'in' | 'out';
+  type: PortType;
+  label: string;
+}
+
 export interface Wire {
   id: string;
   from: PortRef; // always an output
@@ -44,12 +54,23 @@ export interface ModuleGroup {
   /** Collapsed tile position. */
   x: number;
   y: number;
+  /** Plain-tile size override (world px); faced tiles size from face.width/height. */
+  w?: number;
+  h?: number;
   collapsed: boolean;
   moduleIds: string[];
   /** Nested child groups (PRD §6: layers of abstraction). */
   groupIds: string[];
   /** Designed front panel rendered on the collapsed tile (core/face.ts). */
   face?: FaceSpec;
+  /**
+   * Pole override (keys `moduleId:portId`). Group poles default to a baseline
+   * (member ports with crossing wires ∪ unconnected member ports); `poleHidden`
+   * removes baseline poles, `poleAdded` surfaces extra member ports as taps.
+   * Final poles = baseline − poleHidden + poleAdded.
+   */
+  poleHidden?: string[];
+  poleAdded?: string[];
 }
 
 let nextGroupId = 1;
@@ -181,6 +202,126 @@ export class Graph {
     return removed;
   }
 
+  /**
+   * A group's poles. Baseline = member ports with a wire crossing the boundary
+   * ∪ member ports with no wire at all (so detaching a wire never drops a pole —
+   * bug fix). Then `poleAdded` surfaces extra member ports (e.g. an internally
+   * driven output as a tap) and `poleHidden` removes baseline poles.
+   * Final = baseline + added − hidden.
+   */
+  groupPoles(groupId: string): GroupPole[] {
+    const group = this.groups.get(groupId);
+    if (!group) return [];
+    const members = this.modulesInGroup(groupId);
+    const poles = new Map<string, GroupPole>();
+    const add = (moduleId: string, portId: string, direction: 'in' | 'out', type: PortType, label: string) => {
+      const key = `${moduleId}:${portId}`;
+      if (!poles.has(key)) poles.set(key, { key, moduleId, portId, direction, type, label });
+    };
+
+    // One pass over wires: record which member ports are wired (internal or
+    // crossing) and surface crossing-wire ports as baseline poles.
+    const wired = new Set<string>();
+    for (const wire of this.wires.values()) {
+      const fromIn = members.has(wire.from.moduleId);
+      const toIn = members.has(wire.to.moduleId);
+      if (fromIn) wired.add(`${wire.from.moduleId}:${wire.from.portId}`);
+      if (toIn) wired.add(`${wire.to.moduleId}:${wire.to.portId}`);
+      if (fromIn === toIn) continue; // internal or fully-external wire
+      const inner = fromIn ? wire.from : wire.to;
+      const spec = this.port(inner);
+      add(inner.moduleId, inner.portId, fromIn ? 'out' : 'in', wire.type, spec?.label ?? inner.portId);
+    }
+
+    // Unconnected member ports are baseline poles too.
+    for (const moduleId of members) {
+      const mod = this.modules.get(moduleId);
+      if (!mod) continue;
+      for (const p of this.def(mod.type).ports) {
+        if (wired.has(`${moduleId}:${p.id}`)) continue;
+        add(moduleId, p.id, p.direction, p.type, p.label ?? p.id);
+      }
+    }
+
+    // Override: explicit adds (e.g. an internally-driven output as a tap).
+    for (const key of group.poleAdded ?? []) {
+      if (poles.has(key)) continue;
+      const sep = key.indexOf(':');
+      const moduleId = key.slice(0, sep);
+      const portId = key.slice(sep + 1);
+      if (!members.has(moduleId)) continue;
+      const spec = this.port({ moduleId, portId });
+      if (!spec) continue;
+      add(moduleId, portId, spec.direction, spec.type, spec.label ?? portId);
+    }
+
+    // Hidden wins over everything (applied last).
+    for (const key of group.poleHidden ?? []) poles.delete(key);
+
+    return [...poles.values()];
+  }
+
+  /**
+   * Pole picture for the Face Editor: current poles (with a `wired` flag — a
+   * pole with an external wire can't be hidden) and the `addable` member ports
+   * (hidden baseline poles + internally-driven outputs offered as taps). Inputs
+   * driven internally are never offered (control single fan-in).
+   */
+  groupPoleEditInfo(groupId: string): {
+    poles: Array<GroupPole & { wired: boolean }>;
+    addable: Array<{ key: string; label: string; baseline: boolean }>;
+  } {
+    const group = this.groups.get(groupId);
+    if (!group) return { poles: [], addable: [] };
+    const members = this.modulesInGroup(groupId);
+    const wiredAny = new Set<string>();
+    const crossing = new Set<string>();
+    const internalOut = new Map<string, string>(); // key → label
+    for (const w of this.wires.values()) {
+      const fromIn = members.has(w.from.moduleId);
+      const toIn = members.has(w.to.moduleId);
+      if (fromIn) wiredAny.add(`${w.from.moduleId}:${w.from.portId}`);
+      if (toIn) wiredAny.add(`${w.to.moduleId}:${w.to.portId}`);
+      if (fromIn === toIn) {
+        if (fromIn) {
+          const key = `${w.from.moduleId}:${w.from.portId}`;
+          if (!internalOut.has(key)) internalOut.set(key, this.port(w.from)?.label ?? w.from.portId);
+        }
+        continue;
+      }
+      const inner = fromIn ? w.from : w.to;
+      crossing.add(`${inner.moduleId}:${inner.portId}`);
+    }
+    const baseline = new Set(crossing);
+    for (const moduleId of members) {
+      const mod = this.modules.get(moduleId);
+      if (!mod) continue;
+      for (const p of this.def(mod.type).ports) {
+        if (!wiredAny.has(`${moduleId}:${p.id}`)) baseline.add(`${moduleId}:${p.id}`);
+      }
+    }
+    const current = this.groupPoles(groupId);
+    const currentKeys = new Set(current.map((p) => p.key));
+    const poles = current.map((p) => ({ ...p, wired: crossing.has(p.key) }));
+    const hidden = new Set(group.poleHidden ?? []);
+    const addable: Array<{ key: string; label: string; baseline: boolean }> = [];
+    for (const key of hidden) {
+      if (currentKeys.has(key)) continue;
+      const sep = key.indexOf(':');
+      const moduleId = key.slice(0, sep);
+      const portId = key.slice(sep + 1);
+      if (!members.has(moduleId)) continue;
+      const spec = this.port({ moduleId, portId });
+      if (!spec) continue;
+      addable.push({ key, label: spec.label ?? portId, baseline: baseline.has(key) });
+    }
+    for (const [key, label] of internalOut) {
+      if (currentKeys.has(key) || hidden.has(key)) continue;
+      addable.push({ key, label, baseline: false });
+    }
+    return { poles, addable };
+  }
+
   port(ref: PortRef): PortSpec | undefined {
     const mod = this.modules.get(ref.moduleId);
     if (!mod) return undefined;
@@ -233,9 +374,9 @@ export class Graph {
     if (!check.ok) return check;
     const type = this.port(from)!.type;
 
-    // Control fan-in: one wire only; last-connected wins (PRD §4.3).
+    // Control/color fan-in: one wire only; last-connected wins (PRD §4.3).
     let detached: Wire | undefined;
-    if (type === 'control') {
+    if (type === 'control' || type === 'color') {
       const existing = this.wiresInto(to);
       if (existing.length > 0) {
         detached = existing[0];

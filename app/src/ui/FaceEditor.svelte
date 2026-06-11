@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import {
     bindableParams,
+    colorSources,
     defaultFace,
     meterTargets,
     newFaceElement,
@@ -13,6 +14,7 @@
     type FaceSpec,
   } from '../core/face';
   import { appState } from '../state';
+  import { RESIZE_DIRS, resizeCursor, resizeSize, type ResizeDir } from '../canvas/resize';
 
   let groupId = $state<string | null>(null);
   let face = $state<FaceSpec>(defaultFace());
@@ -20,6 +22,8 @@
   let learning = $state(false);
   let targets = $state<BindTarget[]>([]);
   let meterMods = $state<Array<{ moduleId: string; label: string }>>([]);
+  let colorMods = $state<Array<{ moduleId: string; label: string }>>([]);
+  let poleInfo = $state<ReturnType<(typeof appState.graph)['groupPoleEditInfo']>>({ poles: [], addable: [] });
   let bgFileInput: HTMLInputElement;
   let imgFileInput: HTMLInputElement;
 
@@ -44,8 +48,29 @@
     pruneFaceBindings(appState.graph, id, face);
     targets = bindableParams(appState.graph, id);
     meterMods = meterTargets(appState.graph, id);
+    colorMods = colorSources(appState.graph, id);
+    poleInfo = appState.graph.groupPoleEditInfo(id);
     selectedId = null;
     learning = false;
+  }
+
+  function refreshPoles() {
+    if (groupId) poleInfo = appState.graph.groupPoleEditInfo(groupId);
+  }
+
+  function togglePole(key: string, visible: boolean) {
+    if (!groupId) return;
+    if (visible) appState.hideGroupPole(groupId, key);
+    else appState.showGroupPole(groupId, key);
+    refreshPoles();
+  }
+
+  function addPole(key: string) {
+    if (!groupId || !key) return;
+    const opt = poleInfo.addable.find((a) => a.key === key);
+    if (opt?.baseline) appState.showGroupPole(groupId, key);
+    else appState.addGroupPole(groupId, key);
+    refreshPoles();
   }
 
   onMount(() => {
@@ -70,7 +95,11 @@
         // Membership can have changed while expanded (modules added inside).
         targets = bindableParams(appState.graph, groupId);
         meterMods = meterTargets(appState.graph, groupId);
+        colorMods = colorSources(appState.graph, groupId);
       }
+    });
+    const offG = appState.on('graphChanged', () => {
+      if (groupId) poleInfo = appState.graph.groupPoleEditInfo(groupId);
     });
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && appState.faceLearn) appState.cancelFaceLearn();
@@ -80,6 +109,7 @@
     return () => {
       offE();
       offL();
+      offG();
       window.removeEventListener('keydown', onKey);
     };
   });
@@ -115,6 +145,72 @@
         el.x = Math.min(face.width - 10, Math.max(0, snapTo(ox + dx, face.grid, face.snap)));
         el.y = Math.min(face.height - 10, Math.max(0, snapTo(oy + dy, face.grid, face.snap)));
       }
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  /** Drag any of the 8 edge/corner handles to resize the whole panel. */
+  function startPanelResize(e: PointerEvent, dir: ResizeDir) {
+    e.stopPropagation();
+    selectedId = null;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const ow = face.width;
+    const oh = face.height;
+    const onMove = (ev: PointerEvent) => {
+      const { w, h } = resizeSize(dir, ev.clientX - sx, ev.clientY - sy, ow, oh);
+      face.width = Math.min(1200, Math.max(120, Math.round(w)));
+      face.height = Math.min(900, Math.max(80, Math.round(h)));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  /** Inline placement for a panel resize handle (edges full-span, corners boxed). */
+  function panelHandleStyle(dir: ResizeDir): string {
+    const T = 8; // edge thickness
+    const C = 14; // corner box
+    const pos: string[] = [`cursor:${resizeCursor(dir)}`, 'position:absolute', 'z-index:5'];
+    const isCorner = dir.length === 2;
+    // Anchored just inside the edges — .surface has overflow:hidden, so handles
+    // placed outside would be clipped and unclickable.
+    if (isCorner) {
+      pos.push(`width:${C}px`, `height:${C}px`);
+      pos.push(dir.includes('n') ? 'top:0' : 'bottom:0');
+      pos.push(dir.includes('w') ? 'left:0' : 'right:0');
+      pos.push('z-index:6');
+    } else if (dir === 'n' || dir === 's') {
+      pos.push(`left:${C}px`, `right:${C}px`, `height:${T}px`);
+      pos.push(dir === 'n' ? 'top:0' : 'bottom:0');
+    } else {
+      pos.push(`top:${C}px`, `bottom:${C}px`, `width:${T}px`);
+      pos.push(dir === 'w' ? 'left:0' : 'right:0');
+    }
+    return pos.join(';');
+  }
+
+  /** Drag the ⟳ handle to rotate about the element center; shift snaps to 15°. */
+  function startRotate(e: PointerEvent, el: FaceElement) {
+    e.stopPropagation();
+    selectedId = el.id;
+    const node = (e.currentTarget as HTMLElement).parentElement!;
+    const r = node.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const onMove = (ev: PointerEvent) => {
+      let deg = (Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180) / Math.PI + 90;
+      if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
+      deg = ((Math.round(deg) % 360) + 360) % 360;
+      el.rot = deg === 0 ? undefined : deg;
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
@@ -224,6 +320,13 @@
               style:background-size={assetUrl(face.bgAssetId) ? '100% 100%' : 'auto'}
               onpointerdown={() => (selectedId = null)}
             >
+              {#each RESIZE_DIRS as dir (dir)}
+                <div
+                  class="panel-resize"
+                  style={panelHandleStyle(dir)}
+                  onpointerdown={(e) => startPanelResize(e, dir)}
+                ></div>
+              {/each}
               {#each face.elements as el (el.id)}
                 <div
                   class="el {el.kind}"
@@ -233,6 +336,7 @@
                   style:top="{el.y}px"
                   style:width="{el.w}px"
                   style:height="{el.h}px"
+                  style:transform={el.rot ? `rotate(${el.rot}deg)` : 'none'}
                   onpointerdown={(e) => startDrag(e, el)}
                 >
                   {#if el.kind === 'knob'}
@@ -261,6 +365,7 @@
                   {/if}
                   {#if el.id === selectedId}
                     <div class="resize" onpointerdown={(e) => startDrag(e, el, true)}></div>
+                    <div class="rotate" title="Drag to rotate (shift: 15° steps)" onpointerdown={(e) => startRotate(e, el)}></div>
                   {/if}
                 </div>
               {/each}
@@ -268,6 +373,29 @@
           </div>
 
           <div class="inspector">
+            <div class="poles">
+              <div class="poles-head">Group Poles</div>
+              {#each poleInfo.poles as p (p.key)}
+                <label class="pole-row" title={p.wired ? 'Wired — detach the wire to hide this pole' : ''}>
+                  <input
+                    type="checkbox"
+                    checked={true}
+                    disabled={p.wired}
+                    onchange={() => togglePole(p.key, true)}
+                  />
+                  <span class="dir {p.direction}">{p.direction === 'in' ? '▸' : '▹'}</span>
+                  <span class="pole-label">{p.label}</span>
+                </label>
+              {/each}
+              {#if poleInfo.addable.length}
+                <select class="add-pole" value="" onchange={(e) => { addPole(e.currentTarget.value); e.currentTarget.value = ''; }}>
+                  <option value="">＋ Add pole…</option>
+                  {#each poleInfo.addable as a (a.key)}
+                    <option value={a.key}>{a.label}{a.baseline ? '' : ' (tap)'}</option>
+                  {/each}
+                </select>
+              {/if}
+            </div>
             {#if selected}
               <div class="row"><strong>{selected.kind}</strong> <code>{selected.id}</code></div>
               <div class="row">
@@ -277,6 +405,16 @@
               <div class="row">
                 <label>W <input type="number" bind:value={selected.w} /></label>
                 <label>H <input type="number" bind:value={selected.h} /></label>
+              </div>
+              <div class="row">
+                <label>Rot°
+                  <input
+                    type="number"
+                    step="5"
+                    value={selected.rot ?? 0}
+                    oninput={(e) => (selected!.rot = ((Number(e.currentTarget.value) % 360) + 360) % 360 || undefined)}
+                  />
+                </label>
               </div>
               {#if selected.kind !== 'label' && selected.kind !== 'image'}
                 <label class="full">Caption <input type="text" bind:value={selected.label} /></label>
@@ -340,6 +478,20 @@
                 <button onclick={() => groupId && appState.armFaceLearn(groupId)} title="Then click a param on a module inside the group">
                   🎯 Learn binding
                 </button>
+                {#if selected.kind !== 'readout'}
+                  <label class="full">
+                    Color source
+                    <select
+                      value={selected.colorModuleId ?? ''}
+                      onchange={(e) => (selected!.colorModuleId = e.currentTarget.value || undefined)}
+                    >
+                      <option value="">— static —</option>
+                      {#each colorMods as m}
+                        <option value={m.moduleId}>{m.label}</option>
+                      {/each}
+                    </select>
+                  </label>
+                {/if}
               {/if}
               <button class="danger" onclick={removeSelected}>Delete element</button>
             {:else}
@@ -453,6 +605,11 @@
     overflow: hidden;
     flex-shrink: 0;
   }
+  /* Invisible edge/corner grab zones for resizing the whole panel. */
+  .panel-resize {
+    background: transparent;
+    touch-action: none;
+  }
   .el {
     position: absolute;
     cursor: move;
@@ -561,6 +718,17 @@
     border-radius: 3px;
     cursor: nwse-resize;
   }
+  .rotate {
+    position: absolute;
+    top: -20px;
+    left: 50%;
+    margin-left: -6px;
+    width: 12px;
+    height: 12px;
+    background: var(--accent);
+    border-radius: 50%;
+    cursor: grab;
+  }
   .inspector {
     width: 230px;
     border-left: 1px solid var(--panel-border);
@@ -593,6 +761,42 @@
   .inspector select,
   .inspector input[type='text'] {
     width: 100%;
+  }
+  .poles {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-bottom: 10px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .poles-head {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+  }
+  .pole-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .pole-row .dir {
+    color: var(--text-dim);
+  }
+  .pole-row .dir.out {
+    color: var(--accent);
+  }
+  .pole-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .add-pole {
+    width: 100%;
+    margin-top: 2px;
   }
   .danger {
     color: #ff5050;

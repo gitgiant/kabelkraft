@@ -52,9 +52,11 @@ test('group rename and recolor are undoable', async ({ page }) => {
 
   const result = await page.evaluate(() => {
     const s = window.__kk;
-    const mods = [...s.graph.modules.values()];
-    s.addToSelection({ moduleId: mods[0].id });
-    s.addToSelection({ moduleId: mods[1].id });
+    // Fresh ungrouped modules: the starter's modules are already in its group.
+    const a = s.addModule('lfo', 200, 200);
+    const b = s.addModule('lfo', 420, 200);
+    s.addToSelection({ moduleId: a.id });
+    s.addToSelection({ moduleId: b.id });
     const gid = s.groupSelection()!;
     s.renameGroup(gid, 'Drums Bus');
     s.recolorGroup(gid, 0xff5050);
@@ -80,10 +82,12 @@ test('rename via the ✎ prompt on a collapsed group tile', async ({ page }) => 
 
   const gid = await page.evaluate(() => {
     const s = window.__kk;
-    const mods = [...s.graph.modules.values()];
-    s.addToSelection({ moduleId: mods[0].id });
-    s.addToSelection({ moduleId: mods[1].id });
-    return s.groupSelection()!; // groups start collapsed-expanded? state: created expanded
+    // Fresh ungrouped modules: the starter's modules are already in its group.
+    const a = s.addModule('lfo', 200, 200);
+    const b = s.addModule('lfo', 420, 200);
+    s.addToSelection({ moduleId: a.id });
+    s.addToSelection({ moduleId: b.id });
+    return s.groupSelection()!;
   });
 
   // The expanded frame title row carries the ✎; click it via its position.

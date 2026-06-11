@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test('palette search filters modules', async ({ page }) => {
   await page.goto('/');
-  await expect(page.locator('.palette .module-entry')).toHaveCount(42);
+  await expect(page.locator('.palette .module-entry')).toHaveCount(47);
 
   await page.locator('.palette-search').fill('filt');
   await expect(page.locator('.palette .module-entry', { hasText: 'Filter' })).toBeVisible();
@@ -15,7 +15,7 @@ test('palette search filters modules', async ({ page }) => {
   await expect(page.locator('.no-match')).toBeVisible();
 
   await page.locator('.palette-search').fill('');
-  await expect(page.locator('.palette .module-entry')).toHaveCount(42);
+  await expect(page.locator('.palette .module-entry')).toHaveCount(47);
 });
 
 test('selecting a wire and pressing Delete removes it', async ({ page }) => {
@@ -64,10 +64,13 @@ test('filter face: response curve drag sets cutoff + Q; knobs work', async ({ pa
   expect(mid.res).toBeGreaterThan(0.3);
   expect(mid.res).toBeLessThan(0.65);
 
-  // Cutoff knob drag (left knob) raises cutoff.
-  await page.mouse.move(pt!.x - 43, pt!.y - 49);
+  // Cutoff knob drag raises cutoff.
+  const knobPt = await page.evaluate(
+    (i) => window.__kkCanvas.clientPointForParam(i, 'cutoff'), vcf,
+  );
+  await page.mouse.move(knobPt!.x, knobPt!.y);
   await page.mouse.down();
-  await page.mouse.move(pt!.x - 43, pt!.y - 109, { steps: 5 });
+  await page.mouse.move(knobPt!.x, knobPt!.y - 60, { steps: 5 });
   await page.mouse.up();
   const after = await page.evaluate(
     (i) => window.__kk.graph.modules.get(i)!.params.cutoff, vcf,

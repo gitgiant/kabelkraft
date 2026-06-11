@@ -7,8 +7,8 @@ import { DEFAULT_TRANSPORT } from './types';
 
 function setup() {
   const graph = new Graph(MODULE_DEFS);
-  const synth = createInstance(MODULE_DEFS.get('synth')!, 0, 0);
-  const synth2 = createInstance(MODULE_DEFS.get('synth')!, 0, 200);
+  const synth = createInstance(MODULE_DEFS.get('smpl')!, 0, 0);
+  const synth2 = createInstance(MODULE_DEFS.get('smpl')!, 0, 200);
   const keyboard = createInstance(MODULE_DEFS.get('keyboard')!, -300, 0);
   const audioOut = createInstance(MODULE_DEFS.get('audioOut')!, 300, 0);
   const levels = createInstance(MODULE_DEFS.get('levels')!, 300, 200);
@@ -194,7 +194,7 @@ describe('project serialization (PRD §15)', () => {
     const { graph, synth, audioOut } = setup();
     graph.connect({ moduleId: synth.id, portId: 'out' }, { moduleId: audioOut.id, portId: 'in' });
     const json = serializeProject('Test', graph, DEFAULT_TRANSPORT);
-    const tampered = json.replace(`"type": "${'synth'}"`, '"type": "superSaw"');
+    const tampered = json.replace(`"type": "${'smpl'}"`, '"type": "superSaw"');
     const loaded = deserializeProject(tampered, MODULE_DEFS);
     expect(loaded.warnings.some((w) => w.includes('superSaw'))).toBe(true);
     expect(loaded.graph.wires.size).toBe(0);

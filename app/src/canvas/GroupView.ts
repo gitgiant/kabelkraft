@@ -13,6 +13,7 @@ import { PORT_TYPE_COLORS, type PortType } from '../core/types';
 import { appState } from '../state';
 import { nextGroupColor, theme } from '../theme';
 import { PORT_RADIUS } from './ModuleView';
+import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import type { Tooltip } from './Tooltip';
 
 const TITLE_H = 24;
@@ -58,6 +59,8 @@ export class GroupView extends Container {
   private portDots = new Map<string, Graphics>();
   tileWidth = 170;
   tileHeight = 80;
+  /** Persistent resize hit-zones — survive in-place re-renders during a drag. */
+  private resizeHandles: Graphics[] = [];
   private popUntil = 0;
   private popFrom = { x: 0, y: 0 };
   private static readonly POP_MS = 340;
@@ -75,6 +78,18 @@ export class GroupView extends Container {
   }
 
   private buildCollapsedTile(): void {
+    // In-place re-render (live resize) reuses this: drop the old tile but keep
+    // the persistent resize handles so the captured node is never destroyed.
+    const kids = [...this.children];
+    this.removeChildren();
+    for (const k of kids) {
+      if (this.resizeHandles.includes(k as Graphics)) continue;
+      k.destroy({ children: true });
+    }
+    this.portCenters.clear();
+    this.portDots.clear();
+    this.liveDraws = [];
+
     const face = this.group.face;
     const inputs = this.boundaryPorts.filter((p) => p.direction === 'in');
     const outputs = this.boundaryPorts.filter((p) => p.direction === 'out');
@@ -83,7 +98,8 @@ export class GroupView extends Container {
       this.tileWidth = face.width;
       this.tileHeight = TITLE_H + face.height;
     } else {
-      this.tileHeight = TITLE_H + 18 + rows * 26;
+      this.tileWidth = this.group.w ?? 170;
+      this.tileHeight = this.group.h ?? TITLE_H + 18 + rows * 26;
     }
     const w = this.tileWidth;
     const h = this.tileHeight;
@@ -227,6 +243,98 @@ export class GroupView extends Container {
     };
     place(inputs, 0);
     place(outputs, w);
+
+    this.mountResizeHandles();
+  }
+
+  // -- resize (all sides) ----------------------------------------------------
+
+  /** Eight persistent hit-zones; re-rendered in place during a drag (faced
+   * tiles write face.width/height, plain tiles write group.w/h). */
+  private mountResizeHandles(): void {
+    if (this.resizeHandles.length === 0) {
+      for (const dir of RESIZE_DIRS) {
+        const g = new Graphics();
+        g.eventMode = 'static';
+        g.cursor = resizeCursor(dir);
+        g.hitArea = {
+          contains: (px, py) =>
+            inResizeBand(dir, px, py, this.tileWidth, this.tileHeight) && !this.overPole(px, py),
+        };
+        g.on('pointerdown', (e) => {
+          e.stopPropagation();
+          this.beginResize(dir, e);
+        });
+        g.on('pointerover', (ev) =>
+          this.tooltip.show(['Resize', 'Drag any edge or corner.'], ev.clientX, ev.clientY),
+        );
+        g.on('pointerout', () => this.tooltip.hide());
+        this.resizeHandles.push(g);
+      }
+    }
+    for (const g of this.resizeHandles) this.addChild(g);
+  }
+
+  /** True if a tile-local point sits on a pole dot — resize yields to the pole
+   * there so edge poles stay grabbable (wire + hover tooltip), not resized. */
+  private overPole(px: number, py: number): boolean {
+    for (const c of this.portCenters.values()) {
+      const dx = px - c.x;
+      const dy = py - c.y;
+      if (dx * dx + dy * dy < 20 * 20) return true;
+    }
+    return false;
+  }
+
+  private beginResize(dir: ResizeDir, e: FederatedPointerEvent): void {
+    appState.beginUndoable();
+    const face = this.group.face;
+    const startW = this.tileWidth;
+    const startH = this.tileHeight;
+    const startX = this.group.x;
+    const startY = this.group.y;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const scale = this.worldTransform.a || 1;
+    let raf = 0;
+    const MIN_W = 120, MAX_W = 1200, MIN_H = 80, MAX_H = 900;
+    const apply = (ev: PointerEvent) => {
+      const { w, h } = resizeSize(dir, (ev.clientX - sx) / scale, (ev.clientY - sy) / scale, startW, startH);
+      const cw = Math.min(MAX_W, Math.max(MIN_W, w));
+      // Faced tile height = TITLE_H + face.height; clamp the face area itself.
+      const ch = Math.min(MAX_H + (face ? TITLE_H : 0), Math.max(MIN_H + (face ? TITLE_H : 0), h));
+      if (face) {
+        face.width = cw;
+        face.height = ch - TITLE_H;
+      } else {
+        this.group.w = cw;
+        this.group.h = ch;
+      }
+      // Anchor opposite edge for n/w using the clamped size.
+      if (dir.includes('w')) this.group.x = startX + startW - cw;
+      if (dir.includes('n')) this.group.y = startY + startH - ch;
+    };
+    const onMove = (ev: PointerEvent) => {
+      apply(ev);
+      if (!raf) {
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          this.buildCollapsedTile(); // in-place re-render; handles persist
+          this.position.set(this.group.x, this.group.y);
+        });
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      if (raf) cancelAnimationFrame(raf);
+      // Final snap to the committed size (mutations already persisted on group;
+      // beginUndoable at drag start captured the one undo step).
+      this.buildCollapsedTile();
+      this.position.set(this.group.x, this.group.y);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
   }
 
   // -- face elements (core/face.ts) -----------------------------------------
@@ -283,18 +391,30 @@ export class GroupView extends Container {
   }
 
   /** Caption text anchored top-center at (x + w/2, y). */
-  private addCaption(el: FaceElement, fx: number, y: number): void {
+  private addCaption(parent: Container, el: FaceElement, fx: number, y: number): void {
     if (!el.label) return;
     const t = new Text({ text: el.label, style: { fontSize: 10, fill: theme.textDim } });
     t.anchor.set(0.5, 0);
     t.position.set(fx + el.w / 2, y);
     t.eventMode = 'none';
-    this.addChild(t);
+    parent.addChild(t);
   }
 
   private buildFaceElement(el: FaceElement): void {
-    const fx = el.x;
-    const fy = TITLE_H + el.y;
+    // Each element lives in its own container rotated about its center, so
+    // rotation set in the face editor applies to drawing AND hit-testing.
+    const wrap = new Container();
+    wrap.position.set(el.x + el.w / 2, TITLE_H + el.y + el.h / 2);
+    wrap.rotation = ((el.rot ?? 0) * Math.PI) / 180;
+    this.addChild(wrap);
+    const fx = -el.w / 2;
+    const fy = -el.h / 2;
+    // Screen-space drag delta → element-local delta (undo the rotation).
+    const rotRad = ((el.rot ?? 0) * Math.PI) / 180;
+    const localDelta = (dx: number, dy: number) => ({
+      x: dx * Math.cos(rotRad) + dy * Math.sin(rotRad),
+      y: -dx * Math.sin(rotRad) + dy * Math.cos(rotRad),
+    });
 
     if (el.kind === 'label') {
       const t = new Text({
@@ -303,7 +423,7 @@ export class GroupView extends Container {
       });
       t.position.set(fx, fy);
       t.eventMode = 'none';
-      this.addChild(t);
+      wrap.addChild(t);
       return;
     }
 
@@ -317,14 +437,14 @@ export class GroupView extends Container {
         sprite.width = el.w;
         sprite.height = el.h;
         sprite.eventMode = 'none';
-        this.addChild(sprite);
+        wrap.addChild(sprite);
       };
       if (faceTexture(el.assetId, apply)) apply();
       return;
     }
 
     const g = new Graphics();
-    this.addChild(g);
+    wrap.addChild(g);
 
     if (el.kind === 'meter') {
       const redraw = () => {
@@ -343,7 +463,7 @@ export class GroupView extends Container {
         redraw,
         last: '',
       });
-      this.addCaption(el, fx, fy + el.h + 2);
+      this.addCaption(wrap, el, fx, fy + el.h + 2);
       return;
     }
 
@@ -353,7 +473,7 @@ export class GroupView extends Container {
       t.anchor.set(0.5);
       t.position.set(fx + el.w / 2, fy + el.h / 2);
       t.eventMode = 'none';
-      this.addChild(t);
+      wrap.addChild(t);
       const redraw = () => {
         const b = this.boundParam(el.moduleId, el.paramId);
         if (!b) {
@@ -370,13 +490,18 @@ export class GroupView extends Container {
         redraw,
         last: '',
       });
-      this.addCaption(el, fx, fy + el.h + 2);
+      this.addCaption(wrap, el, fx, fy + el.h + 2);
       return;
     }
 
     // Interactive controls: knob / slider / xy / button.
     const bound = () => this.boundParam(el.moduleId, el.paramId);
     const dim = bound() ? 1 : 0.35;
+    // Accent: a bound Color Gen's live color, else the control type color.
+    const accent = () => {
+      const c = el.colorModuleId ? appState.colorValues[el.colorModuleId] : undefined;
+      return c ?? PORT_TYPE_COLORS.control;
+    };
 
     if (el.kind === 'knob') {
       const cx = fx + el.w / 2;
@@ -395,13 +520,13 @@ export class GroupView extends Container {
         g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
         g.arc(cx, cy, r, a0, a1).stroke({ width: 3, color: theme.inset });
         g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
-        g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: PORT_TYPE_COLORS.control });
+        g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: accent() });
         g.moveTo(cx + Math.cos(av) * r * 0.3, cy + Math.sin(av) * r * 0.3)
           .lineTo(cx + Math.cos(av) * r * 0.72, cy + Math.sin(av) * r * 0.72)
           .stroke({ width: 2, color: theme.text });
       };
       redraw();
-      this.liveDraws.push({ key: () => String(bound()?.value ?? NaN), redraw, last: '' });
+      this.liveDraws.push({ key: () => `${bound()?.value ?? NaN}:${accent()}`, redraw, last: '' });
 
       const hit = new Graphics().circle(cx, cy, r + 6).fill({ color: 0xffffff, alpha: 0.001 });
       hit.eventMode = 'static';
@@ -420,8 +545,8 @@ export class GroupView extends Container {
         this.tooltip.show(this.elementTip(el, [el.label ?? 'Knob', 'Drag up/down.']), e.clientX, e.clientY),
       );
       hit.on('pointerout', () => this.tooltip.hide());
-      this.addChild(hit);
-      this.addCaption(el, fx, fy + el.h - 12);
+      wrap.addChild(hit);
+      this.addCaption(wrap, el, fx, fy + el.h - 12);
       return;
     }
 
@@ -433,18 +558,18 @@ export class GroupView extends Container {
         g.alpha = dim;
         if (horiz) {
           g.roundRect(fx, fy + el.h / 2 - 5, el.w, 10, 4).fill(theme.inset);
-          g.roundRect(fx, fy + el.h / 2 - 5, el.w * v, 10, 4).fill(PORT_TYPE_COLORS.control);
+          g.roundRect(fx, fy + el.h / 2 - 5, el.w * v, 10, 4).fill(accent());
           g.roundRect(fx + el.w * v - 5, fy + el.h / 2 - 11, 10, 22, 3)
             .fill(theme.button).stroke({ width: 1, color: theme.text });
         } else {
           g.roundRect(fx + el.w / 2 - 5, fy, 10, el.h, 4).fill(theme.inset);
-          g.roundRect(fx + el.w / 2 - 5, fy + el.h * (1 - v), 10, el.h * v, 4).fill(PORT_TYPE_COLORS.control);
+          g.roundRect(fx + el.w / 2 - 5, fy + el.h * (1 - v), 10, el.h * v, 4).fill(accent());
           g.roundRect(fx + el.w / 2 - 11, fy + el.h * (1 - v) - 5, 22, 10, 3)
             .fill(theme.button).stroke({ width: 1, color: theme.text });
         }
       };
       redraw();
-      this.liveDraws.push({ key: () => String(bound()?.value ?? NaN), redraw, last: '' });
+      this.liveDraws.push({ key: () => `${bound()?.value ?? NaN}:${accent()}`, redraw, last: '' });
 
       const hit = new Graphics().rect(fx - 4, fy - 4, el.w + 8, el.h + 8).fill({ color: 0xffffff, alpha: 0.001 });
       hit.eventMode = 'static';
@@ -454,7 +579,7 @@ export class GroupView extends Container {
         const b = bound();
         if (!b) return;
         appState.beginUndoable();
-        const local = this.toLocal(e.global);
+        const local = wrap.toLocal(e.global);
         this.setNorm(b.moduleId, b.spec, b.paramId, horiz ? (local.x - fx) / el.w : 1 - (local.y - fy) / el.h);
         redraw();
         const start = this.norm(el.moduleId, el.paramId);
@@ -462,7 +587,8 @@ export class GroupView extends Container {
         const sx = e.clientX;
         const sy = e.clientY;
         const onMove = (ev: PointerEvent) => {
-          const d = horiz ? (ev.clientX - sx) / scale / el.w : -(ev.clientY - sy) / scale / el.h;
+          const ld = localDelta((ev.clientX - sx) / scale, (ev.clientY - sy) / scale);
+          const d = horiz ? ld.x / el.w : -ld.y / el.h;
           this.setNorm(b.moduleId, b.spec, b.paramId, start + d);
           redraw();
         };
@@ -477,8 +603,8 @@ export class GroupView extends Container {
         this.tooltip.show(this.elementTip(el, [el.label ?? 'Slider', 'Click or drag.']), e.clientX, e.clientY),
       );
       hit.on('pointerout', () => this.tooltip.hide());
-      this.addChild(hit);
-      this.addCaption(el, fx, fy + el.h + 2);
+      wrap.addChild(hit);
+      this.addCaption(wrap, el, fx, fy + el.h + 2);
       return;
     }
 
@@ -495,11 +621,11 @@ export class GroupView extends Container {
         const py = fy + (1 - vy) * padH;
         g.moveTo(px, fy).lineTo(px, fy + padH).stroke({ width: 1, color: theme.textDim, alpha: 0.4 });
         g.moveTo(fx, py).lineTo(fx + el.w, py).stroke({ width: 1, color: theme.textDim, alpha: 0.4 });
-        g.circle(px, py, 7).fill(PORT_TYPE_COLORS.control).stroke({ width: 2, color: theme.text });
+        g.circle(px, py, 7).fill(accent()).stroke({ width: 2, color: theme.text });
       };
       redraw();
       this.liveDraws.push({
-        key: () => `${bound()?.value ?? NaN}/${boundY()?.value ?? NaN}`,
+        key: () => `${bound()?.value ?? NaN}/${boundY()?.value ?? NaN}:${accent()}`,
         redraw,
         last: '',
       });
@@ -518,13 +644,15 @@ export class GroupView extends Container {
           if (by) this.setNorm(by.moduleId, by.spec, by.paramId, 1 - (localY - fy) / padH);
           redraw();
         };
-        const first = this.toLocal(e.global);
+        const first = wrap.toLocal(e.global);
         apply(first.x, first.y);
         const scale = this.worldTransform.a || 1;
         const sx = e.clientX;
         const sy = e.clientY;
-        const onMove = (ev: PointerEvent) =>
-          apply(first.x + (ev.clientX - sx) / scale, first.y + (ev.clientY - sy) / scale);
+        const onMove = (ev: PointerEvent) => {
+          const ld = localDelta((ev.clientX - sx) / scale, (ev.clientY - sy) / scale);
+          apply(first.x + ld.x, first.y + ld.y);
+        };
         const onUp = () => {
           window.removeEventListener('pointermove', onMove);
           window.removeEventListener('pointerup', onUp);
@@ -536,8 +664,8 @@ export class GroupView extends Container {
         this.tooltip.show(this.elementTip(el, [el.label ?? 'XY pad', 'Drag the puck.']), e.clientX, e.clientY),
       );
       hit.on('pointerout', () => this.tooltip.hide());
-      this.addChild(hit);
-      this.addCaption(el, fx, fy + padH + 2);
+      wrap.addChild(hit);
+      this.addCaption(wrap, el, fx, fy + padH + 2);
       return;
     }
 
@@ -548,11 +676,11 @@ export class GroupView extends Container {
       g.clear();
       g.alpha = dim;
       g.roundRect(fx, fy, el.w, btnH, 8)
-        .fill(on ? PORT_TYPE_COLORS.control : theme.button)
+        .fill(on ? accent() : theme.button)
         .stroke({ width: 2, color: on ? theme.text : theme.moduleStroke });
     };
     redraw();
-    this.liveDraws.push({ key: () => String(bound()?.value ?? NaN), redraw, last: '' });
+    this.liveDraws.push({ key: () => `${bound()?.value ?? NaN}:${accent()}`, redraw, last: '' });
 
     const hit = new Graphics().rect(fx, fy, el.w, btnH).fill({ color: 0xffffff, alpha: 0.001 });
     hit.eventMode = 'static';
@@ -569,8 +697,8 @@ export class GroupView extends Container {
       this.tooltip.show(this.elementTip(el, [el.label ?? 'Button', 'Click to toggle.']), e.clientX, e.clientY),
     );
     hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-    this.addCaption(el, fx, fy + btnH + 2);
+    wrap.addChild(hit);
+    this.addCaption(wrap, el, fx, fy + btnH + 2);
   }
 
   /** Pop a freshly inserted faced group tile into existence (AI import). */

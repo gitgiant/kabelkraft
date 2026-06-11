@@ -53,11 +53,40 @@ export class PatchCanvas {
     startX: number;
     startY: number;
   } | null = null;
+  // Dragging the background of an expanded group frame moves the whole group:
+  // every member view + nested collapsed tile travels live; positions persist
+  // on drop. dx/dy track the running delta for the model commit.
+  private frameDrag: {
+    group: ModuleGroup;
+    start: { x: number; y: number };
+    dx: number;
+    dy: number;
+    moduleStart: Map<string, { x: number; y: number }>;
+    groupStart: Map<string, { x: number; y: number }>;
+  } | null = null;
   private panning: { startX: number; startY: number; worldX: number; worldY: number } | null = null;
   private bandStart: { x: number; y: number } | null = null;
+  private wireMoveDrag: { wire: Wire } | null = null;
+  // Two-finger pinch: zoom (scale ratio) + pan (midpoint delta). Only armed
+  // when no object drag is in flight, so it never hijacks a module/wire grab.
+  private pinch: { dist: number; mid: { x: number; y: number } } | null = null;
+
+  // Drag-to-delete trash zone (screen-space overlay, shown during drags).
+  private trash = new Container();
+  private trashRect = { x: 0, y: 0, w: 132, h: 64 };
+  private overTrash = false;
 
   async mount(container: HTMLElement): Promise<void> {
-    await this.app.init({ background: theme.canvasBg, resizeTo: container, antialias: true });
+    // Bake text/textures at >1× device pixels so labels stay crisp when zoomed
+    // in (max zoom 2.5×). autoDensity keeps CSS size correct; app.screen stays
+    // in CSS px, so all coordinate math below is unaffected.
+    await this.app.init({
+      background: theme.canvasBg,
+      resizeTo: container,
+      antialias: true,
+      resolution: Math.max(2.5, window.devicePixelRatio || 1),
+      autoDensity: true,
+    });
     container.appendChild(this.app.canvas);
     this.tooltip = new Tooltip(container);
 
@@ -68,6 +97,9 @@ export class PatchCanvas {
     this.app.stage.addChild(this.world);
     this.world.position.set(this.app.screen.width / 2, this.app.screen.height / 2);
 
+    this.buildTrash();
+    this.app.stage.addChild(this.trash);
+
     this.app.stage.eventMode = 'static';
     this.app.stage.hitArea = { contains: () => true };
     this.app.stage.on('pointerdown', (e) => this.onStageDown(e));
@@ -75,6 +107,10 @@ export class PatchCanvas {
     this.app.stage.on('pointerup', () => this.cancelDrags());
     this.app.stage.on('pointerupoutside', () => this.cancelDrags());
     this.app.canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+    this.app.canvas.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
+    this.app.canvas.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
+    this.app.canvas.addEventListener('touchend', (e) => this.onTouchEnd(e), { passive: false });
+    this.app.renderer.on('resize', () => this.layoutTrash());
 
     window.addEventListener('keydown', (e) => this.onKeyDown(e));
 
@@ -144,11 +180,8 @@ export class PatchCanvas {
       if (!view.visible) continue;
       const lx = wx - view.position.x;
       const ly = wy - view.position.y;
-      if (lx < 0 || ly < 0 || lx > view.def.width || ly > view.def.height) continue;
-      if (view.instance.type === 'sampler') return { moduleId: id };
-      if (view.instance.type === 'drum') {
-        return { moduleId: id, pad: view.padIndexAt(lx, ly) ?? view.selectedPad };
-      }
+      if (lx < 0 || ly < 0 || lx > view.w || ly > view.h) continue;
+      if (view.instance.type === 'smpl') return { moduleId: id };
     }
     return null;
   }
@@ -159,8 +192,41 @@ export class PatchCanvas {
     if (!view) return null;
     const rect = this.app.canvas.getBoundingClientRect();
     return {
-      x: rect.left + this.world.position.x + (view.position.x + view.def.width / 2) * this.world.scale.x,
-      y: rect.top + this.world.position.y + (view.position.y + view.def.height / 2) * this.world.scale.y,
+      x: rect.left + this.world.position.x + (view.position.x + view.w / 2) * this.world.scale.x,
+      y: rect.top + this.world.position.y + (view.position.y + view.h / 2) * this.world.scale.y,
+    };
+  }
+
+  /**
+   * Client-space rect of a module tile (top-left + size in screen px), plus
+   * whether it currently intersects the canvas viewport. Anchored panels
+   * (composer piano roll) pin to this and hide when the module scrolls away.
+   */
+  clientRectFor(
+    moduleId: string,
+  ): { left: number; top: number; width: number; height: number; onScreen: boolean } | null {
+    const view = this.views.get(moduleId);
+    if (!view || !view.visible) return null;
+    const rect = this.app.canvas.getBoundingClientRect();
+    const s = this.world.scale.x;
+    const left = rect.left + this.world.position.x + view.position.x * s;
+    const top = rect.top + this.world.position.y + view.position.y * s;
+    const width = view.w * s;
+    const height = view.h * s;
+    const onScreen =
+      left + width > rect.left && left < rect.right && top + height > rect.top && top < rect.bottom;
+    return { left, top, width, height, onScreen };
+  }
+
+  /** Client-space center of a param's control widget (e2e + tools). */
+  clientPointForParam(moduleId: string, paramId: string): { x: number; y: number } | null {
+    const view = this.views.get(moduleId);
+    const anchor = view?.paramAnchor(paramId);
+    if (!view || !anchor) return null;
+    const rect = this.app.canvas.getBoundingClientRect();
+    return {
+      x: rect.left + this.world.position.x + (view.position.x + anchor.x) * this.world.scale.x,
+      y: rect.top + this.world.position.y + (view.position.y + anchor.y) * this.world.scale.y,
     };
   }
 
@@ -207,6 +273,119 @@ export class PatchCanvas {
     for (const id of moduleIds) this.views.get(id)?.popIn();
   }
 
+
+  /**
+   * Auto-arrange (toolbar): layered signal-flow layout. Nodes are visible
+   * module tiles and collapsed group tiles; wires define left→right layers
+   * (sources → effects → outputs). Unwired nodes park in a final column.
+   * One undo step; the view re-centers on the result.
+   */
+  autoArrange(): void {
+    const graph = appState.graph;
+    interface ArrNode {
+      id: string;
+      w: number;
+      h: number;
+      y0: number;
+      mv?: ModuleView;
+      gv?: GroupView;
+    }
+    const nodes = new Map<string, ArrNode>();
+    for (const [id, v] of this.views) {
+      if (v.visible) nodes.set(id, { id, w: v.w, h: v.h, y0: v.position.y, mv: v });
+    }
+    for (const [id, gv] of this.groupViews) {
+      nodes.set(id, { id, w: gv.tileWidth, h: gv.tileHeight, y0: gv.position.y, gv });
+    }
+    if (nodes.size === 0) return;
+    appState.beginUndoable();
+
+    // Wires between visible anchors (a hidden module anchors to its group tile).
+    const anchorOf = (moduleId: string) => graph.hiddenBehind(moduleId)?.id ?? moduleId;
+    const edges: Array<[string, string]> = [];
+    const wired = new Set<string>();
+    for (const wire of graph.wires.values()) {
+      const a = anchorOf(wire.from.moduleId);
+      const b = anchorOf(wire.to.moduleId);
+      if (a === b || !nodes.has(a) || !nodes.has(b)) continue;
+      edges.push([a, b]);
+      wired.add(a);
+      wired.add(b);
+    }
+
+    // Longest-path layering; iteration cap keeps feedback loops finite.
+    const layer = new Map<string, number>();
+    for (const id of nodes.keys()) layer.set(id, 0);
+    for (let iter = 0; iter < nodes.size; iter++) {
+      let changed = false;
+      for (const [a, b] of edges) {
+        const want = layer.get(a)! + 1;
+        if (layer.get(b)! < want && want < nodes.size) {
+          layer.set(b, want);
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    const maxWired = Math.max(0, ...[...wired].map((id) => layer.get(id)!));
+    for (const id of nodes.keys()) {
+      if (!wired.has(id)) layer.set(id, maxWired + 1); // park unwired nodes
+    }
+
+    // Columns left→right; nodes stacked within a column, centered on y=0.
+    const GAP_X = 90;
+    const GAP_Y = 50;
+    const columns = new Map<number, ArrNode[]>();
+    for (const node of nodes.values()) {
+      const l = layer.get(node.id)!;
+      if (!columns.has(l)) columns.set(l, []);
+      columns.get(l)!.push(node);
+    }
+    let cx = 0;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const l of [...columns.keys()].sort((a, b) => a - b)) {
+      const col = columns.get(l)!;
+      col.sort((a, b) => a.y0 - b.y0); // keep rough vertical order stable
+      const totalH = col.reduce((s, n) => s + n.h, 0) + GAP_Y * (col.length - 1);
+      let cy = -totalH / 2;
+      const colW = Math.max(...col.map((n) => n.w));
+      for (const node of col) {
+        const nx = cx + (colW - node.w) / 2;
+        if (node.mv) {
+          node.mv.position.set(nx, cy);
+          node.mv.instance.x = nx;
+          node.mv.instance.y = cy;
+        } else if (node.gv) {
+          const dx = nx - node.gv.position.x;
+          const dy = cy - node.gv.position.y;
+          node.gv.position.set(nx, cy);
+          node.gv.group.x = nx;
+          node.gv.group.y = cy;
+          // Members travel with the collapsed tile so expand stays nearby.
+          for (const id of graph.modulesInGroup(node.gv.group.id)) {
+            const m = graph.modules.get(id);
+            if (m) {
+              m.x += dx;
+              m.y += dy;
+            }
+          }
+        }
+        minX = Math.min(minX, nx);
+        minY = Math.min(minY, cy);
+        maxX = Math.max(maxX, nx + node.w);
+        maxY = Math.max(maxY, cy + node.h);
+        cy += node.h + GAP_Y;
+      }
+      cx += colW + GAP_X;
+    }
+
+    // Re-center the view on the arranged patch.
+    const scale = this.world.scale.x;
+    this.world.position.set(
+      this.app.screen.width / 2 - ((minX + maxX) / 2) * scale,
+      this.app.screen.height / 2 - ((minY + maxY) / 2) * scale,
+    );
+  }
 
   // -- view lifecycle -------------------------------------------------------
 
@@ -262,12 +441,24 @@ export class PatchCanvas {
         this.groupViews.set(group.id, view);
       } else {
         const g = new Graphics();
+        // Frame background: double-click to collapse the group (members render in
+        // front, so clicks on a module still hit the module — only the empty
+        // frame area reaches here).
+        g.eventMode = 'static';
+        let lastTap = 0;
+        g.on('pointertap', () => {
+          const now = performance.now();
+          if (now - lastTap < 350) appState.toggleGroupCollapsed(group.id);
+          lastTap = now;
+        });
         const title = new Text({
           text: `▣ ${group.name}  ▾`,
           style: { fontSize: 12, fill: theme.textDim, fontWeight: 'bold' },
         });
         title.eventMode = 'static';
-        title.cursor = 'pointer';
+        title.cursor = 'grab';
+        // Drag the title bar to move the whole group; a click (no drag) collapses.
+        title.on('pointerdown', (e) => this.startFrameDrag(group, e));
         title.on('pointertap', () => appState.toggleGroupCollapsed(group.id));
         // Rename + recolor on the frame title row (PRD §6).
         const rename = new Text({ text: '✎', style: { fontSize: 11, fill: theme.textDim } });
@@ -298,30 +489,9 @@ export class PatchCanvas {
     }
   }
 
-  /** Member ports with wires crossing the group boundary (PRD §6). */
+  /** A group's poles: stable baseline (crossing + unconnected) ± override. */
   private boundaryPorts(group: ModuleGroup): BoundaryPort[] {
-    const graph = appState.graph;
-    const members = graph.modulesInGroup(group.id);
-    const seen = new Map<string, BoundaryPort>();
-    for (const wire of graph.wires.values()) {
-      const fromIn = members.has(wire.from.moduleId);
-      const toIn = members.has(wire.to.moduleId);
-      if (fromIn === toIn) continue;
-      const inner = fromIn ? wire.from : wire.to;
-      const direction = fromIn ? 'out' : 'in';
-      const key = `${inner.moduleId}:${inner.portId}`;
-      if (seen.has(key)) continue;
-      const spec = graph.port(inner);
-      seen.set(key, {
-        key,
-        moduleId: inner.moduleId,
-        portId: inner.portId,
-        direction,
-        type: wire.type,
-        label: spec?.label ?? inner.portId,
-      });
-    }
-    return [...seen.values()];
+    return appState.graph.groupPoles(group.id);
   }
 
   // -- wire dragging ----------------------------------------------------------
@@ -383,6 +553,60 @@ export class PatchCanvas {
 
   // -- module / group dragging -------------------------------------------------
 
+  // -- drag-to-delete trash zone ----------------------------------------------
+
+  private buildTrash(): void {
+    const { w, h } = this.trashRect;
+    const g = new Graphics()
+      .roundRect(0, 0, w, h, 12)
+      .fill({ color: 0x3a1414, alpha: 0.92 })
+      .stroke({ width: 1.5, color: 0xff5a5a, alpha: 0.8 });
+    g.label = 'bg';
+    const icon = new Text({
+      text: '🗑  drop to delete',
+      style: { fill: 0xff8a8a, fontSize: 14, fontWeight: '600' },
+    });
+    icon.anchor.set(0.5);
+    icon.position.set(w / 2, h / 2);
+    this.trash.addChild(g, icon);
+    this.trash.visible = false;
+    this.trash.eventMode = 'none';
+    this.trash.pivot.set(w / 2, h / 2); // scale/grow from center on hover
+    this.layoutTrash();
+  }
+
+  private layoutTrash(): void {
+    const { w, h } = this.trashRect;
+    const x = this.app.screen.width / 2;
+    const y = this.app.screen.height - 28 - h / 2;
+    this.trash.position.set(x, y);
+    // Store screen-space bounds for hover hit-testing.
+    this.trashRect.x = x - w / 2;
+    this.trashRect.y = y - h / 2;
+  }
+
+  private showTrash(): void {
+    this.overTrash = false;
+    this.trash.visible = true;
+    this.trash.scale.set(1);
+    (this.trash.getChildByLabel('bg') as Graphics).alpha = 1;
+  }
+
+  private hideTrash(): void {
+    this.trash.visible = false;
+    this.overTrash = false;
+  }
+
+  private updateTrashHover(global: { x: number; y: number }): void {
+    if (!this.trash.visible) return;
+    const { x, y, w, h } = this.trashRect;
+    const over = global.x >= x && global.x <= x + w && global.y >= y && global.y <= y + h;
+    if (over === this.overTrash) return;
+    this.overTrash = over;
+    this.trash.scale.set(over ? 1.18 : 1);
+    (this.trash.getChildByLabel('bg') as Graphics).alpha = over ? 1 : 0.85;
+  }
+
   private startModuleDrag(view: ModuleView, e: FederatedPointerEvent): void {
     e.stopPropagation();
     view.cancelPop(); // grabbing a still-popping module settles it immediately
@@ -395,6 +619,7 @@ export class PatchCanvas {
       appState.select({ moduleId: view.instance.id });
     }
     this.moduleLayer.setChildIndex(view, this.moduleLayer.children.length - 1);
+    this.showTrash();
   }
 
   private startGroupDrag(view: GroupView, e: FederatedPointerEvent): void {
@@ -411,6 +636,35 @@ export class PatchCanvas {
     };
     if (e.shiftKey) appState.addToSelection({ groupId: view.group.id }, true);
     else appState.select({ groupId: view.group.id });
+    this.showTrash();
+  }
+
+  /** Drag the background of an expanded frame: the whole group travels. */
+  private startFrameDrag(group: ModuleGroup, e: FederatedPointerEvent): void {
+    e.stopPropagation();
+    appState.beginUndoable();
+    const p = this.world.toLocal(e.global);
+    const moduleStart = new Map<string, { x: number; y: number }>();
+    for (const id of appState.graph.modulesInGroup(group.id)) {
+      const m = appState.graph.modules.get(id);
+      if (m) moduleStart.set(id, { x: m.x, y: m.y });
+    }
+    // Nested collapsed descendants render as their own tile — move it directly.
+    const groupStart = new Map<string, { x: number; y: number }>();
+    const collectGroups = (gid: string) => {
+      const grp = appState.graph.groups.get(gid);
+      if (!grp) return;
+      for (const child of grp.groupIds) {
+        const cg = appState.graph.groups.get(child);
+        if (cg) groupStart.set(child, { x: cg.x, y: cg.y });
+        collectGroups(child);
+      }
+    };
+    collectGroups(group.id);
+    this.frameDrag = { group, start: p, dx: 0, dy: 0, moduleStart, groupStart };
+    if (e.shiftKey) appState.addToSelection({ groupId: group.id }, true);
+    else appState.select({ groupId: group.id });
+    this.showTrash();
   }
 
   /** Keep modules from overlapping (PRD §5): push the dropped module out. */
@@ -420,8 +674,8 @@ export class PatchCanvas {
       let pushed = false;
       for (const other of this.views.values()) {
         if (other === view || !other.visible) continue;
-        const ax = view.position.x, ay = view.position.y, aw = view.def.width, ah = view.def.height;
-        const bx = other.position.x, by = other.position.y, bw = other.def.width, bh = other.def.height;
+        const ax = view.position.x, ay = view.position.y, aw = view.w, ah = view.h;
+        const bx = other.position.x, by = other.position.y, bw = other.w, bh = other.h;
         const overlapX = Math.min(ax + aw + margin, bx + bw + margin) - Math.max(ax - margin, bx - margin);
         const overlapY = Math.min(ay + ah + margin, by + bh + margin) - Math.max(ay - margin, by - margin);
         if (overlapX > 0 && overlapY > 0) {
@@ -442,10 +696,14 @@ export class PatchCanvas {
   // -- stage events ------------------------------------------------------------
 
   private onStageDown(e: FederatedPointerEvent): void {
+    if (this.pinch) return; // second finger of a pinch: ignore
     // Reaches here only when nothing interactive consumed it: empty canvas.
     const wire = this.hitTestWire(e);
     if (wire) {
+      // Grab the wire: select it and arm drag-to-trash (Q6 c2).
       appState.select({ wireId: wire.id });
+      this.wireMoveDrag = { wire };
+      this.showTrash();
       return;
     }
     if (e.shiftKey) {
@@ -462,6 +720,8 @@ export class PatchCanvas {
   }
 
   private onStageMove(e: FederatedPointerEvent): void {
+    if (this.pinch) return; // pinch owns the gesture; skip pan/drag updates
+    this.updateTrashHover(e.global);
     if (this.wireDrag) {
       this.wireDrag.cursor = this.world.toLocal(e.global);
     } else if (this.moduleDrag) {
@@ -483,6 +743,19 @@ export class PatchCanvas {
     } else if (this.groupDrag) {
       const p = this.world.toLocal(e.global);
       this.groupDrag.view.position.set(p.x - this.groupDrag.offsetX, p.y - this.groupDrag.offsetY);
+    } else if (this.frameDrag) {
+      const p = this.world.toLocal(e.global);
+      const fd = this.frameDrag;
+      fd.dx = p.x - fd.start.x;
+      fd.dy = p.y - fd.start.y;
+      for (const [id, s] of fd.moduleStart) {
+        const v = this.views.get(id);
+        if (v) v.position.set(s.x + fd.dx, s.y + fd.dy);
+      }
+      for (const [id, s] of fd.groupStart) {
+        const gv = this.groupViews.get(id);
+        if (gv) gv.position.set(s.x + fd.dx, s.y + fd.dy);
+      }
     } else if (this.panning) {
       this.world.position.set(
         this.panning.worldX + (e.global.x - this.panning.startX),
@@ -504,37 +777,71 @@ export class PatchCanvas {
   }
 
   private cancelDrags(): void {
+    // Dropped over the trash zone: delete instead of place (Q7, undoable).
+    const dropDelete = this.overTrash;
+    this.hideTrash();
+
+    if (this.wireMoveDrag) {
+      const { wire } = this.wireMoveDrag;
+      this.wireMoveDrag = null;
+      if (dropDelete) appState.disconnect(wire.id);
+    }
     if (this.wireDrag) {
       this.wireDrag = null;
       this.highlightCompatiblePorts(false);
     }
     if (this.moduleDrag) {
-      this.resolveCollisions(this.moduleDrag.view);
-      // Persist positions of every multi-dragged module.
-      for (const id of appState.selectedModuleIds) {
-        const v = this.views.get(id);
-        if (v) {
-          v.instance.x = v.position.x;
-          v.instance.y = v.position.y;
+      if (dropDelete) {
+        appState.deleteSelection();
+      } else {
+        this.resolveCollisions(this.moduleDrag.view);
+        // Persist positions of every multi-dragged module.
+        for (const id of appState.selectedModuleIds) {
+          const v = this.views.get(id);
+          if (v) {
+            v.instance.x = v.position.x;
+            v.instance.y = v.position.y;
+          }
         }
       }
       this.moduleDrag = null;
     }
     if (this.groupDrag) {
-      const { view, startX, startY } = this.groupDrag;
-      const dx = view.position.x - startX;
-      const dy = view.position.y - startY;
-      view.group.x = view.position.x;
-      view.group.y = view.position.y;
-      // Members travel with the collapsed tile so expand stays nearby.
-      for (const id of appState.graph.modulesInGroup(view.group.id)) {
-        const m = appState.graph.modules.get(id);
-        if (m) {
-          m.x += dx;
-          m.y += dy;
+      if (dropDelete) {
+        appState.deleteSelection();
+        this.groupDrag = null;
+      } else {
+        const { view, startX, startY } = this.groupDrag;
+        const dx = view.position.x - startX;
+        const dy = view.position.y - startY;
+        view.group.x = view.position.x;
+        view.group.y = view.position.y;
+        // Members travel with the collapsed tile so expand stays nearby.
+        for (const id of appState.graph.modulesInGroup(view.group.id)) {
+          const m = appState.graph.modules.get(id);
+          if (m) {
+            m.x += dx;
+            m.y += dy;
+          }
+        }
+        this.groupDrag = null;
+      }
+    }
+    if (this.frameDrag) {
+      const fd = this.frameDrag;
+      this.frameDrag = null;
+      if (dropDelete) {
+        appState.deleteSelection();
+      } else {
+        for (const [id, s] of fd.moduleStart) {
+          const m = appState.graph.modules.get(id);
+          if (m) { m.x = s.x + fd.dx; m.y = s.y + fd.dy; }
+        }
+        for (const [id, s] of fd.groupStart) {
+          const grp = appState.graph.groups.get(id);
+          if (grp) { grp.x = s.x + fd.dx; grp.y = s.y + fd.dy; }
         }
       }
-      this.groupDrag = null;
     }
     if (this.bandStart) {
       const band = this.rubberBand.getLocalBounds();
@@ -545,8 +852,8 @@ export class PatchCanvas {
           const vx = view.position.x;
           const vy = view.position.y;
           if (
-            vx + view.def.width > band.x && vx < band.x + band.width &&
-            vy + view.def.height > band.y && vy < band.y + band.height
+            vx + view.w > band.x && vx < band.x + band.width &&
+            vy + view.h > band.y && vy < band.y + band.height
           ) {
             appState.addToSelection({ moduleId: id });
           }
@@ -578,6 +885,56 @@ export class PatchCanvas {
     const wy = (py - this.world.position.y) / this.world.scale.y;
     this.world.scale.set(next);
     this.world.position.set(px - wx * next, py - wy * next);
+  }
+
+  // -- touch pinch-zoom -------------------------------------------------------
+
+  /** Distance + midpoint of the first two touches, in canvas-local coords. */
+  private touchMetrics(e: TouchEvent): { dist: number; mid: { x: number; y: number } } {
+    const rect = this.app.canvas.getBoundingClientRect();
+    const a = e.touches[0];
+    const b = e.touches[1];
+    const ax = a.clientX - rect.left, ay = a.clientY - rect.top;
+    const bx = b.clientX - rect.left, by = b.clientY - rect.top;
+    return {
+      dist: Math.hypot(bx - ax, by - ay),
+      mid: { x: (ax + bx) / 2, y: (ay + by) / 2 },
+    };
+  }
+
+  private onTouchStart(e: TouchEvent): void {
+    if (e.touches.length < 2) return;
+    // Never hijack an in-flight object grab (no mobile undo to recover from).
+    if (this.moduleDrag || this.groupDrag || this.wireDrag || this.wireMoveDrag) return;
+    e.preventDefault();
+    this.panning = null; // drop any one-finger pan; pinch takes over
+    this.bandStart = null;
+    this.pinch = this.touchMetrics(e);
+  }
+
+  private onTouchMove(e: TouchEvent): void {
+    if (!this.pinch || e.touches.length < 2) return;
+    e.preventDefault();
+    const { dist, mid } = this.touchMetrics(e);
+    const prev = this.pinch;
+    // Zoom: scale by the distance ratio, clamped to the wheel-zoom range,
+    // anchored at the current midpoint (world point under the mid stays put).
+    const factor = prev.dist > 0 ? dist / prev.dist : 1;
+    const next = Math.min(2.5, Math.max(0.2, this.world.scale.x * factor));
+    const wx = (prev.mid.x - this.world.position.x) / this.world.scale.x;
+    const wy = (prev.mid.y - this.world.position.y) / this.world.scale.y;
+    this.world.scale.set(next);
+    this.world.position.set(prev.mid.x - wx * next, prev.mid.y - wy * next);
+    // Pan: translate by how far the midpoint travelled between frames.
+    this.world.position.set(
+      this.world.position.x + (mid.x - prev.mid.x),
+      this.world.position.y + (mid.y - prev.mid.y),
+    );
+    this.pinch = { dist, mid };
+  }
+
+  private onTouchEnd(e: TouchEvent): void {
+    if (e.touches.length < 2) this.pinch = null;
   }
 
   // -- wire rendering --------------------------------------------------------
@@ -649,7 +1006,7 @@ export class PatchCanvas {
       };
       for (const id of group.moduleIds) {
         const v = this.views.get(id);
-        if (v && v.visible) include(v.position.x, v.position.y, v.def.width, v.def.height);
+        if (v && v.visible) include(v.position.x, v.position.y, v.w, v.h);
       }
       for (const gid of group.groupIds) {
         const gv = this.groupViews.get(gid);
@@ -706,6 +1063,14 @@ export class PatchCanvas {
           alpha = 0.3 + 0.6 * v;
           width = 2 + 2 * v;
         }
+      } else if (wire.type === 'color') {
+        // Color wires render in the color they currently carry.
+        const c = appState.colorValues[wire.from.moduleId];
+        if (c !== undefined) {
+          color = c;
+          alpha = 0.85;
+          width = 2.5;
+        }
       }
 
       if (wire.id === appState.selectedWireId) {
@@ -725,6 +1090,17 @@ export class PatchCanvas {
           this.strokePath(this.bezierPoints(start, end), 2.5, PORT_TYPE_COLORS[port.type], 0.9);
         }
       }
+    }
+
+    // Resolve color wires: generator output tints its destination views.
+    const liveColors = new Map<string, number>();
+    for (const wire of appState.graph.wires.values()) {
+      if (wire.type !== 'color') continue;
+      const c = appState.colorValues[wire.from.moduleId];
+      if (c !== undefined) liveColors.set(wire.to.moduleId, c);
+    }
+    for (const [id, view] of this.views) {
+      view.setLiveColor(liveColors.get(id) ?? null);
     }
 
     for (const view of this.views.values()) {

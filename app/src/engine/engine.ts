@@ -28,6 +28,7 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'sequencer',
   'arp',
   'composer',
+  'notethru',
   'lfo',
   'delay',
   'reverb',
@@ -50,6 +51,8 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'recorder',
   'voice',
   'osc',
+  'wtosc',
+  'smpl',
   'vcf',
   'vca',
   'knob',
@@ -60,6 +63,7 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'sah',
   'slew',
   'cmath',
+  'colorgen',
 ]);
 
 export type StatusListener = (status: StatusMessage) => void;
@@ -133,6 +137,11 @@ export class Engine {
 
   recordStop(moduleId: string): void {
     this.send({ type: 'recordStop', moduleId });
+  }
+
+  /** Hard silence: kill voices + zero all audio buffers (cuts feedback loops). */
+  panic(): void {
+    this.send({ type: 'panic' });
   }
 
   private send(msg: EngineMessage): void {

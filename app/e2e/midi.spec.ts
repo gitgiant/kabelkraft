@@ -15,10 +15,11 @@ test('MIDI In notes drive the synth (simulated device)', async ({ page }) => {
   const ids = await page.evaluate(() => {
     const s = window.__kk;
     const mods = [...s.graph.modules.values()];
-    const synth = mods.find((m) => m.type === 'synth')!;
+    const voice = mods.find((m) => m.type === 'voice')!;
+    const vca = mods.find((m) => m.type === 'vca')!;
     const midiIn = s.addModule('midiIn', -700, 300);
-    s.connect({ moduleId: midiIn.id, portId: 'notes' }, { moduleId: synth.id, portId: 'notes' });
-    return { midiIn: midiIn.id, synth: synth.id };
+    s.connect({ moduleId: midiIn.id, portId: 'notes' }, { moduleId: voice.id, portId: 'notes' });
+    return { midiIn: midiIn.id, synth: vca.id };
   });
 
   // Note on, channel 1, C4, velocity 100.
@@ -43,11 +44,11 @@ test('MIDI In CC feeds the control output', async ({ page }) => {
 
   const midiInId = await page.evaluate(() => {
     const s = window.__kk;
-    const synth = [...s.graph.modules.values()].find((m) => m.type === 'synth')!;
+    const vcf = [...s.graph.modules.values()].find((m) => m.type === 'vcf')!;
     const midiIn = s.addModule('midiIn', -700, 300);
     s.setParam(midiIn.id, 'cc', 74);
-    // Control fan-in is single-wire: replaces the starter LFO on pitchMod.
-    s.connect({ moduleId: midiIn.id, portId: 'cc' }, { moduleId: synth.id, portId: 'pitchMod' });
+    // Control fan-in is single-wire: replaces the rig LFO on the filter mod.
+    s.connect({ moduleId: midiIn.id, portId: 'cc' }, { moduleId: vcf.id, portId: 'mod' });
     return midiIn.id;
   });
 
@@ -62,9 +63,9 @@ test('MIDI learn maps a CC to a param and survives save/load', async ({ page }) 
 
   const synthId = await page.evaluate(() => {
     const s = window.__kk;
-    const synth = [...s.graph.modules.values()].find((m) => m.type === 'synth')!;
-    s.armMidiLearn(synth.id, 'cutoff');
-    return synth.id;
+    const vcf = [...s.graph.modules.values()].find((m) => m.type === 'vcf')!;
+    s.armMidiLearn(vcf.id, 'cutoff');
+    return vcf.id;
   });
   await expect(page.locator('.midi-learn')).toBeVisible();
 

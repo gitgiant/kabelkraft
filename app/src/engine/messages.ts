@@ -13,6 +13,7 @@ export type EngineModuleType =
   | 'sequencer'
   | 'arp'
   | 'composer'
+  | 'notethru'
   | 'lfo'
   | 'adsr'
   | 'random'
@@ -35,6 +36,8 @@ export type EngineModuleType =
   | 'recorder'
   | 'voice'
   | 'osc'
+  | 'wtosc'
+  | 'smpl'
   | 'vcf'
   | 'vca'
   | 'knob'
@@ -44,7 +47,8 @@ export type EngineModuleType =
   | 'quantizer'
   | 'sah'
   | 'slew'
-  | 'cmath';
+  | 'cmath'
+  | 'colorgen';
 
 export interface EngineModuleSnapshot {
   id: string;
@@ -133,6 +137,15 @@ export interface ControlMessage {
   value: number;
 }
 
+/**
+ * Hard silence: kill every voice and zero all stateful audio buffers (delay
+ * lines, reverb tails, feedback loops). Sent on a double-press of Stop so a
+ * runaway feedback loop can always be cut.
+ */
+export interface PanicMessage {
+  type: 'panic';
+}
+
 export type EngineMessage =
   | GraphMessage
   | ParamMessage
@@ -142,7 +155,8 @@ export type EngineMessage =
   | NoteOffMessage
   | SampleMessage
   | RecordControlMessage
-  | ControlMessage;
+  | ControlMessage
+  | PanicMessage;
 
 /** Worklet → main thread, ~30 Hz. */
 export interface MeterReading {
@@ -164,6 +178,8 @@ export interface StatusMessage {
   spectra: Record<string, number[]>;
   /** Visualizer feeds: waveform (256 pts), spectrum (64 bins dB), note pitches, control. */
   visData: Record<string, { wave: number[]; spectrum: number[]; notes: number[]; ctrl: number }>;
+  /** Live Color Gen outputs as packed 24-bit RGB per module. */
+  colorValues?: Record<string, number>;
   /** Module ids that emitted notes since the last post (for wire flashes). */
   noteActivity: string[];
   /** Transport position in beats (worklet is the clock while playing). */

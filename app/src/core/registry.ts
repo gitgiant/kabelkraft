@@ -5,7 +5,6 @@
 
 import type { ModuleDef } from './module';
 import { defaultNote } from './composer';
-import { defaultDrumPads, defaultDrumPattern } from './drumkit';
 import { ROOT_NAMES, SCALE_NAMES } from './scales';
 
 export {
@@ -37,76 +36,11 @@ const transport: ModuleDef = {
   params: [
     { id: 'tempo', label: 'Tempo', min: 20, max: 300, default: 120, unit: 'BPM', randomizable: false },
   ],
-  width: 200,
-  height: 110,
+  width: 220,
+  height: 170,
 };
 
 export const SYNTH_MODES = ['classic', 'wavetable', 'fm'] as const;
-export const FILTER_TYPES = ['off', 'LP', 'HP', 'BP'] as const;
-export const FM_ALGO_COUNT = 6;
-
-const synth: ModuleDef = {
-  type: 'synth',
-  name: 'Synth',
-  category: 'generator',
-  description:
-    'Polyphonic synthesizer with three modes (PRD §8.2): classic (2 osc + detune, PWM), ' +
-    'wavetable (loadable table, position scan), FM (4 operators, 6 algorithms). ' +
-    'Multimode filter with its own ADSR, glide, 1–16 voices.',
-  ports: [
-    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note input controlling the voices.' },
-    { id: 'pitchMod', label: 'Pitch Mod', type: 'control', direction: 'in', description: 'Pitch modulation input (vibrato); range set by PM Amt.' },
-    { id: 'cutoffMod', label: 'Cutoff Mod', type: 'control', direction: 'in', description: 'Filter cutoff modulation, ±3 octaves around the Cutoff param.' },
-    { id: 'posMod', label: 'Pos Mod', type: 'control', direction: 'in', description: 'Wavetable position (wavetable mode) / FM modulation depth scale (FM mode).' },
-    { id: 'out', label: 'Audio', type: 'audio', direction: 'out', description: 'Synthesized audio output (stereo).' },
-  ],
-  params: [
-    // -- shared -------------------------------------------------------------
-    { id: 'mode', label: 'Mode', min: 0, max: SYNTH_MODES.length - 1, default: 0, options: [...SYNTH_MODES], randomizable: false },
-    { id: 'voices', label: 'Voices', min: 1, max: 16, default: 8, randomizable: false },
-    { id: 'octave', label: 'Octave', min: -3, max: 3, default: 0, randomizable: true },
-    { id: 'coarse', label: 'Coarse', min: -12, max: 12, default: 0, unit: 'st', randomizable: true },
-    { id: 'fine', label: 'Fine', min: -100, max: 100, default: 0, unit: 'ct', randomizable: true },
-    { id: 'glide', label: 'Glide', min: 0, max: 1, default: 0, unit: 's', randomizable: true },
-    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
-    { id: 'attack', label: 'Attack', min: 0.001, max: 4, default: 0.01, unit: 's', curve: 'exp', randomizable: true },
-    { id: 'decay', label: 'Decay', min: 0.001, max: 4, default: 0.15, unit: 's', curve: 'exp', randomizable: true },
-    { id: 'sustain', label: 'Sustain', min: 0, max: 1, default: 0.7, randomizable: true },
-    { id: 'release', label: 'Release', min: 0.001, max: 8, default: 0.3, unit: 's', curve: 'exp', randomizable: true },
-    { id: 'pmAmt', label: 'PM Amt', min: 0, max: 12, default: 2, unit: 'semitones', randomizable: true },
-    // -- filter (multimode + own ADSR, PRD §8.2) ------------------------------
-    { id: 'fType', label: 'Filter', min: 0, max: FILTER_TYPES.length - 1, default: 0, options: [...FILTER_TYPES], randomizable: true },
-    { id: 'cutoff', label: 'Cutoff', min: 40, max: 16000, default: 8000, unit: 'Hz', curve: 'exp', randomizable: true },
-    { id: 'res', label: 'Res', min: 0, max: 0.95, default: 0.2, randomizable: true },
-    { id: 'fAmt', label: 'F Amt', min: -1, max: 1, default: 0, randomizable: true },
-    { id: 'fAttack', label: 'F Atk', min: 0.001, max: 4, default: 0.01, unit: 's', curve: 'exp', randomizable: true },
-    { id: 'fDecay', label: 'F Dec', min: 0.001, max: 4, default: 0.2, unit: 's', curve: 'exp', randomizable: true },
-    { id: 'fSustain', label: 'F Sus', min: 0, max: 1, default: 0.5, randomizable: true },
-    { id: 'fRelease', label: 'F Rel', min: 0.001, max: 8, default: 0.3, unit: 's', curve: 'exp', randomizable: true },
-    // -- classic: 2 osc + detune, square PWM ---------------------------------
-    { id: 'waveform', label: 'Wave 1', min: 0, max: WAVEFORMS.length - 1, default: 3, options: [...WAVEFORMS], group: 'classic', randomizable: true },
-    { id: 'wave2', label: 'Wave 2', min: 0, max: WAVEFORMS.length - 1, default: 3, options: [...WAVEFORMS], group: 'classic', randomizable: true },
-    { id: 'detune', label: 'Detune', min: 0, max: 50, default: 8, unit: 'ct', group: 'classic', randomizable: true },
-    { id: 'oscMix', label: 'Osc Mix', min: 0, max: 1, default: 0.3, group: 'classic', randomizable: true },
-    { id: 'pwm', label: 'PWM', min: 0.05, max: 0.95, default: 0.5, group: 'classic', randomizable: true },
-    // -- wavetable -----------------------------------------------------------
-    { id: 'wtPos', label: 'Position', min: 0, max: 1, default: 0, group: 'wavetable', randomizable: true },
-    // -- FM: 4 operators, algorithm select -----------------------------------
-    { id: 'algo', label: 'Algo', min: 0, max: FM_ALGO_COUNT - 1, default: 0, options: ['1', '2', '3', '4', '5', '6'], group: 'fm', randomizable: true },
-    { id: 'fmFb', label: 'Op4 FB', min: 0, max: 1, default: 0, group: 'fm', randomizable: true },
-    { id: 'r1', label: 'Ratio 1', min: 0.5, max: 12, default: 1, group: 'fm', randomizable: true },
-    { id: 'l1', label: 'Level 1', min: 0, max: 1, default: 1, group: 'fm', randomizable: true },
-    { id: 'r2', label: 'Ratio 2', min: 0.5, max: 12, default: 2, group: 'fm', randomizable: true },
-    { id: 'l2', label: 'Level 2', min: 0, max: 1, default: 0.5, group: 'fm', randomizable: true },
-    { id: 'r3', label: 'Ratio 3', min: 0.5, max: 12, default: 1, group: 'fm', randomizable: true },
-    { id: 'l3', label: 'Level 3', min: 0, max: 1, default: 0, group: 'fm', randomizable: true },
-    { id: 'r4', label: 'Ratio 4', min: 0.5, max: 12, default: 1, group: 'fm', randomizable: true },
-    { id: 'l4', label: 'Level 4', min: 0, max: 1, default: 0, group: 'fm', randomizable: true },
-  ],
-  width: 400,
-  height: 350,
-  defaultData: () => ({ sampleName: '' }),
-};
 
 export const ARP_MODES = ['up', 'down', 'up-down', 'random', 'as-played'] as const;
 export const ARP_DIVISIONS = ['1/4', '1/8', '1/16', '1/32'] as const;
@@ -129,64 +63,8 @@ const arp: ModuleDef = {
     { id: 'gate', label: 'Gate', min: 0.05, max: 1, default: 0.6, randomizable: true },
     { id: 'latch', label: 'Latch', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
   ],
-  width: 200,
-  height: 150,
-};
-
-const sampler: ModuleDef = {
-  type: 'sampler',
-  name: 'Sampler',
-  category: 'generator',
-  description:
-    'Plays a loaded sample pitched by incoming notes. Root note maps the sample to the keyboard; one-shot or loop.',
-  ports: [
-    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note input controlling sample playback.' },
-    { id: 'out', label: 'Audio', type: 'audio', direction: 'out', description: 'Sample audio output (stereo).' },
-  ],
-  params: [
-    { id: 'root', label: 'Root', min: 24, max: 96, default: 60, randomizable: false },
-    { id: 'mode', label: 'Mode', min: 0, max: 1, default: 0, options: ['one-shot', 'loop'], randomizable: false },
-    { id: 'attack', label: 'Attack', min: 0.001, max: 4, default: 0.005, unit: 's', curve: 'exp', randomizable: true },
-    { id: 'decay', label: 'Decay', min: 0.001, max: 4, default: 0.1, unit: 's', curve: 'exp', randomizable: true },
-    { id: 'sustain', label: 'Sustain', min: 0, max: 1, default: 1, randomizable: true },
-    { id: 'release', label: 'Release', min: 0.001, max: 8, default: 0.2, unit: 's', curve: 'exp', randomizable: true },
-    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
-  ],
-  width: 230,
-  height: 260,
-  defaultData: () => ({ sampleName: '' }),
-};
-
-export const DRUM_DIVISIONS = ['1/8', '1/16', '1/32'] as const;
-
-const drum: ModuleDef = {
-  type: 'drum',
-  name: 'Drum Machine',
-  category: 'generator',
-  description:
-    '16-pad drum machine with built-in step sequencer (velocity, swing) synced to the transport. ' +
-    'Click a pad to select and audition it; the step row edits the selected pad.',
-  ports: [
-    {
-      id: 'notes',
-      label: 'Notes',
-      type: 'note',
-      direction: 'in',
-      description: 'External pad triggers: notes from C1 (36) upward map to pads 1–16.',
-    },
-    { id: 'out', label: 'Audio', type: 'audio', direction: 'out', description: 'Master drum output (stereo).' },
-  ],
-  params: [
-    { id: 'division', label: 'Division', min: 0, max: DRUM_DIVISIONS.length - 1, default: 1, options: [...DRUM_DIVISIONS], randomizable: false },
-    { id: 'swing', label: 'Swing', min: 0, max: 0.6, default: 0, randomizable: true },
-    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
-  ],
-  width: 380,
-  height: 300,
-  defaultData: () => ({
-    pads: defaultDrumPads(),
-    pattern: defaultDrumPattern(),
-  }),
+  width: 240,
+  height: 170,
 };
 
 export const LFO_SHAPES = ['sine', 'triangle', 'square', 'sawtooth', 's&h'] as const;
@@ -205,8 +83,8 @@ const lfo: ModuleDef = {
     { id: 'depth', label: 'Depth', min: 0, max: 1, default: 0.5, randomizable: true },
     { id: 'offset', label: 'Offset', min: 0, max: 1, default: 0.5, randomizable: true },
   ],
-  width: 180,
-  height: 130,
+  width: 240,
+  height: 160,
 };
 
 export interface SeqStep {
@@ -233,7 +111,7 @@ const sequencer: ModuleDef = {
     { id: 'gate', label: 'Gate', min: 0.05, max: 1, default: 0.5, randomizable: true },
   ],
   width: 340,
-  height: 160,
+  height: 210,
   defaultData: () => ({
     // A minor-ish default pattern so play immediately sounds musical.
     steps: [57, 0, 60, 0, 64, 0, 60, 0, 57, 0, 60, 0, 64, 67, 64, 60].map((p) => ({
@@ -261,8 +139,8 @@ const midiIn: ModuleDef = {
     { id: 'cc', label: 'CC #', min: 0, max: 127, default: 1, randomizable: false },
     { id: 'clock', label: 'Clock sync', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
   ],
-  width: 230,
-  height: 150,
+  width: 240,
+  height: 170,
   defaultData: () => ({ deviceId: '', deviceName: 'all inputs' }),
 };
 
@@ -280,8 +158,8 @@ const midiOut: ModuleDef = {
     { id: 'channel', label: 'Channel', min: 1, max: 16, default: 1, randomizable: false },
     { id: 'cc', label: 'CC #', min: 0, max: 127, default: 1, randomizable: false },
   ],
-  width: 230,
-  height: 130,
+  width: 240,
+  height: 150,
   defaultData: () => ({ deviceId: '', deviceName: 'first output' }),
 };
 
@@ -322,7 +200,7 @@ const keyboard: ModuleDef = {
     { id: 'octave', label: 'Octave', min: -3, max: 3, default: 0, randomizable: true },
   ],
   width: 260,
-  height: 120,
+  height: 200,
 };
 
 const audioOut: ModuleDef = {
@@ -338,8 +216,8 @@ const audioOut: ModuleDef = {
     { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
     { id: 'limiter', label: 'Limiter', min: 0, max: 1, default: 1, options: ['off', 'on'], randomizable: false },
   ],
-  width: 180,
-  height: 110,
+  width: 210,
+  height: 170,
 };
 
 export const VIS_SCENES = ['scope', 'spectrum', 'particles'] as const;
@@ -361,7 +239,39 @@ const visualizer: ModuleDef = {
     { id: 'gain', label: 'Gain', min: 0.5, max: 4, default: 1.5, randomizable: true },
   ],
   width: 280,
-  height: 220,
+  height: 280,
+};
+
+export const COLOR_MODES = ['rainbow', 'pulse', 'flash', 'random', 'spectrum', 'vu', 'breathe', 'strobe'] as const;
+export const COLOR_SYNCS = ['off', '1/4', '1/2', '1 bar', '2 bars', '4 bars'] as const;
+
+const colorgen: ModuleDef = {
+  type: 'colorgen',
+  name: 'Color Gen',
+  category: 'visual',
+  description:
+    'Generates a live color from audio or a control signal — wire its Color output to a ' +
+    'Knob/Slider/XY/Button color input (or bind face elements) so the UI moves with the music. ' +
+    'Modes: rainbow (hue cycles), pulse (brightness follows level), flash (jumps to the flash ' +
+    'color on hits), random (new color per hit/cycle), spectrum (hue = spectral centroid), ' +
+    'vu (green→red by level), breathe (slow sine), strobe (hard blink). Click the swatches to ' +
+    'pick base/flash colors.',
+  ports: [
+    { id: 'in', label: 'Audio', type: 'audio', direction: 'in', description: 'Audio to react to; multiple wires are summed.' },
+    { id: 'mod', label: 'Mod', type: 'control', direction: 'in', description: 'Control input — drives level-reactive modes when no audio is wired.' },
+    { id: 'out', label: 'Color', type: 'color', direction: 'out', description: 'Live RGB color; fan out to any number of color inputs.' },
+  ],
+  params: [
+    { id: 'mode', label: 'Mode', min: 0, max: COLOR_MODES.length - 1, default: 0, options: [...COLOR_MODES], randomizable: true },
+    { id: 'rate', label: 'Rate', min: 0.05, max: 8, default: 0.4, unit: 'Hz', curve: 'exp', randomizable: true },
+    { id: 'sync', label: 'Sync', min: 0, max: COLOR_SYNCS.length - 1, default: 0, options: [...COLOR_SYNCS], randomizable: false },
+    { id: 'hue', label: 'Hue', min: 0, max: 1, default: 0.6, randomizable: true },
+    { id: 'sat', label: 'Sat', min: 0, max: 1, default: 0.85, randomizable: true },
+    { id: 'hue2', label: 'Flash Hue', min: 0, max: 1, default: 0.02, randomizable: true },
+    { id: 'depth', label: 'Depth', min: 0, max: 1, default: 1, randomizable: true },
+  ],
+  width: 260,
+  height: 290,
 };
 
 const levels: ModuleDef = {
@@ -395,8 +305,8 @@ const adsr: ModuleDef = {
     { id: 'sustain', label: 'Sustain', min: 0, max: 1, default: 0.6, randomizable: true },
     { id: 'release', label: 'Release', min: 0.001, max: 8, default: 0.3, unit: 's', curve: 'exp', randomizable: true },
   ],
-  width: 180,
-  height: 130,
+  width: 240,
+  height: 170,
 };
 
 export const RANDOM_MODES = ['walk', 's&h'] as const;
@@ -415,8 +325,8 @@ const random: ModuleDef = {
     { id: 'depth', label: 'Depth', min: 0, max: 1, default: 0.5, randomizable: true },
     { id: 'offset', label: 'Offset', min: 0, max: 1, default: 0.5, randomizable: true },
   ],
-  width: 180,
-  height: 130,
+  width: 240,
+  height: 170,
 };
 
 const recorder: ModuleDef = {
@@ -463,8 +373,8 @@ const delay: ModuleDef = {
     { id: 'mix', label: 'Mix', min: 0, max: 1, default: 0.35, randomizable: true },
     bypassParam(),
   ],
-  width: 200,
-  height: 190,
+  width: 250,
+  height: 220,
 };
 
 export const PEQ_BANDS = 6;
@@ -532,8 +442,8 @@ const mbcomp: ModuleDef = {
     ...mbBand(3, 'Hi'),
     bypassParam(),
   ],
-  width: 400,
-  height: 260,
+  width: 440,
+  height: 330,
   twoColumn: true,
 };
 
@@ -551,8 +461,8 @@ const chorus: ModuleDef = {
     { id: 'mix', label: 'Mix', min: 0, max: 1, default: 0.4, randomizable: true },
     bypassParam(),
   ],
-  width: 190,
-  height: 170,
+  width: 240,
+  height: 200,
 };
 
 const flanger: ModuleDef = {
@@ -569,8 +479,8 @@ const flanger: ModuleDef = {
     { id: 'mix', label: 'Mix', min: 0, max: 1, default: 0.5, randomizable: true },
     bypassParam(),
   ],
-  width: 190,
-  height: 170,
+  width: 240,
+  height: 200,
 };
 
 const bitcrusher: ModuleDef = {
@@ -585,8 +495,8 @@ const bitcrusher: ModuleDef = {
     { id: 'mix', label: 'Mix', min: 0, max: 1, default: 1, randomizable: true },
     bypassParam(),
   ],
-  width: 190,
-  height: 130,
+  width: 240,
+  height: 160,
 };
 
 const compressor: ModuleDef = {
@@ -610,8 +520,8 @@ const compressor: ModuleDef = {
     { id: 'makeup', label: 'Makeup', min: 0, max: 24, default: 0, unit: 'dB', randomizable: false },
     bypassParam(),
   ],
-  width: 200,
-  height: 210,
+  width: 260,
+  height: 230,
 };
 
 const limiterFx: ModuleDef = {
@@ -627,8 +537,8 @@ const limiterFx: ModuleDef = {
     { id: 'release', label: 'Release', min: 10, max: 500, default: 80, unit: 'ms', curve: 'exp', randomizable: true },
     bypassParam(),
   ],
-  width: 190,
-  height: 130,
+  width: 230,
+  height: 160,
 };
 
 export const MODULATOR_MODES = ['ring', 'AM'] as const;
@@ -650,8 +560,8 @@ const modulator: ModuleDef = {
     { id: 'mix', label: 'Mix', min: 0, max: 1, default: 1, randomizable: true },
     bypassParam(),
   ],
-  width: 190,
-  height: 150,
+  width: 240,
+  height: 160,
 };
 
 export const REVERB_ALGOS = ['room', 'hall', 'plate'] as const;
@@ -676,8 +586,8 @@ const reverb: ModuleDef = {
     { id: 'mix', label: 'Mix', min: 0, max: 1, default: 0.3, randomizable: true },
     bypassParam(),
   ],
-  width: 200,
-  height: 250,
+  width: 290,
+  height: 230,
 };
 
 const distortion: ModuleDef = {
@@ -694,8 +604,8 @@ const distortion: ModuleDef = {
     { id: 'mix', label: 'Mix', min: 0, max: 1, default: 1, randomizable: true },
     bypassParam(),
   ],
-  width: 190,
-  height: 170,
+  width: 240,
+  height: 200,
 };
 
 const eq: ModuleDef = {
@@ -713,8 +623,8 @@ const eq: ModuleDef = {
     { id: 'highFreq', label: 'High Freq', min: 2000, max: 16000, default: 8000, unit: 'Hz', curve: 'exp', randomizable: true },
     bypassParam(),
   ],
-  width: 200,
-  height: 190,
+  width: 290,
+  height: 200,
 };
 
 const mixer: ModuleDef = {
@@ -740,8 +650,8 @@ const mixer: ModuleDef = {
     { id: 'pan4', label: 'Pan 4', min: -1, max: 1, default: 0, randomizable: true },
     { id: 'master', label: 'Master', min: 0, max: 1, default: 0.8, randomizable: false },
   ],
-  width: 210,
-  height: 230,
+  width: 280,
+  height: 280,
 };
 
 // ---------------------------------------------------------------------------
@@ -769,8 +679,8 @@ const voice: ModuleDef = {
     { id: 'voices', label: 'Voices', min: 1, max: 16, default: 4, randomizable: false },
     { id: 'glide', label: 'Glide', min: 0, max: 0.5, default: 0, unit: 's', randomizable: true },
   ],
-  width: 180,
-  height: 110,
+  width: 200,
+  height: 150,
 };
 
 export const OSC_WAVES = ['sine', 'triangle', 'square', 'sawtooth', 'noise'] as const;
@@ -797,11 +707,70 @@ const osc: ModuleDef = {
     { id: 'fmAmt', label: 'FM Amt', min: 0, max: 1, default: 0, randomizable: true },
     { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
   ],
-  width: 190,
-  height: 200,
+  width: 240,
+  height: 230,
 };
 
 export const VCF_MODES = ['lowpass', 'highpass', 'bandpass', 'notch'] as const;
+
+const smpl: ModuleDef = {
+  type: 'smpl',
+  name: 'Sample Voice',
+  category: 'component',
+  description:
+    'Plays a loaded sample, pitched by incoming notes, with a built-in A/D/S/R amp envelope. ' +
+    'Root maps the sample to the keyboard; one-shot or loop. Set Voices to 1 for mono. ' +
+    'For drum kits: Trig Note fires the voice only on one note (a drum-map row), Fixed Pitch ' +
+    'plays at root regardless of pitch, and Choke cuts other Sample Voices in the same group.',
+  ports: [
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note input controlling sample playback.' },
+    audioOutPort('Sample audio output (stereo).'),
+  ],
+  params: [
+    { id: 'root', label: 'Root', min: 24, max: 96, default: 60, randomizable: false },
+    { id: 'mode', label: 'Mode', min: 0, max: 1, default: 0, options: ['one-shot', 'loop'], randomizable: false },
+    { id: 'voices', label: 'Voices', min: 1, max: 16, default: 8, randomizable: false },
+    { id: 'attack', label: 'Attack', min: 0.001, max: 4, default: 0.005, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'decay', label: 'Decay', min: 0.001, max: 4, default: 0.1, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'sustain', label: 'Sustain', min: 0, max: 1, default: 1, randomizable: true },
+    { id: 'release', label: 'Release', min: 0.001, max: 8, default: 0.2, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
+    { id: 'pan', label: 'Pan', min: -1, max: 1, default: 0, randomizable: true },
+    { id: 'trigNote', label: 'Trig Note', min: -1, max: 127, default: -1, randomizable: false },
+    { id: 'fixedPitch', label: 'Fixed Pitch', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
+    { id: 'chokeGroup', label: 'Choke', min: 0, max: 8, default: 0, randomizable: false },
+  ],
+  width: 250,
+  height: 330,
+  defaultData: () => ({ sampleName: '' }),
+};
+
+const wtosc: ModuleDef = {
+  type: 'wtosc',
+  name: 'Wavetable Osc',
+  category: 'component',
+  description:
+    'Wavetable oscillator component. Pitch input (MIDI/127) sets the frequency; Position scans ' +
+    'through the loaded table (2048-frame split), and Pos Mod modulates it. Load a sample as the ' +
+    'table, or use the built-in 4-frame default (sine/tri/saw/square). FM input phase-modulates.',
+  ports: [
+    { id: 'pitch', label: 'Pitch', type: 'control', direction: 'in', description: 'Pitch as MIDI/127. Polyphonic from a Voice module.' },
+    { id: 'posMod', label: 'Pos Mod', type: 'control', direction: 'in', description: 'Wavetable position modulation.' },
+    { id: 'fm', label: 'FM', type: 'audio', direction: 'in', description: 'Phase modulation input; depth set by the FM parameter.' },
+    audioOutPort('Wavetable oscillator output (per-voice lanes when the pitch input is polyphonic).'),
+  ],
+  params: [
+    { id: 'wtPos', label: 'Position', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'octave', label: 'Octave', min: -3, max: 3, default: 0, randomizable: true },
+    { id: 'semi', label: 'Semi', min: -12, max: 12, default: 0, unit: 'st', randomizable: true },
+    { id: 'fine', label: 'Fine', min: -100, max: 100, default: 0, unit: 'ct', randomizable: true },
+    { id: 'fmAmt', label: 'FM Amt', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
+  ],
+  width: 240,
+  height: 230,
+  defaultData: () => ({ sampleName: '' }),
+};
 
 const vcf: ModuleDef = {
   type: 'vcf',
@@ -842,8 +811,8 @@ const vca: ModuleDef = {
   params: [
     { id: 'level', label: 'Level', min: 0, max: 1, default: 1, randomizable: false },
   ],
-  width: 170,
-  height: 100,
+  width: 190,
+  height: 140,
 };
 
 // ---------------------------------------------------------------------------
@@ -855,10 +824,12 @@ const knob: ModuleDef = {
   name: 'Knob',
   category: 'controller',
   description:
-    'A knob on the canvas (PRD §8.6): drag vertically to turn, double-click to type a value. ' +
+    'A knob on the canvas (PRD §8.6): drag vertically to turn, double-click resets to the ' +
+    'default, shift-double-click types a value, ⚙ configures min/max/default (display only). ' +
     'Wire its Control output anywhere a control input exists.',
   ports: [
     { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Knob value 0.0–1.0.' },
+    { id: 'color', label: 'Color', type: 'color', direction: 'in', description: 'Live tint from a Color Gen — the knob lights up with it.' },
   ],
   params: [
     { id: 'value', label: 'Value', min: 0, max: 1, default: 0.5, randomizable: true },
@@ -874,16 +845,19 @@ const slider: ModuleDef = {
   type: 'slider',
   name: 'Slider',
   category: 'controller',
-  description: 'A fader on the canvas (PRD §8.6), vertical or horizontal. Double-click to type a value.',
+  description:
+    'A fader on the canvas (PRD §8.6), vertical or horizontal. Double-click resets to the ' +
+    'default, shift-double-click types a value, ⚙ configures min/max/default (display only).',
   ports: [
     { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Slider value 0.0–1.0.' },
+    { id: 'color', label: 'Color', type: 'color', direction: 'in', description: 'Live tint from a Color Gen — the fader lights up with it.' },
   ],
   params: [
     { id: 'value', label: 'Value', min: 0, max: 1, default: 0.5, randomizable: true },
     { id: 'orient', label: 'Orient', min: 0, max: SLIDER_ORIENTS.length - 1, default: 0, options: [...SLIDER_ORIENTS], randomizable: false },
   ],
-  width: 120,
-  height: 190,
+  width: 130,
+  height: 250,
   customFace: true,
 };
 
@@ -899,6 +873,7 @@ const xy: ModuleDef = {
   ports: [
     { id: 'x', label: 'X', type: 'control', direction: 'out', description: 'Horizontal puck position 0.0–1.0.' },
     { id: 'y', label: 'Y', type: 'control', direction: 'out', description: 'Vertical puck position 0.0–1.0 (up = 1).' },
+    { id: 'color', label: 'Color', type: 'color', direction: 'in', description: 'Live tint from a Color Gen — the puck lights up with it.' },
   ],
   params: [
     { id: 'x', label: 'X', min: 0, max: 1, default: 0.5, randomizable: true },
@@ -906,7 +881,7 @@ const xy: ModuleDef = {
     { id: 'spring', label: 'Spring', min: 0, max: 1, default: 0, options: [...XY_SPRINGS], randomizable: false },
   ],
   width: 190,
-  height: 210,
+  height: 250,
   customFace: true,
 };
 
@@ -921,13 +896,14 @@ const button: ModuleDef = {
     '— gate an ADSR, mute a mixer channel, trigger a Sample & Hold.',
   ports: [
     { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Button state: 0 or 1.' },
+    { id: 'color', label: 'Color', type: 'color', direction: 'in', description: 'Live tint from a Color Gen — the button lights up with it.' },
   ],
   params: [
     { id: 'value', label: 'State', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
     { id: 'mode', label: 'Mode', min: 0, max: BUTTON_MODES.length - 1, default: 0, options: [...BUTTON_MODES], randomizable: false },
   ],
   width: 140,
-  height: 130,
+  height: 170,
   customFace: true,
 };
 
@@ -950,8 +926,8 @@ const quantizer: ModuleDef = {
     { id: 'scale', label: 'Scale', min: 0, max: SCALE_NAMES.length - 1, default: 1, options: [...SCALE_NAMES], randomizable: true },
     { id: 'root', label: 'Root', min: 0, max: ROOT_NAMES.length - 1, default: 0, options: [...ROOT_NAMES], randomizable: true },
   ],
-  width: 170,
-  height: 110,
+  width: 200,
+  height: 150,
 };
 
 const sah: ModuleDef = {
@@ -986,8 +962,8 @@ const slew: ModuleDef = {
     { id: 'rise', label: 'Rise', min: 0, max: 2, default: 0.1, unit: 's', curve: 'exp', randomizable: true },
     { id: 'fall', label: 'Fall', min: 0, max: 2, default: 0.1, unit: 's', curve: 'exp', randomizable: true },
   ],
-  width: 170,
-  height: 110,
+  width: 200,
+  height: 150,
 };
 
 export const CMATH_MODES = ['a+b', 'a×b', 'min', 'max'] as const;
@@ -1010,15 +986,32 @@ const cmath: ModuleDef = {
     { id: 'gainB', label: 'Gain B', min: -1, max: 1, default: 1, randomizable: true },
     { id: 'offset', label: 'Offset', min: -1, max: 1, default: 0, randomizable: true },
   ],
-  width: 180,
-  height: 150,
+  width: 240,
+  height: 170,
+};
+
+const notethru: ModuleDef = {
+  type: 'notethru',
+  name: 'Note Thru',
+  category: 'component',
+  description:
+    'Note relay: passes its note input straight through to every wire on its output. ' +
+    'Use it to fan one note source out to many voices (e.g. a drum kit) from a single ' +
+    'group note-in pole.',
+  ports: [
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note stream in.' },
+    { id: 'out', label: 'Notes', type: 'note', direction: 'out', description: 'Same note stream, relayed to all connected targets.' },
+  ],
+  params: [],
+  width: 150,
+  height: 90,
 };
 
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
-    transport, sequencer, arp, composer, lfo, adsr, random, synth, sampler, drum, keyboard, midiIn, midiOut,
-    voice, osc, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath,
+    transport, sequencer, arp, composer, notethru, lfo, adsr, random, keyboard, midiIn, midiOut,
+    voice, osc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
-    mixer, recorder, audioOut, levels, visualizer,
+    mixer, recorder, audioOut, levels, visualizer, colorgen,
   ].map((d) => [d.type, d]),
 );

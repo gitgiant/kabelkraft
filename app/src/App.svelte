@@ -6,6 +6,7 @@
   import FaceEditor from './ui/FaceEditor.svelte';
   import ModulePalette from './ui/ModulePalette.svelte';
   import PianoRoll from './ui/PianoRoll.svelte';
+  import RangeConfig from './ui/RangeConfig.svelte';
   import SampleEditor from './ui/SampleEditor.svelte';
   import SampleLibrary from './ui/SampleLibrary.svelte';
   import Toolbar from './ui/Toolbar.svelte';
@@ -14,6 +15,9 @@
   import { addPolySynth } from './ui/starters';
 
   let canvasContainer: HTMLDivElement;
+
+  // Open composer panels (anchored over their modules); App owns mount/unmount.
+  let composerIds = $state<string[]>([]);
 
   // QWERTY-as-piano (PRD §8.6): A-row plays, relative to each keyboard
   // module's octave param. C4 = 'a'.
@@ -49,9 +53,13 @@
     void patchCanvas.mount(canvasContainer).then(() => addPolySynth());
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    const offComposer = appState.on('composerChanged', () => {
+      composerIds = [...appState.composerOpen];
+    });
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      offComposer();
     };
   });
 </script>
@@ -69,14 +77,19 @@
         const type = e.dataTransfer?.getData('module-type');
         if (!type) return;
         const pos = patchCanvas.worldFromClient(e.clientX, e.clientY) ?? patchCanvas.viewCenter();
-        appState.addModule(type, pos.x, pos.y);
+        const inst = appState.addModule(type, pos.x, pos.y);
+        // A fresh Composer opens its anchored piano-roll panel.
+        if (type === 'composer') appState.openComposer(inst.id);
       }}
     ></div>
     <SampleLibrary />
     <Tutorial />
   </div>
   <SampleEditor />
-  <PianoRoll />
+  {#each composerIds as id (id)}
+    <PianoRoll moduleId={id} />
+  {/each}
+  <RangeConfig />
   <VisualizerOverlay />
   <AiImport />
   <FaceEditor />
@@ -98,5 +111,6 @@
     flex: 1;
     min-width: 0;
     overflow: hidden;
+    touch-action: none; /* canvas owns all touch gestures (pinch-zoom, pan) */
   }
 </style>

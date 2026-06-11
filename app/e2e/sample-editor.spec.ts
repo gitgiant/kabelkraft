@@ -1,13 +1,13 @@
 import { expect, test } from '@playwright/test';
 
-/** Inject a sampler with ramp PCM and open the editor on it. */
+/** Inject a Sample Voice with ramp PCM and open the editor on it. */
 async function openEditorOnSampler(page: import('@playwright/test').Page): Promise<string> {
   await page.goto('/');
   await page.locator('.enable-audio').click();
   await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
   const samplerId = await page.evaluate(() => {
     const s = window.__kk;
-    const sampler = s.addModule('sampler', 0, 500);
+    const sampler = s.addModule('smpl', 0, 500);
     const n = 44100;
     const pcm = new Float32Array(n);
     for (let i = 0; i < n; i++) pcm[i] = (i / n) * 0.8;
@@ -49,21 +49,11 @@ test('cancel discards edits (non-destructive)', async ({ page }) => {
   expect(first).toBeCloseTo(0); // untouched ramp
 });
 
-test('drag-select then trim shortens a drum pad sample', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
-
-  const drumId = await page.evaluate(() => {
-    const s = window.__kk;
-    const drum = s.addModule('drum', 0, 700);
-    s.openSampleEditor(drum.id, 0); // kick pad
-    return drum.id;
-  });
-  await expect(page.locator('.sample-editor')).toBeVisible();
+test('drag-select then trim shortens a sample', async ({ page }) => {
+  const smplId = await openEditorOnSampler(page);
   const before = await page.evaluate(
-    (id) => window.__kk.samples.get(`${id}#0`)!.channels[0].length,
-    drumId,
+    (id) => window.__kk.samples.get(id)!.channels[0].length,
+    smplId,
   );
 
   // Select the middle half of the waveform by dragging across the canvas.
@@ -77,8 +67,8 @@ test('drag-select then trim shortens a drum pad sample', async ({ page }) => {
   await page.locator('.sample-editor button', { hasText: 'Save' }).click();
 
   const after = await page.evaluate(
-    (id) => window.__kk.samples.get(`${id}#0`)!.channels[0].length,
-    drumId,
+    (id) => window.__kk.samples.get(id)!.channels[0].length,
+    smplId,
   );
   expect(after).toBeLessThan(before * 0.6);
   expect(after).toBeGreaterThan(before * 0.4);

@@ -117,5 +117,5 @@ combine AI art generation, sample generation, patch generation to enable prompt 
 redraw all modules as module faces, and allow going all the way down to the atom level.
 
 UI elements color input - rainbows
-
+AI backend options - local LLM or used paid third party
 auto wire button

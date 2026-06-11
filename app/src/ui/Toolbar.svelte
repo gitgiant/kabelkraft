@@ -131,53 +131,60 @@
 </script>
 
 <div class="toolbar">
-  <span class="logo">KabelKraft</span>
-  <input class="project-name" bind:value={projectName} title="Project name" />
-  <button onclick={saveProject} title="Save project as .kkproj">Save</button>
-  <button onclick={() => fileInput.click()} title="Load a .kkproj project">Load</button>
-  <input bind:this={fileInput} type="file" accept=".kkproj,application/json" hidden onchange={loadProject} />
+  <div class="tgroup">
+    <span class="logo">KabelKraft</span>
+    <input class="project-name" bind:value={projectName} title="Project name" />
+    <button onclick={saveProject} title="Save project as .kkproj">Save</button>
+    <button onclick={() => fileInput.click()} title="Load a .kkproj project">Load</button>
+    <input bind:this={fileInput} type="file" accept=".kkproj,application/json" hidden onchange={loadProject} />
+  </div>
 
   <span class="divider"></span>
 
-  <button disabled={!canUndo} onclick={() => appState.undo()} title="Undo (Cmd/Ctrl+Z)">↶</button>
-  <button disabled={!canRedo} onclick={() => appState.redo()} title="Redo (Cmd/Ctrl+Shift+Z)">↷</button>
-  <button disabled={!canGroup} onclick={() => appState.groupSelection()} title="Group selection (Cmd/Ctrl+G). Shift-click or shift-drag to multi-select.">
-    Group
-  </button>
-  <button disabled={!selectedGroup} onclick={() => selectedGroup && appState.ungroup(selectedGroup)} title="Ungroup (Cmd/Ctrl+Shift+G)">
-    Ungroup
-  </button>
+  <div class="tgroup">
+    <button disabled={!canUndo} onclick={() => appState.undo()} title="Undo (Cmd/Ctrl+Z)">↶</button>
+    <button disabled={!canRedo} onclick={() => appState.redo()} title="Redo (Cmd/Ctrl+Shift+Z)">↷</button>
+    <button disabled={!canGroup} onclick={() => appState.groupSelection()} title="Group selection (Cmd/Ctrl+G). Shift-click or shift-drag to multi-select.">
+      Group
+    </button>
+    <button disabled={!selectedGroup} onclick={() => selectedGroup && appState.ungroup(selectedGroup)} title="Ungroup (Cmd/Ctrl+Shift+G)">
+      Ungroup
+    </button>
+    <button class="arrange" onclick={() => patchCanvas.autoArrange()} title="Auto-arrange: lay modules out left-to-right by signal flow">
+      ⇶ Arrange
+    </button>
+  </div>
 
   <span class="divider"></span>
 
-  <button class="new-face" onclick={newFace} title="New blank module face: design a control panel, then fill the group with modules">
-    ✚ Face
-  </button>
-  <button
-    class="edit-face"
-    disabled={!selectedGroup}
-    onclick={() => selectedGroup && appState.openFaceEditor(selectedGroup)}
-    title="Design this group's module face: knobs, sliders, XY pads bound to inner params"
-  >
-    🎛 Edit Face
-  </button>
-  <button
-    class="shrink"
-    disabled={!canShrink}
-    onclick={() => appState.shrinkSelection()}
-    title="Pull the expanded group back into its module face"
-  >
-    ⤡ Shrink
-  </button>
-  <button class="export-kkmod" disabled={!selectedGroup} onclick={exportKkmod} title="Export the selected group (modules + wires + face) as a reusable .kkmod">
-    ⬇ .kkmod
-  </button>
-  <button class="import-kkmod" onclick={() => kkmodInput.click()} title="Import a .kkmod custom module">⬆ .kkmod</button>
-  <input bind:this={kkmodInput} type="file" accept=".kkmod,application/json" hidden onchange={importKkmod} />
+  <div class="tgroup">
+    <button class="new-face" onclick={newFace} title="New blank module face: design a control panel, then fill the group with modules">
+      ✚ Face
+    </button>
+    <button
+      class="edit-face"
+      disabled={!selectedGroup}
+      onclick={() => selectedGroup && appState.openFaceEditor(selectedGroup)}
+      title="Design this group's module face: knobs, sliders, XY pads bound to inner params"
+    >
+      🎛 Edit Face
+    </button>
+    <button
+      class="shrink"
+      disabled={!canShrink}
+      onclick={() => appState.shrinkSelection()}
+      title="Pull the expanded group back into its module face"
+    >
+      ⤡ Shrink
+    </button>
+    <button class="export-kkmod" disabled={!selectedGroup} onclick={exportKkmod} title="Export the selected group (modules + wires + face) as a reusable .kkmod">
+      ⬇ .kkmod
+    </button>
+    <button class="import-kkmod" onclick={() => kkmodInput.click()} title="Import a .kkmod custom module">⬆ .kkmod</button>
+    <input bind:this={kkmodInput} type="file" accept=".kkmod,application/json" hidden onchange={importKkmod} />
+  </div>
 
-  <span class="spacer"></span>
-
-  <div class="transport" class:playing>
+  <div class="transport tgroup push" class:playing>
     <button onclick={() => appState.transportCommand('rewind')} title="Rewind">⏮</button>
     <button onclick={() => appState.transportCommand('play')} title="Play">▶</button>
     <button onclick={() => appState.transportCommand('pause')} title="Pause">⏸</button>
@@ -194,38 +201,38 @@
     </label>
   </div>
 
-  <span class="spacer"></span>
+  <div class="tgroup push">
+    {#if midiLearnArmed}
+      <span class="midi-learn" title="Move a control on your MIDI device to map it. Esc cancels.">
+        🎛 MIDI learn… (Esc)
+      </span>
+    {/if}
 
-  {#if midiLearnArmed}
-    <span class="midi-learn" title="Move a control on your MIDI device to map it. Esc cancels.">
-      🎛 MIDI learn… (Esc)
-    </span>
-  {/if}
+    <button
+      class="ai-toggle"
+      onclick={() => window.dispatchEvent(new CustomEvent('kk-ai-import'))}
+      title="AI patches: generate in-app with Claude or a local LLM, or copy the spec for any chatbot"
+    >
+      🤖 AI
+    </button>
+    <button
+      class="library-toggle"
+      onclick={() => window.dispatchEvent(new CustomEvent('kk-toggle-library'))}
+      title="Sample Library: browse your own folders, audition, drag onto Sampler/Drum pads"
+    >
+      🗂 Samples
+    </button>
+    <button class="theme-toggle" onclick={toggleTheme} title="Toggle dark/light theme">
+      {themeName === 'dark' ? '☀' : '🌙'}
+    </button>
+    <button onclick={startTutorial} title="Start the tutorial">?</button>
 
-  <button
-    class="ai-toggle"
-    onclick={() => window.dispatchEvent(new CustomEvent('kk-ai-import'))}
-    title="AI patches: generate in-app with Claude or a local LLM, or copy the spec for any chatbot"
-  >
-    🤖 AI
-  </button>
-  <button
-    class="library-toggle"
-    onclick={() => window.dispatchEvent(new CustomEvent('kk-toggle-library'))}
-    title="Sample Library: browse your own folders, audition, drag onto Sampler/Drum pads"
-  >
-    🗂 Samples
-  </button>
-  <button class="theme-toggle" onclick={toggleTheme} title="Toggle dark/light theme">
-    {themeName === 'dark' ? '☀' : '🌙'}
-  </button>
-  <button onclick={startTutorial} title="Start the tutorial">?</button>
-
-  {#if !audioOn}
-    <button class="enable-audio" onclick={enableAudio}>🔊 Enable Audio</button>
-  {:else}
-    <span class="audio-on" title="Audio engine running">🔊</span>
-  {/if}
+    {#if !audioOn}
+      <button class="enable-audio" onclick={enableAudio}>🔊 Enable Audio</button>
+    {:else}
+      <span class="audio-on" title="Audio engine running">🔊</span>
+    {/if}
+  </div>
 </div>
 
 {#if tutorialPrompt}
@@ -245,11 +252,23 @@
   .toolbar {
     display: flex;
     align-items: center;
-    gap: 8px;
+    flex-wrap: wrap;
+    gap: 6px 8px;
     padding: 6px 12px;
     background: var(--panel);
     border-bottom: 1px solid var(--panel-border);
     user-select: none;
+  }
+  /* Logical clusters wrap as units; never split a group across rows. */
+  .tgroup {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  /* Push to the right edge on wide screens; collapses to a normal wrap
+     when the toolbar runs out of horizontal room. */
+  .push {
+    margin-left: auto;
   }
   .logo {
     font-weight: 700;
@@ -259,9 +278,7 @@
   }
   .project-name {
     width: 160px;
-  }
-  .spacer {
-    flex: 1;
+    min-width: 90px;
   }
   .divider {
     width: 1px;
