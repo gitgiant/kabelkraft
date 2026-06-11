@@ -102,7 +102,8 @@ const sequencer: ModuleDef = {
   name: 'Sequencer',
   category: 'data',
   description:
-    'Step sequencer synced to the Master Transport. Click a step to toggle, drag vertically to set pitch.',
+    'Step sequencer synced to the Master Transport. Pitch grid: click a tile to set that ' +
+    'step, click it again to clear, drag to paint; ▲▼ shift the octave window.',
   ports: [
     { id: 'notes', label: 'Notes', type: 'note', direction: 'out', description: 'Sequenced notes while the transport plays.' },
   ],
@@ -111,7 +112,7 @@ const sequencer: ModuleDef = {
     { id: 'gate', label: 'Gate', min: 0.05, max: 1, default: 0.5, randomizable: true },
   ],
   width: 340,
-  height: 210,
+  height: 260,
   defaultData: () => ({
     // A minor-ish default pattern so play immediately sounds musical.
     steps: [57, 0, 60, 0, 64, 0, 60, 0, 57, 0, 60, 0, 64, 67, 64, 60].map((p) => ({
@@ -990,6 +991,48 @@ const cmath: ModuleDef = {
   height: 170,
 };
 
+export const MODMATRIX_SIZE = 4;
+
+const modmatrix: ModuleDef = {
+  type: 'modmatrix',
+  name: 'Mod Matrix',
+  category: 'data',
+  description:
+    '4×4 modulation matrix: routes every control input to every control output with a ' +
+    'bipolar depth per crossing (drag a cell up/down, double-click to zero). One module ' +
+    'replaces a web of Control Math blocks.',
+  ports: [
+    ...Array.from({ length: MODMATRIX_SIZE }, (_, i) => ({
+      id: `in${i + 1}`,
+      label: `In ${i + 1}`,
+      type: 'control' as const,
+      direction: 'in' as const,
+      description: `Control input ${i + 1} (matrix row).`,
+    })),
+    ...Array.from({ length: MODMATRIX_SIZE }, (_, j) => ({
+      id: `out${j + 1}`,
+      label: `Out ${j + 1}`,
+      type: 'control' as const,
+      direction: 'out' as const,
+      description: `Control output ${j + 1}: sum of inputs × their column depths, clamped 0.0–1.0.`,
+    })),
+  ],
+  params: Array.from({ length: MODMATRIX_SIZE * MODMATRIX_SIZE }, (_, k) => {
+    const i = Math.floor(k / MODMATRIX_SIZE) + 1; // input (row)
+    const j = (k % MODMATRIX_SIZE) + 1; // output (column)
+    return {
+      id: `m${i}${j}`,
+      label: `${i}→${j}`,
+      min: -1,
+      max: 1,
+      default: 0,
+      randomizable: false,
+    };
+  }),
+  width: 280,
+  height: 220,
+};
+
 const notethru: ModuleDef = {
   type: 'notethru',
   name: 'Note Thru',
@@ -1010,7 +1053,7 @@ const notethru: ModuleDef = {
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
     transport, sequencer, arp, composer, notethru, lfo, adsr, random, keyboard, midiIn, midiOut,
-    voice, osc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath,
+    voice, osc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
     mixer, recorder, audioOut, levels, visualizer, colorgen,
   ].map((d) => [d.type, d]),

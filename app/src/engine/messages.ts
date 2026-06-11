@@ -48,6 +48,7 @@ export type EngineModuleType =
   | 'sah'
   | 'slew'
   | 'cmath'
+  | 'modmatrix'
   | 'colorgen';
 
 export interface EngineModuleSnapshot {

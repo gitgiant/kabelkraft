@@ -6,3 +6,7 @@ dist/
 *.pem
 cert.pem
 key.pem
+
+# Stray test media (downloaded MIDI samples)
+*.mid
+*.midi

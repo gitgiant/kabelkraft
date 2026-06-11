@@ -406,6 +406,9 @@ export class PatchCanvas {
     this.syncViews();
   }
 
+  /** Collapsed-state snapshot from the previous sync, for toggle animation. */
+  private prevCollapsed = new Map<string, boolean>();
+
   private syncViews(): void {
     const graph = appState.graph;
 
@@ -498,6 +501,27 @@ export class PatchCanvas {
     for (const [id, view] of this.views) {
       view.visible = !graph.hiddenBehind(id);
     }
+
+    // Expand/shrink animation: pop in whatever a toggled group just revealed —
+    // the collapsed tile when shrinking, the member tiles when expanding.
+    // Works for every path (double-click, ⛶/▾ buttons, toolbar Shrink, undo).
+    for (const group of graph.groups.values()) {
+      const prev = this.prevCollapsed.get(group.id);
+      if (prev === undefined || prev === group.collapsed) continue;
+      if (graph.groupHiddenBehind(group.id)) continue;
+      if (group.collapsed) {
+        this.groupViews.get(group.id)?.popIn();
+      } else {
+        for (const id of graph.modulesInGroup(group.id)) {
+          const v = this.views.get(id);
+          if (v?.visible) v.popIn();
+        }
+        // Collapsed child groups inside the expanded frame render as tiles.
+        for (const childId of group.groupIds) this.groupViews.get(childId)?.popIn();
+      }
+    }
+    this.prevCollapsed.clear();
+    for (const group of graph.groups.values()) this.prevCollapsed.set(group.id, group.collapsed);
   }
 
   /** A group's poles: stable baseline (crossing + unconnected) ± override. */

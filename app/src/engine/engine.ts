@@ -63,6 +63,7 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'sah',
   'slew',
   'cmath',
+  'modmatrix',
   'colorgen',
 ]);
 

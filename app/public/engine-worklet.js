@@ -229,7 +229,7 @@ const SILENT_BLOCK = new Float32Array(128);
 /** Block-rate (control) modules: rendered then skipped by the audio dispatch. */
 const CONTROL_RATE_TYPES = new Set([
   'lfo', 'adsr', 'random',
-  'voice', 'knob', 'slider', 'xy', 'button', 'quantizer', 'sah', 'slew', 'cmath',
+  'voice', 'knob', 'slider', 'xy', 'button', 'quantizer', 'sah', 'slew', 'cmath', 'modmatrix',
 ]);
 
 /** Read a control value for one lane; scalars apply to every lane. */
@@ -919,6 +919,45 @@ class CmathModule {
     }
     this.controlOut.out = width > 0 ? this.buf : this.value;
     if (width > 0) this.value = this.buf[0];
+  }
+}
+
+/** 4×4 modulation matrix: out_j = clamp01(Σ_i m_ij × in_i), per lane. */
+class ModMatrixModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'modmatrix';
+    this.params = params;
+    this.controlIn = {};
+    this.controlOut = { out1: 0, out2: 0, out3: 0, out4: 0 };
+    this.value = 0;
+    this.bufs = [null, null, null, null];
+  }
+
+  render() {
+    const ins = [this.controlIn.in1, this.controlIn.in2, this.controlIn.in3, this.controlIn.in4];
+    let width = 0;
+    for (const v of ins) width = Math.max(width, cwidth(v));
+    const n = Math.max(1, width);
+    for (let j = 1; j <= 4; j++) {
+      let buf = this.bufs[j - 1];
+      if (width > 0 && (!buf || buf.length !== width)) buf = this.bufs[j - 1] = new Float32Array(width);
+      let scalar = 0;
+      for (let v = 0; v < n; v++) {
+        let y = 0;
+        for (let i = 1; i <= 4; i++) {
+          const amt = this.params[`m${i}${j}`] ?? 0;
+          if (amt === 0) continue;
+          y += amt * (cval(ins[i - 1], v) ?? 0);
+        }
+        const clamped = Math.min(1, Math.max(0, y));
+        if (width > 0) buf[v] = clamped;
+        else scalar = clamped;
+      }
+      this.controlOut[`out${j}`] = width > 0 ? buf : scalar;
+    }
+    const o1 = this.controlOut.out1;
+    this.value = typeof o1 === 'number' ? o1 : o1[0];
   }
 }
 
@@ -2439,6 +2478,8 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new SlewModule(m.id, m.params));
           } else if (m.type === 'cmath') {
             next.set(m.id, new CmathModule(m.id, m.params));
+          } else if (m.type === 'modmatrix') {
+            next.set(m.id, new ModMatrixModule(m.id, m.params));
           }
         }
         this.modules = next;
