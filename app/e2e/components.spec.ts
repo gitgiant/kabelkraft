@@ -1,5 +1,15 @@
 import { expect, test, type Page } from '@playwright/test';
-import { classicRig } from './util';
+import {
+  bootWithAudio,
+  captureErrors,
+  classicRig,
+  peakOf,
+  pollControl,
+  pollPeak,
+  pollPeakBelow,
+  pollPeakUntil,
+  settleFrames,
+} from './util';
 
 /**
  * Build-your-own-synth components (Voice/Osc/Filter/Amp + poly lanes) and
@@ -7,9 +17,7 @@ import { classicRig } from './util';
  */
 
 async function start(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
   // Classic flat rig (the shipping starter's group tile would overlap test
   // placements), silenced so meters reflect only what each test builds.
   await classicRig(page);
@@ -19,22 +27,8 @@ async function start(page: Page): Promise<void> {
   });
 }
 
-function pollPeak(page: Page, id: string, min = 0.01) {
-  return expect
-    .poll(() => page.evaluate((i) => window.__kk.meters[i]?.peak ?? 0, id), { timeout: 5000 })
-    .toBeGreaterThan(min);
-}
-
-function pollControl(page: Page, id: string) {
-  return expect.poll(
-    () => page.evaluate((i) => window.__kk.controlValues[i], id),
-    { timeout: 5000 },
-  );
-}
-
 test('voice→osc→filter→amp chain plays polyphonically and releases', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('pageerror', (err) => errors.push(String(err)));
+  const errors = captureErrors(page);
   await start(page);
 
   const ids = await page.evaluate(() => {
@@ -64,16 +58,13 @@ test('voice→osc→filter→amp chain plays polyphonically and releases', async
   }, ids);
   await pollPeak(page, ids.vca);
 
-  // Releasing both notes closes the per-voice envelopes → silence.
+  // Releasing both notes closes the per-voice envelopes → silence (the peak
+  // meter decays between status posts, so polling rides out the release tail).
   await page.evaluate((i) => {
     window.__kk.noteOff(i.kb, 'e2e-c1');
     window.__kk.noteOff(i.kb, 'e2e-c2');
   }, ids);
-  await page.waitForTimeout(800);
-  // Meters accumulate between status posts; read two consecutive frames.
-  await expect
-    .poll(() => page.evaluate((i) => window.__kk.meters[i.vca]?.peak ?? 0, ids), { timeout: 5000 })
-    .toBeLessThan(0.01);
+  await pollPeakBelow(page, ids.vca, 0.01);
 
   expect(errors).toEqual([]);
 });
@@ -96,14 +87,12 @@ test('unwired-pitch osc free-runs at C4 and the filter mod input shifts cutoff',
   });
 
   await pollPeak(page, ids.vcf, 0.001);
-  const closed = await page.evaluate((i) => window.__kk.meters[i.vcf]?.peak ?? 0, ids);
+  const closed = await peakOf(page, ids.vcf);
 
   await page.evaluate((i) => window.__kk.setParam(i.knob, 'value', 1), ids);
   await pollControl(page, ids.knob).toBeGreaterThan(0.99);
-  await page.waitForTimeout(400);
-  const open = await page.evaluate((i) => window.__kk.meters[i.vcf]?.peak ?? 0, ids);
-  // +6 octaves of cutoff on a saw passes much more energy.
-  expect(open).toBeGreaterThan(closed * 1.5);
+  // +6 octaves of cutoff on a saw passes much more energy — poll the relation.
+  await pollPeakUntil(page, ids.vcf, (peak) => peak > closed * 1.5);
 });
 
 test('controllers report live values; quantizer snaps a knob to C major', async ({ page }) => {
@@ -155,9 +144,10 @@ test('sample & hold captures on a button edge; slew glides between values', asyn
   await pollControl(page, ids.sah).toBeCloseTo(0.8, 3);
   await pollControl(page, ids.slew).toBeGreaterThan(0.75);
 
-  // Knob moves later do NOT change the held value until the next edge.
+  // Knob moves later do NOT change the held value until the next edge: once
+  // the knob's new value is live, the held output must still read ~0.8.
   await page.evaluate((i) => window.__kk.setParam(i.knob, 'value', 0.2), ids);
-  await page.waitForTimeout(300);
+  await pollControl(page, ids.knob).toBeLessThan(0.25);
   const held = await page.evaluate((i) => window.__kk.controlValues[i.sah], ids);
   expect(held).toBeGreaterThan(0.75);
 });
@@ -171,22 +161,24 @@ test('knob and XY faces respond to canvas pointer drags', async ({ page }) => {
     s.setParam(knob.id, 'value', 0.5);
     return { knob: knob.id, xy: xy.id };
   });
+  await settleFrames(page);
 
-  // clientPointFor returns the module CENTER. Knob def is 130×150, so the
-  // rotary center (w/2, TITLE_H+56) sits ~5px below the module center.
+  // The knob's rotary is its (only) param widget — anchor via the param
+  // hit-test hook rather than offsets from the tile center.
   const knobPt = await page.evaluate(
-    (i) => window.__kkCanvas.clientPointFor(i.knob), ids,
+    (i) => window.__kkCanvas.clientPointForParam(i.knob, 'value') ?? window.__kkCanvas.clientPointFor(i.knob),
+    ids,
   );
-  await page.mouse.move(knobPt.x, knobPt.y + 5);
+  await page.mouse.move(knobPt!.x, knobPt!.y + 5);
   await page.mouse.down();
-  await page.mouse.move(knobPt.x, knobPt.y - 55, { steps: 5 });
+  await page.mouse.move(knobPt!.x, knobPt!.y - 55, { steps: 5 });
   await page.mouse.up();
   const v = await page.evaluate((i) => window.__kk.graph.modules.get(i.knob)!.params.value, ids);
   expect(v).toBeGreaterThan(0.5);
 
   // XY pad (190×210, pad spans x 18–172 / y 32–176): click near top-right.
   const xyPt = await page.evaluate((i) => window.__kkCanvas.clientPointFor(i.xy), ids);
-  await page.mouse.click(xyPt.x + 60, xyPt.y - 55);
+  await page.mouse.click(xyPt!.x + 60, xyPt!.y - 55);
   const xv = await page.evaluate((i) => window.__kk.graph.modules.get(i.xy)!.params.x, ids);
   const yv = await page.evaluate((i) => window.__kk.graph.modules.get(i.xy)!.params.y, ids);
   expect(xv).toBeGreaterThan(0.6);

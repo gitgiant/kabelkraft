@@ -12,6 +12,9 @@ const origin = `${https ? 'https' : 'http'}://localhost:5199`;
 
 export default defineConfig({
   testDir: './e2e',
+  // Tests are independent (each gets a fresh page and rebuilds its own patch),
+  // so let them run in parallel within files too.
+  fullyParallel: true,
   use: {
     channel: 'chrome', // system Chrome; no browser download needed
     baseURL: origin,

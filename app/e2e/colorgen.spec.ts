@@ -1,13 +1,11 @@
 import { expect, test } from '@playwright/test';
+import { boot, bootWithAudio, captureErrors } from './util';
 
 /** Color system: Color Gen module, color wires, live UI tints (PRD: dynamic colors). */
 
 test('color gen streams changing colors and tints a wired knob', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('pageerror', (err) => errors.push(String(err)));
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  const errors = captureErrors(page);
+  await bootWithAudio(page);
 
   const ids = await page.evaluate(() => {
     const s = window.__kk;
@@ -40,8 +38,7 @@ test('color gen streams changing colors and tints a wired knob', async ({ page }
 });
 
 test('color wires are single fan-in; mismatched types rejected', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(300);
+  await boot(page);
 
   const result = await page.evaluate(() => {
     const s = window.__kk;

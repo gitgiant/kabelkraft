@@ -1,12 +1,9 @@
 import { expect, test } from '@playwright/test';
-import { classicRig } from './util';
+import { boot, bootWithAudio, captureErrors, classicRig, play, settleFrames } from './util';
 
 test('visualizer receives wave + spectrum and big view opens', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('pageerror', (err) => errors.push(String(err)));
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  const errors = captureErrors(page);
+  await bootWithAudio(page);
   const rig = await classicRig(page);
 
   const visId = await page.evaluate(({ synth, sequencer }) => {
@@ -16,7 +13,7 @@ test('visualizer receives wave + spectrum and big view opens', async ({ page }) 
     s.connect({ moduleId: sequencer, portId: 'notes' }, { moduleId: vis.id, portId: 'notes' });
     return vis.id;
   }, { synth: rig.synth, sequencer: rig.sequencer });
-  await page.locator('.transport button[title="Play"]').click();
+  await play(page);
 
   // Waveform + spectrum feeds arrive with real signal in them.
   await expect
@@ -34,7 +31,7 @@ test('visualizer receives wave + spectrum and big view opens', async ({ page }) 
   // All scenes render without errors (tile face redraws every frame).
   for (const scene of [1, 2, 0]) {
     await page.evaluate(([id, sc]) => window.__kk.setParam(id as string, 'scene', sc as number), [visId, scene] as const);
-    await page.waitForTimeout(250);
+    await settleFrames(page, 5);
   }
 
   // Big view overlay opens and closes.
@@ -47,8 +44,7 @@ test('visualizer receives wave + spectrum and big view opens', async ({ page }) 
 });
 
 test('group rename and recolor are undoable', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(400);
+  await boot(page);
 
   const result = await page.evaluate(() => {
     const s = window.__kk;
@@ -76,8 +72,7 @@ test('group rename and recolor are undoable', async ({ page }) => {
 });
 
 test('rename via the ✎ prompt on a collapsed group tile', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(400);
+  await boot(page);
   page.on('dialog', (dialog) => dialog.accept('Lead Stack'));
 
   const gid = await page.evaluate(() => {

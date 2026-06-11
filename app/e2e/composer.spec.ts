@@ -1,11 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
+import { boot, bootWithAudio, captureErrors, play, pollPeak, pollPeakBelow, stop } from './util';
 
 /** Composer piano roll: free-time clip playback, probability, editor UI. */
 
 async function setup(page: Page): Promise<{ comp: string; synth: string }> {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
   return page.evaluate(() => {
     const s = window.__kk;
     // Clean slate: composer → a gated component voice (voice→osc→vca, ADSR on
@@ -33,15 +32,11 @@ async function setup(page: Page): Promise<{ comp: string; synth: string }> {
 test('default clip plays; stop releases all composer voices', async ({ page }) => {
   const ids = await setup(page);
 
-  await page.locator('.transport button[title="Play"]').click();
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, ids.synth), { timeout: 5000 })
-    .toBeGreaterThan(0.01);
+  await play(page);
+  await pollPeak(page, ids.synth);
 
-  await page.locator('.transport button[title="Stop"]').click();
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, ids.synth), { timeout: 5000 })
-    .toBeLessThan(0.005);
+  await stop(page);
+  await pollPeakBelow(page, ids.synth, 0.005);
 });
 
 test('free-time (unquantized) notes fire; probability 0 notes never fire', async ({ page }) => {
@@ -58,10 +53,8 @@ test('free-time (unquantized) notes fire; probability 0 notes never fire', async
     s.setModuleData(comp, 'length', 4);
   }, ids.comp);
 
-  await page.locator('.transport button[title="Play"]').click();
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, ids.synth), { timeout: 5000 })
-    .toBeGreaterThan(0.01);
+  await play(page);
+  await pollPeak(page, ids.synth);
 
   // Note flashes mark composer emissions; with prob 1 + prob 0 only the
   // first note repeats. Count distinct emissions over one loop (~2 s at 120).
@@ -86,8 +79,7 @@ test('free-time (unquantized) notes fire; probability 0 notes never fire', async
 });
 
 test('piano roll editor: open, draw a note, quantize via popup, copy/paste', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('pageerror', (err) => errors.push(String(err)));
+  const errors = captureErrors(page);
   const ids = await setup(page);
 
   await page.evaluate((comp) => {
@@ -151,7 +143,7 @@ test('piano roll editor: open, draw a note, quantize via popup, copy/paste', asy
 });
 
 test('legacy pattern/song project data migrates to a clip on load', async ({ page }) => {
-  await page.goto('/');
+  await boot(page);
   const migrated = await page.evaluate(() => {
     const s = window.__kk;
     const patterns = Array.from({ length: 1 }, () =>

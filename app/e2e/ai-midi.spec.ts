@@ -1,11 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
+import { bootWithAudio, play, pollPeak, pollPeakBelow, stop } from './util';
 
 /** AI MIDI popup (piano roll), wire double-click delete, double-stop panic. */
 
 async function setupComposerRig(page: Page): Promise<{ comp: string; synth: string; voice: string }> {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
   return page.evaluate(() => {
     const s = window.__kk;
     for (const m of [...s.graph.modules.values()]) s.removeModule(m.id);
@@ -128,15 +127,11 @@ test('stop pressed twice hard-kills stuck voices (panic)', async ({ page }) => {
     s.setParam(adsr.id, 'release', 10);
   }, ids);
 
-  await page.locator('.transport button[title="Play"]').click();
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, ids.synth), { timeout: 5000 })
-    .toBeGreaterThan(0.01);
+  await play(page);
+  await pollPeak(page, ids.synth);
 
   // First stop releases notes (10 s tail keeps ringing) — second stop panics.
-  await page.locator('.transport button[title="Stop"]').click();
-  await page.locator('.transport button[title="Stop"]').click();
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, ids.synth), { timeout: 3000 })
-    .toBeLessThan(0.005);
+  await stop(page);
+  await stop(page);
+  await pollPeakBelow(page, ids.synth, 0.005, 3000);
 });

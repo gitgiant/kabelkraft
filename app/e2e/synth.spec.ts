@@ -1,25 +1,16 @@
 import { expect, test, type Page } from '@playwright/test';
-import { classicRig, type ClassicRig } from './util';
+import { bootWithAudio, classicRig, peakOf, pollPeak, type ClassicRig } from './util';
 
 async function startWithAudio(page: Page): Promise<ClassicRig> {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
   return classicRig(page);
-}
-
-async function pollPeak(page: Page, id: string): Promise<void> {
-  await expect
-    .poll(() => page.evaluate((i) => window.__kk.meters[i]?.peak ?? 0, id), { timeout: 5000 })
-    .toBeGreaterThan(0.01);
 }
 
 test('component voice chain produces audio', async ({ page }) => {
   const rig = await startWithAudio(page);
   await page.locator('.transport button[title="Play"]').click();
   await pollPeak(page, rig.synth);
-  const peak = await page.evaluate((i) => window.__kk.meters[i]?.peak ?? 0, rig.synth);
-  expect(peak).toBeLessThan(10);
+  expect(await peakOf(page, rig.synth)).toBeLessThan(10);
 });
 
 test('FM: one oscillator phase-modulates another, output stays finite', async ({ page }) => {
@@ -34,8 +25,7 @@ test('FM: one oscillator phase-modulates another, output stays finite', async ({
   }, rig);
   await page.locator('.transport button[title="Play"]').click();
   await pollPeak(page, rig.synth);
-  const peak = await page.evaluate((i) => window.__kk.meters[i]?.peak ?? 0, rig.synth);
-  expect(peak).toBeLessThan(10);
+  expect(await peakOf(page, rig.synth)).toBeLessThan(10);
 });
 
 test('filter (vcf) stays stable at extreme settings', async ({ page }) => {
@@ -48,10 +38,15 @@ test('filter (vcf) stays stable at extreme settings', async ({ page }) => {
     s.setParam(r.vcf, 'amt', 6);
   }, rig);
   await page.locator('.transport button[title="Play"]').click();
-  await page.waitForTimeout(1500);
-  const peak = await page.evaluate((i) => window.__kk.meters[i]?.peak ?? 0, rig.synth);
-  expect(Number.isFinite(peak)).toBe(true);
-  expect(peak).toBeLessThan(10); // filter must not blow up
+  // Wait until signal flows, then sample the meter a few times: every reading
+  // must stay finite and bounded (filter must not blow up).
+  await pollPeak(page, rig.synth, 0.0001);
+  for (let i = 0; i < 5; i++) {
+    const peak = await peakOf(page, rig.synth);
+    expect(Number.isFinite(peak)).toBe(true);
+    expect(peak).toBeLessThan(10);
+    await page.waitForTimeout(100);
+  }
 });
 
 test('wavetable oscillator plays the built-in table and scans position', async ({ page }) => {

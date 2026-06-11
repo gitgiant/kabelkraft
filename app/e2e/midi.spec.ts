@@ -1,10 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
-import { classicRig } from './util';
+import { bootWithAudio, classicRig } from './util';
 
 async function startWithAudio(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
   // Specs below grab synth/keyboard/lfo by type — rebuild the classic rig.
   await classicRig(page);
 }

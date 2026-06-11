@@ -1,10 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
-import { classicRig } from './util';
+import { bootWithAudio, classicRig, peakOf, pollPeak } from './util';
 
 async function startPlaying(page: Page): Promise<{ synth: string; out: string }> {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
   const rig = await classicRig(page);
   await page.locator('.transport button[title="Play"]').click();
   return { synth: rig.synth, out: rig.out };
@@ -35,9 +33,7 @@ test('new effects chained in series pass audio through', async ({ page }) => {
     return prev;
   }, { synth, out });
 
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, lastId), { timeout: 5000 })
-    .toBeGreaterThan(0.01);
+  await pollPeak(page, lastId);
 });
 
 test('compressor reduces gain and reports GR; bypass passes through', async ({ page }) => {
@@ -66,9 +62,7 @@ test('compressor reduces gain and reports GR; bypass passes through', async ({ p
   await expect
     .poll(() => page.evaluate((id) => window.__kk.gainReduction[id] ?? -1, compId), { timeout: 5000 })
     .toBe(0);
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, compId), { timeout: 5000 })
-    .toBeGreaterThan(0.01);
+  await pollPeak(page, compId);
 });
 
 test('limiter clamps output at the ceiling', async ({ page }) => {
@@ -93,6 +87,5 @@ test('limiter clamps output at the ceiling', async ({ page }) => {
     .toBeGreaterThan(0.5);
 
   // Peak must respect the −24 dB ceiling (≈0.063 linear), with envelope slack.
-  const peak = await page.evaluate((id) => window.__kk.meters[id]?.peak ?? 1, limId);
-  expect(peak).toBeLessThan(0.15);
+  expect(await peakOf(page, limId)).toBeLessThan(0.15);
 });

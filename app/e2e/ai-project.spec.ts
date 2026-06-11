@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { boot } from './util';
 
 const PROJECT = JSON.stringify({
   kind: 'kkproject',
@@ -29,8 +30,7 @@ const PROJECT = JSON.stringify({
 });
 
 test('AI project dialog: paste, replace project, nested groups + tempo land', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(400);
+  await boot(page);
 
   // Accept the replace-project confirm.
   page.on('dialog', (d) => d.accept());
@@ -68,8 +68,7 @@ test('AI project dialog: paste, replace project, nested groups + tempo land', as
 });
 
 test('bad project shows readable errors, nothing replaced', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(400);
+  await boot(page);
 
   const before = await page.evaluate(() => ({
     modules: window.__kk.graph.modules.size,
@@ -92,8 +91,7 @@ test('bad project shows readable errors, nothing replaced', async ({ page }) => 
 });
 
 test('grouping inside a group nests (encapsulation)', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(400);
+  await boot(page);
 
   const result = await page.evaluate(() => {
     const s = window.__kk;

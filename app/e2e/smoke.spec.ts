@@ -1,62 +1,56 @@
 import { expect, test } from '@playwright/test';
-import { classicRig } from './util';
+import {
+  boot,
+  bootWithAudio,
+  captureErrors,
+  classicRig,
+  play,
+  pollPeak,
+  settleFrames,
+} from './util';
 
 test('app loads with starter patch, no console errors', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') errors.push(msg.text());
-  });
-  page.on('pageerror', (err) => errors.push(String(err)));
+  const errors = captureErrors(page);
+  await boot(page);
 
-  await page.goto('/');
   await expect(page.locator('.toolbar .logo')).toHaveText('KabelKraft');
-  await expect(page.locator('.canvas-container canvas')).toBeVisible();
-  // 43 module defs + 4 starter entries.
-  await expect(page.locator('.palette .module-entry')).toHaveCount(47);
+  // Palette lists every module def plus the starter entries — counts come
+  // from the app itself so new modules don't break this test.
+  const meta = await page.evaluate(() => window.__kkMeta);
+  await expect(page.locator('.palette .module-entry')).toHaveCount(
+    meta.moduleDefCount + meta.starterCount,
+  );
 
-  // Starter patch seeds modules + wires; give the canvas a beat to mount.
-  await page.waitForTimeout(500);
+  await settleFrames(page, 10); // give async init a few frames to surface errors
   expect(errors).toEqual([]);
 });
 
 test('palette adds a module to the canvas', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(300);
+  const errors = captureErrors(page);
+  await boot(page);
+  const before = await page.evaluate(() => window.__kk.graph.modules.size);
+
   await page.locator('.module-entry:not(.starter-entry)', { hasText: 'Oscillator' }).click();
-  // No DOM representation of canvas modules; assert no errors after add.
-  const errors: string[] = [];
-  page.on('pageerror', (err) => errors.push(String(err)));
-  await page.waitForTimeout(300);
+  await expect
+    .poll(() => page.evaluate(() => window.__kk.graph.modules.size))
+    .toBeGreaterThan(before);
+
+  await settleFrames(page, 5);
   expect(errors).toEqual([]);
 });
 
 test('enable audio starts the engine worklet', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
 });
 
 test('play runs the sequencer and audio reaches the output', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
-  // Starters are now silent until a note source is wired, so build the rig
+  await bootWithAudio(page);
+  // Starters are silent until a note source is wired, so build the rig
   // (sequencer → voice → … → audioOut) explicitly.
-  await classicRig(page);
-  await page.locator('.transport button[title="Play"]').click();
+  const rig = await classicRig(page);
+  await play(page);
 
-  // The rig reaches an audioOut. Wait for signal there.
-  await expect
-    .poll(
-      () =>
-        page.evaluate(() => {
-          const s = window.__kk;
-          const audioOut = [...s.graph.modules.values()].find((m) => m.type === 'audioOut');
-          return audioOut ? (s.meters[audioOut.id]?.peak ?? 0) : -1;
-        }),
-      { timeout: 5000 },
-    )
-    .toBeGreaterThan(0.01);
+  await pollPeak(page, rig.out);
 
   // Song position advances while playing.
   const pos = await page.evaluate(() => window.__kk.transport.songPosition);
@@ -64,36 +58,20 @@ test('play runs the sequencer and audio reaches the output', async ({ page }) =>
 });
 
 test('grouping keeps audio flowing and undo restores the graph', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await classicRig(page);
-  await page.locator('.transport button[title="Play"]').click();
+  await bootWithAudio(page);
+  const rig = await classicRig(page);
+  await play(page);
 
   // Group the VCA + LFO; graph stays flat for the engine, so audio must continue.
-  await page.evaluate(() => {
+  await page.evaluate((r) => {
     const s = window.__kk;
-    const mods = [...s.graph.modules.values()];
-    const vca = mods.find((m) => m.type === 'vca')!;
-    const lfo = mods.find((m) => m.type === 'lfo')!;
-    s.addToSelection({ moduleId: vca.id });
-    s.addToSelection({ moduleId: lfo.id });
+    s.addToSelection({ moduleId: r.vca });
+    s.addToSelection({ moduleId: r.lfo });
     s.groupSelection();
-  });
+  }, rig);
 
-  const groupCount = await page.evaluate(() => window.__kk.graph.groups.size);
-  expect(groupCount).toBe(1);
-
-  await expect
-    .poll(
-      () =>
-        page.evaluate(() => {
-          const s = window.__kk;
-          const audioOut = [...s.graph.modules.values()].find((m) => m.type === 'audioOut')!;
-          return s.meters[audioOut.id]?.peak ?? 0;
-        }),
-      { timeout: 5000 },
-    )
-    .toBeGreaterThan(0.01);
+  expect(await page.evaluate(() => window.__kk.graph.groups.size)).toBe(1);
+  await pollPeak(page, rig.out);
 
   // Undo removes the group; modules and wires intact.
   const after = await page.evaluate(() => {
@@ -114,9 +92,7 @@ test('grouping keeps audio flowing and undo restores the graph', async ({ page }
 });
 
 test('sample voice plays injected PCM pitched by the sequencer', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
 
   // Starters no longer ship a sequencer; build the rig for a note source + out.
   const rig = await classicRig(page);
@@ -135,13 +111,8 @@ test('sample voice plays injected PCM pitched by the sequencer', async ({ page }
     return sampler.id;
   }, { sequencerId: rig.sequencer, outId: rig.out });
 
-  await page.locator('.transport button[title="Play"]').click();
-  await expect
-    .poll(
-      () => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, samplerId),
-      { timeout: 5000 },
-    )
-    .toBeGreaterThan(0.01);
+  await play(page);
+  await pollPeak(page, samplerId);
 
   // Save embeds the sample; loading the saved JSON restores PCM to the store.
   const roundTrip = await page.evaluate((id) => {
@@ -162,29 +133,25 @@ test('sample voice plays injected PCM pitched by the sequencer', async ({ page }
   expect(roundTrip.restoredLength).toBe(22050);
 });
 
-test('theme toggle switches to light and persists', async ({ page }) => {
-  await page.goto('/');
-  const before = await page.evaluate(() =>
-    getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),
-  );
-  expect(before).toBe('#17171c');
+test('theme toggle switches theme and persists', async ({ page }) => {
+  await boot(page);
+  const readBg = () =>
+    page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--bg').trim());
+
+  const before = await readBg();
   await page.locator('.theme-toggle').click();
-  const after = await page.evaluate(() =>
-    getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),
-  );
-  expect(after).toBe('#e9e9ef');
+  const after = await readBg();
+  // Don't pin exact hex values — only that the theme actually changed and persists.
+  expect(after).not.toBe(before);
   expect(await page.evaluate(() => localStorage.getItem('kk-theme'))).toBe('light');
-  // Persists across reload.
+
   await page.reload();
-  const reloaded = await page.evaluate(() =>
-    getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),
-  );
-  expect(reloaded).toBe('#e9e9ef');
+  expect(await readBg()).toBe(after);
   await page.evaluate(() => localStorage.removeItem('kk-theme'));
 });
 
 test('tutorial steps auto-advance and complete', async ({ page }) => {
-  await page.goto('/');
+  await boot(page);
   await page.locator('button[title="Start the tutorial"]').click();
   await page.locator('button.just-start').click(); // save prompt → skip saving
   await expect(page.locator('.tutorial-title')).toHaveText('Add an Oscillator');
@@ -207,7 +174,7 @@ test('tutorial steps auto-advance and complete', async ({ page }) => {
   await expect(page.locator('.tutorial-title')).toHaveText('Play the drone');
 
   // Step 3: the unwired oscillator drones at C4 — start the transport too.
-  await page.locator('.transport button[title="Play"]').click();
+  await play(page);
   await expect(page.locator('.tutorial-title')).toHaveText('Add a Keyboard and a Voice', { timeout: 5000 });
 
   // Step 4: add a keyboard and a voice.
@@ -241,26 +208,24 @@ test('tutorial steps auto-advance and complete', async ({ page }) => {
 });
 
 test('recorder captures playing audio and downloads a WAV', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
-  await classicRig(page);
+  await bootWithAudio(page);
+  const rig = await classicRig(page);
 
-  const recorderId = await page.evaluate(() => {
+  const recorderId = await page.evaluate((vcaId) => {
     const s = window.__kk;
-    const vca = [...s.graph.modules.values()].find((m) => m.type === 'vca')!;
     const recorder = s.addModule('recorder', 600, 400);
-    s.connect({ moduleId: vca.id, portId: 'out' }, { moduleId: recorder.id, portId: 'in' });
+    s.connect({ moduleId: vcaId, portId: 'out' }, { moduleId: recorder.id, portId: 'in' });
     return recorder.id;
-  });
+  }, rig.vca);
 
-  await page.locator('.transport button[title="Play"]').click();
+  await play(page);
   await page.evaluate((id) => window.__kk.toggleRecord(id), recorderId);
 
-  // Record ~1.5 s of the sequence.
-  await page.waitForTimeout(1500);
+  // Record until well past half a second of audio is captured.
   await expect
-    .poll(() => page.evaluate((id) => window.__kk.recordingSeconds(id), recorderId))
+    .poll(() => page.evaluate((id) => window.__kk.recordingSeconds(id), recorderId), {
+      timeout: 5000,
+    })
     .toBeGreaterThan(0.5);
 
   const downloadPromise = page.waitForEvent('download');
@@ -273,23 +238,18 @@ test('recorder captures playing audio and downloads a WAV', async ({ page }) => 
 });
 
 test('ADSR and Random feed control values', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
-  await classicRig(page);
+  await bootWithAudio(page);
+  const rig = await classicRig(page);
 
-  const ids = await page.evaluate(() => {
+  const ids = await page.evaluate((r) => {
     const s = window.__kk;
-    const mods = [...s.graph.modules.values()];
-    const sequencer = mods.find((m) => m.type === 'sequencer')!;
-    const vcf = mods.find((m) => m.type === 'vcf')!;
     const adsr = s.addModule('adsr', 0, 600);
     const random = s.addModule('random', 300, 600);
-    s.connect({ moduleId: sequencer.id, portId: 'notes' }, { moduleId: adsr.id, portId: 'notes' });
+    s.connect({ moduleId: r.sequencer, portId: 'notes' }, { moduleId: adsr.id, portId: 'notes' });
     // Control fan-in is single-wire: random replaces the rig LFO on the filter mod.
-    s.connect({ moduleId: random.id, portId: 'out' }, { moduleId: vcf.id, portId: 'mod' });
-    return { adsr: adsr.id, random: random.id, vcf: vcf.id };
-  });
+    s.connect({ moduleId: random.id, portId: 'out' }, { moduleId: r.vcf, portId: 'mod' });
+    return { adsr: adsr.id, random: random.id };
+  }, rig);
 
   // Single-wire rule: the filter mod input now has exactly one incoming wire.
   const fanIn = await page.evaluate(
@@ -297,17 +257,19 @@ test('ADSR and Random feed control values', async ({ page }) => {
       [...window.__kk.graph.wires.values()].filter(
         (w) => w.to.moduleId === vcfId && w.to.portId === 'mod',
       ).length,
-    ids.vcf,
+    rig.vcf,
   );
   expect(fanIn).toBe(1);
 
-  await page.locator('.transport button[title="Play"]').click();
+  await play(page);
   // ADSR envelope rises with sequencer gates; Random always emits a value.
   await expect
     .poll(
       () =>
         page.evaluate(
-          (i) => (window.__kk.controlValues[i.adsr] ?? 0) + (window.__kk.controlValues[i.random] !== undefined ? 1 : 0),
+          (i) =>
+            (window.__kk.controlValues[i.adsr] ?? 0) +
+            (window.__kk.controlValues[i.random] !== undefined ? 1 : 0),
           ids,
         ),
       { timeout: 5000 },
@@ -316,40 +278,24 @@ test('ADSR and Random feed control values', async ({ page }) => {
 });
 
 test('effect inserted into the chain passes audio through', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
-  await classicRig(page);
-  await page.locator('.transport button[title="Play"]').click();
+  await bootWithAudio(page);
+  const rig = await classicRig(page);
+  await play(page);
 
   // Rewire vca -> delay -> audioOut through state (graph ops, not UI drag).
-  const delayId = await page.evaluate(() => {
+  const delayId = await page.evaluate((r) => {
     const s = window.__kk;
-    const mods = [...s.graph.modules.values()];
-    const vca = mods.find((m) => m.type === 'vca')!;
-    const audioOut = mods.find((m) => m.type === 'audioOut')!;
     const direct = [...s.graph.wires.values()].find(
-      (w) => w.from.moduleId === vca.id && w.to.moduleId === audioOut.id,
+      (w) => w.from.moduleId === r.vca && w.to.moduleId === r.out,
     )!;
     s.disconnect(direct.id);
     const delay = s.addModule('delay', 0, 400);
-    s.connect({ moduleId: vca.id, portId: 'out' }, { moduleId: delay.id, portId: 'in' });
-    s.connect({ moduleId: delay.id, portId: 'out' }, { moduleId: audioOut.id, portId: 'in' });
+    s.connect({ moduleId: r.vca, portId: 'out' }, { moduleId: delay.id, portId: 'in' });
+    s.connect({ moduleId: delay.id, portId: 'out' }, { moduleId: r.out, portId: 'in' });
     return delay.id;
-  });
+  }, rig);
 
   // Audio must flow through the delay and still reach the output.
-  await expect
-    .poll(
-      () =>
-        page.evaluate((id) => {
-          const s = window.__kk;
-          const audioOut = [...s.graph.modules.values()].find((m) => m.type === 'audioOut')!;
-          const viaDelay = s.meters[id]?.peak ?? 0;
-          const atOut = s.meters[audioOut.id]?.peak ?? 0;
-          return Math.min(viaDelay, atOut);
-        }, delayId),
-      { timeout: 5000 },
-    )
-    .toBeGreaterThan(0.01);
+  await pollPeak(page, delayId);
+  await pollPeak(page, rig.out);
 });

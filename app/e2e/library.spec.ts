@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { bootWithAudio, captureErrors, settleFrames } from './util';
 
 /** Minimal valid 16-bit mono WAV so decodeAudioData accepts it. */
 function wavBuffer(freq = 440, seconds = 0.1): Buffer {
@@ -26,9 +27,7 @@ function wavBuffer(freq = 440, seconds = 0.1): Buffer {
 
 /** Open the panel and add two files through the fallback picker. */
 async function openWithFiles(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
   await page.locator('.library-toggle').click();
   await expect(page.locator('.library')).toBeVisible();
   await page.locator('.library input[type="file"]').setInputFiles([
@@ -90,11 +89,10 @@ test('drag a library row onto a Sample Voice loads the sample', async ({ page })
 });
 
 test('clicking a row auditions without errors', async ({ page }) => {
-  const errors: string[] = [];
+  const errors = captureErrors(page);
   await openWithFiles(page);
-  page.on('pageerror', (err) => errors.push(String(err)));
 
   await page.locator('.library .entry', { hasText: 'kickme' }).locator('.entry-name').click();
-  await page.waitForTimeout(400);
+  await settleFrames(page, 20); // decode + audition start are async; let errors surface
   expect(errors).toEqual([]);
 });

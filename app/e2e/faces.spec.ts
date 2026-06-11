@@ -1,5 +1,14 @@
 import { expect, test, type Page } from '@playwright/test';
-import { classicRig } from './util';
+import {
+  boot,
+  captureErrors,
+  classicRig,
+  clickUntil,
+  dragVertical,
+  faceElementCenter,
+  groupExpandButton,
+  settleFrames,
+} from './util';
 
 /**
  * Module face designer (PRD §6 macro controls as a design framework):
@@ -7,30 +16,29 @@ import { classicRig } from './util';
  */
 
 async function start(page: Page): Promise<{ synth: string; lfo: string }> {
-  await page.goto('/');
-  await page.waitForTimeout(400); // canvas mounts
+  await boot(page);
   // Classic flat rig: these specs group synth+lfo themselves and would
   // collide with the shipping starter patch's pre-made faced group.
   const rig = await classicRig(page);
-  await page.waitForTimeout(200); // let the rebuilt canvas render
   // These specs bind a "cutoff" param, so the stand-in module is the filter.
   return { synth: rig.vcf, lfo: rig.lfo };
 }
 
 /** Group synth+lfo and return the group id (selected afterwards). */
 async function makeGroup(page: Page, ids: { synth: string; lfo: string }): Promise<string> {
-  return page.evaluate((i) => {
+  const groupId = await page.evaluate((i) => {
     const s = window.__kk;
     s.clearSelection();
     s.addToSelection({ moduleId: i.synth });
     s.addToSelection({ moduleId: i.lfo });
     return s.groupSelection()!;
   }, ids);
+  await settleFrames(page); // freshly built tile needs rendered frames before hit-testing
+  return groupId;
 }
 
 test('design a face in the editor; the collapsed tile knob drives the inner param', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('pageerror', (err) => errors.push(String(err)));
+  const errors = captureErrors(page);
   const ids = await start(page);
   const groupId = await makeGroup(page, ids);
 
@@ -53,16 +61,15 @@ test('design a face in the editor; the collapsed tile knob drives the inner para
   expect(face!.elements[0].moduleId).toBe(ids.synth);
   expect(face!.elements[0].paramId).toBe('cutoff');
 
-  // Drag the knob on the collapsed tile: default knob spot is (120,70) in
-  // face-local px → knob center (155, 24+70+35) from the tile's top-left.
+  // Drag the knob on the collapsed tile — position comes from the saved face
+  // element, not hard-coded pixels.
   const before = await page.evaluate(
     (i) => window.__kk.graph.modules.get(i)!.params.cutoff, ids.synth,
   );
+  await settleFrames(page);
   const pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), groupId);
-  await page.mouse.move(pt!.x + 155, pt!.y + 129);
-  await page.mouse.down();
-  await page.mouse.move(pt!.x + 155, pt!.y + 69, { steps: 5 });
-  await page.mouse.up();
+  const knob = faceElementCenter(pt!, face!.elements[0]);
+  await dragVertical(page, knob, -60);
   const after = await page.evaluate(
     (i) => window.__kk.graph.modules.get(i)!.params.cutoff, ids.synth,
   );
@@ -74,19 +81,21 @@ test('design a face in the editor; the collapsed tile knob drives the inner para
 test('expand button opens the group; toolbar Shrink pulls it back into the face', async ({ page }) => {
   const ids = await start(page);
   const groupId = await makeGroup(page, ids);
-  await page.evaluate((g) => {
+  const faceWidth = 320;
+  await page.evaluate(([g, w]) => {
     const s = window.__kk;
-    const face = { width: 320, height: 220, grid: 10, snap: true, elements: [] };
-    s.setGroupFace(g, face);
-  }, groupId);
-
-  // ⛶ expand button sits near the right edge of the title bar (w-66).
-  await page.waitForTimeout(300); // let the rebuilt tile render before clicking
-  const pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), groupId);
-  await page.mouse.click(pt!.x + 320 - 70, pt!.y + 12);
-  await expect
-    .poll(() => page.evaluate((g) => window.__kk.graph.groups.get(g)!.collapsed, groupId))
-    .toBe(false);
+    s.setGroupFace(g as string, { width: w as number, height: 220, grid: 10, snap: true, elements: [] });
+  }, [groupId, faceWidth] as const);
+  // ⛶ expand button sits near the right edge of the title bar; retry until
+  // the freshly rebuilt tile accepts the click.
+  await clickUntil(
+    page,
+    async () => {
+      const pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), groupId);
+      return pt && groupExpandButton(pt, faceWidth);
+    },
+    () => page.evaluate((g) => !window.__kk.graph.groups.get(g)!.collapsed, groupId),
+  );
 
   // Select an inner module → toolbar Shrink collapses the group again.
   await page.evaluate((i) => window.__kk.select({ moduleId: i.synth }), ids);
@@ -96,12 +105,15 @@ test('expand button opens the group; toolbar Shrink pulls it back into the face'
     .toBe(true);
 
   // Double-tap on the title bar expands again (PRD §6 + spec).
-  await page.waitForTimeout(300); // fresh tile needs a rendered frame first
-  const pt2 = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), groupId);
-  await page.mouse.dblclick(pt2!.x + 60, pt2!.y + 12);
-  await expect
-    .poll(() => page.evaluate((g) => window.__kk.graph.groups.get(g)!.collapsed, groupId))
-    .toBe(false);
+  await clickUntil(
+    page,
+    async () => {
+      const pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), groupId);
+      return pt && { x: pt.x + 60, y: pt.y + 12 };
+    },
+    () => page.evaluate((g) => !window.__kk.graph.groups.get(g)!.collapsed, groupId),
+    { dblclick: true },
+  );
 });
 
 test('.kkmod export/import re-creates the faced group with fresh ids', async ({ page }) => {
@@ -122,6 +134,7 @@ test('.kkmod export/import re-creates the faced group with fresh ids', async ({ 
     [groupId, ids.synth] as const,
   );
 
+  const before = await page.evaluate(() => window.__kk.graph.modules.size);
   const result = await page.evaluate((g) => {
     const s = window.__kk;
     const text = s.exportFaceGroup(g);
@@ -133,6 +146,7 @@ test('.kkmod export/import re-creates the faced group with fresh ids', async ({ 
       sameId: imported.groupId === g,
       boundInside: s.graph.modulesInGroup(imported.groupId!).has(el.moduleId!),
       boundToOld: el.moduleId === g,
+      importedCount: s.graph.groups.get(imported.groupId!)!.moduleIds.length,
       moduleCount: s.graph.modules.size,
     };
   }, groupId);
@@ -140,7 +154,8 @@ test('.kkmod export/import re-creates the faced group with fresh ids', async ({ 
   expect(result.ok).toBe(true);
   expect(result.sameId).toBe(false);
   expect(result.boundInside).toBe(true);
-  expect(result.moduleCount).toBeGreaterThan(7); // starter 7 + 2 imported
+  // Import adds the group's modules as fresh copies.
+  expect(result.moduleCount).toBe(before + result.importedCount);
 });
 
 test('learn mode binds by clicking a param row on an inner module', async ({ page }) => {
@@ -154,16 +169,17 @@ test('learn mode binds by clicking a param row on an inner module', async ({ pag
   await page.locator('button', { hasText: 'Learn binding' }).click();
   await expect(page.locator('.learn-banner')).toBeVisible();
 
-  // Arming auto-expanded the group; click the LFO's Rate row (row 2).
+  // Arming auto-expanded the group; click the LFO's Rate row.
   await expect
     .poll(() => page.evaluate((g) => window.__kk.graph.groups.get(g)!.collapsed, groupId))
     .toBe(false);
-  await page.waitForTimeout(400); // freshly rebuilt tiles need a rendered frame before hit-testing
-  const ratePt = await page.evaluate(
-    (i) => window.__kkCanvas.clientPointForParam(i, 'rate'), ids.lfo,
+  // Freshly rebuilt tiles need rendered frames before hit-testing — retry
+  // the click until the learn banner reports the binding landed.
+  await clickUntil(
+    page,
+    () => page.evaluate((i) => window.__kkCanvas.clientPointForParam(i, 'rate'), ids.lfo),
+    () => page.locator('.learn-banner').isHidden(),
   );
-  await page.mouse.click(ratePt!.x, ratePt!.y); // LFO rate knob
-  await expect(page.locator('.learn-banner')).toBeHidden();
 
   await page.locator('button', { hasText: 'Save Face' }).click();
   const el = await page.evaluate(
@@ -174,8 +190,7 @@ test('learn mode binds by clicking a param row on an inner module', async ({ pag
 });
 
 test('new blank face + embedding one faced group inside another', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('pageerror', (err) => errors.push(String(err)));
+  const errors = captureErrors(page);
   const ids = await start(page);
 
   // ✚ Face creates an empty designable group and opens the editor.

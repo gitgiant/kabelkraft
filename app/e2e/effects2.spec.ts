@@ -1,10 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
-import { classicRig } from './util';
+import { bootWithAudio, captureErrors, classicRig, pollPeak } from './util';
 
 async function insertFx(page: Page, type: string): Promise<{ fx: string; synth: string }> {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
   const rig = await classicRig(page);
   const ids = await page.evaluate(({ fxType, synth, out }) => {
     const s = window.__kk;
@@ -22,8 +20,7 @@ async function insertFx(page: Page, type: string): Promise<{ fx: string; synth: 
 }
 
 test('parametric EQ passes audio and streams a spectrum', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('pageerror', (err) => errors.push(String(err)));
+  const errors = captureErrors(page);
   const { fx } = await insertFx(page, 'peq');
 
   // A drastic curve still passes audio (filters stay stable).
@@ -34,9 +31,7 @@ test('parametric EQ passes audio and streams a spectrum', async ({ page }) => {
     s.setParam(id, 'b6gain', -18);
   }, fx);
 
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, fx), { timeout: 5000 })
-    .toBeGreaterThan(0.005);
+  await pollPeak(page, fx, 0.005);
 
   // Live spectrum arrives: 64 bins with signal energy somewhere.
   await expect
@@ -68,9 +63,7 @@ test('multiband compressor compresses and solos a band', async ({ page }) => {
 
   // Solo the mid band: audio keeps flowing.
   await page.evaluate((id) => window.__kk.setParam(id, 's2', 1), fx);
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, fx), { timeout: 5000 })
-    .toBeGreaterThan(0.005);
+  await pollPeak(page, fx, 0.005);
 });
 
 test('delay tempo-sync + ping-pong and reverb hall pass audio', async ({ page }) => {
@@ -81,9 +74,7 @@ test('delay tempo-sync + ping-pong and reverb hall pass audio', async ({ page })
     s.setParam(id, 'pingpong', 1);
     s.setParam(id, 'tone', 2000);
   }, delayId);
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, delayId), { timeout: 5000 })
-    .toBeGreaterThan(0.01);
+  await pollPeak(page, delayId);
 
   // Swap in an upgraded reverb (hall, pre-delay, cuts) behind the delay.
   const reverbOk = await page.evaluate((id) => {
@@ -104,7 +95,5 @@ test('delay tempo-sync + ping-pong and reverb hall pass audio', async ({ page })
     return rev.id;
   }, delayId);
 
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, reverbOk), { timeout: 5000 })
-    .toBeGreaterThan(0.01);
+  await pollPeak(page, reverbOk);
 });

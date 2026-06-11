@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { boot, bootWithAudio, play } from './util';
 
 const PATCH = JSON.stringify({
   kind: 'kkgroup',
@@ -18,9 +19,7 @@ const PATCH = JSON.stringify({
 });
 
 test('AI import dialog: paste, import as group, audio flows', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
 
   const before = await page.evaluate(() => ({
     modules: window.__kk.graph.modules.size,
@@ -49,7 +48,7 @@ test('AI import dialog: paste, import as group, audio flows', async ({ page }) =
   expect(after.selected).toBe(true);
 
   // The imported patch makes sound on its own wiring.
-  await page.locator('.transport button[title="Play"]').click();
+  await play(page);
   await expect
     .poll(
       () =>
@@ -76,8 +75,7 @@ test('AI import dialog: paste, import as group, audio flows', async ({ page }) =
 });
 
 test('AI import dialog: bad patch shows readable errors, nothing inserted', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(400);
+  await boot(page);
 
   const before = await page.evaluate(() => window.__kk.graph.modules.size);
   await page.locator('.ai-toggle').click();
@@ -93,8 +91,7 @@ test('AI import dialog: bad patch shows readable errors, nothing inserted', asyn
 });
 
 test('markdown chatbot reply with a json block imports too', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(400);
+  await boot(page);
 
   const ok = await page.evaluate((patch) => {
     const reply = 'Sure! Here is your patch:\n```json\n' + patch + '\n```\nHave fun!';

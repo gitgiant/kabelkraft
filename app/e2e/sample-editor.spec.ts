@@ -1,10 +1,9 @@
 import { expect, test } from '@playwright/test';
+import { bootWithAudio } from './util';
 
 /** Inject a Sample Voice with ramp PCM and open the editor on it. */
 async function openEditorOnSampler(page: import('@playwright/test').Page): Promise<string> {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
   const samplerId = await page.evaluate(() => {
     const s = window.__kk;
     const sampler = s.addModule('smpl', 0, 500);

@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { bootWithAudio, play, pollPeak } from './util';
 
 /**
  * Drums are now built from components: a Composer (piano-roll rows = drum map)
@@ -12,9 +13,7 @@ const click = () => {
 };
 
 test('drum kit: composer drives sample voices to the output', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
 
   const ids = await page.evaluate(() => {
     const s = window.__kk;
@@ -46,16 +45,12 @@ test('drum kit: composer drives sample voices to the output', async ({ page }) =
     return { kick: mk(700, 36), snare: mk(850, 37), out: out.id };
   });
 
-  await page.locator('.transport button[title="Play"]').click();
-  await expect
-    .poll(() => page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, ids.out), { timeout: 5000 })
-    .toBeGreaterThan(0.01);
+  await play(page);
+  await pollPeak(page, ids.out);
 });
 
 test('sample voice: PCM is keyed by module id and survives save/load + undo', async ({ page }) => {
-  await page.goto('/');
-  await page.locator('.enable-audio').click();
-  await expect(page.locator('.audio-on')).toBeVisible({ timeout: 3000 });
+  await bootWithAudio(page);
 
   const smplId = await page.evaluate((pcm) => {
     const s = window.__kk;
