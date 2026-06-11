@@ -42,8 +42,41 @@
     e.dataTransfer?.setData('module-type', type);
     if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy';
   }
+
+  // -- Drag-to-hide: grip on the right edge slides the palette away ---------
+
+  const FULL_WIDTH = 170;
+  let paletteWidth = $state(FULL_WIDTH);
+  let dragging = $state(false);
+  let dragStartX = 0;
+  let dragStartWidth = 0;
+  let dragMoved = false;
+
+  function onGripDown(e: PointerEvent) {
+    dragging = true;
+    dragMoved = false;
+    dragStartX = e.clientX;
+    dragStartWidth = paletteWidth;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function onGripMove(e: PointerEvent) {
+    if (!dragging) return;
+    const dx = e.clientX - dragStartX;
+    if (Math.abs(dx) > 3) dragMoved = true;
+    paletteWidth = Math.max(0, Math.min(FULL_WIDTH, dragStartWidth + dx));
+  }
+
+  function onGripUp() {
+    if (!dragging) return;
+    dragging = false;
+    if (!dragMoved) paletteWidth = paletteWidth > 0 ? 0 : FULL_WIDTH;
+    else paletteWidth = paletteWidth < FULL_WIDTH / 2 ? 0 : FULL_WIDTH;
+  }
 </script>
 
+<div class="palette-outer">
+<div class="palette-clip" class:dragging style="width: {paletteWidth}px">
 <div class="palette">
   <div class="palette-title">Modules</div>
   <input
@@ -94,15 +127,58 @@
     <div class="no-match">No modules match "{query}".</div>
   {/if}
 </div>
+</div>
+<button
+  class="palette-grip"
+  title="Drag or click to hide/show the module palette"
+  aria-label="Hide or show module palette"
+  onpointerdown={onGripDown}
+  onpointermove={onGripMove}
+  onpointerup={onGripUp}
+  onpointercancel={onGripUp}
+>
+  {paletteWidth === 0 ? '›' : '‹'}
+</button>
+</div>
 
 <style>
+  .palette-outer {
+    display: flex;
+    flex-shrink: 0;
+    min-height: 0;
+  }
+  .palette-clip {
+    overflow: hidden;
+    transition: width 0.15s ease;
+  }
+  .palette-clip.dragging {
+    transition: none;
+  }
   .palette {
     width: 170px;
+    height: 100%;
     background: var(--panel);
     border-right: 1px solid var(--panel-border);
     padding: 10px;
     overflow-y: auto;
     user-select: none;
+  }
+  .palette-grip {
+    width: 14px;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    border-right: 1px solid var(--panel-border);
+    background: var(--panel);
+    color: var(--text-dim);
+    font-size: 10px;
+    cursor: ew-resize;
+    touch-action: none;
+    user-select: none;
+  }
+  .palette-grip:hover {
+    background: var(--control);
+    color: var(--text);
   }
   .palette-title {
     font-weight: 700;

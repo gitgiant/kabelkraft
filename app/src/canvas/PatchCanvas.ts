@@ -116,6 +116,12 @@ export class PatchCanvas {
 
     appState.on('graphChanged', () => this.syncViews());
     appState.on('projectLoaded', () => this.rebuildAll());
+    appState.on('composerChanged', () => {
+      // Open/shrink resizes the composer tile (state mutates instance.w/h).
+      for (const v of this.views.values()) {
+        if (v.instance.type === 'composer') v.rebuild();
+      }
+    });
     appState.on('paramChanged', () => {
       // A synth whose mode changed needs a fresh face (mode-scoped params).
       let rebuilt = false;
@@ -204,7 +210,7 @@ export class PatchCanvas {
    */
   clientRectFor(
     moduleId: string,
-  ): { left: number; top: number; width: number; height: number; onScreen: boolean } | null {
+  ): { left: number; top: number; width: number; height: number; scale: number; onScreen: boolean } | null {
     const view = this.views.get(moduleId);
     if (!view || !view.visible) return null;
     const rect = this.app.canvas.getBoundingClientRect();
@@ -215,7 +221,7 @@ export class PatchCanvas {
     const height = view.h * s;
     const onScreen =
       left + width > rect.left && left < rect.right && top + height > rect.top && top < rect.bottom;
-    return { left, top, width, height, onScreen };
+    return { left, top, width, height, scale: s, onScreen };
   }
 
   /** Client-space center of a param's control widget (e2e + tools). */
@@ -239,6 +245,11 @@ export class PatchCanvas {
       x: rect.left + this.world.position.x + view.position.x * this.world.scale.x,
       y: rect.top + this.world.position.y + view.position.y * this.world.scale.y,
     };
+  }
+
+  /** Pan the view by client-space pixels (e2e + tools). */
+  panBy(dx: number, dy: number): void {
+    this.world.position.set(this.world.position.x + dx, this.world.position.y + dy);
   }
 
   /** World coordinates of the current view center — used to place new modules. */
@@ -695,11 +706,21 @@ export class PatchCanvas {
 
   // -- stage events ------------------------------------------------------------
 
+  private lastWireTap = { id: '', at: 0 };
+
   private onStageDown(e: FederatedPointerEvent): void {
     if (this.pinch) return; // second finger of a pinch: ignore
     // Reaches here only when nothing interactive consumed it: empty canvas.
     const wire = this.hitTestWire(e);
     if (wire) {
+      // Double-click deletes the wire (single click selects + arms drag-to-trash).
+      const now = performance.now();
+      if (this.lastWireTap.id === wire.id && now - this.lastWireTap.at < 350) {
+        this.lastWireTap = { id: '', at: 0 };
+        appState.disconnect(wire.id);
+        return;
+      }
+      this.lastWireTap = { id: wire.id, at: now };
       // Grab the wire: select it and arm drag-to-trash (Q6 c2).
       appState.select({ wireId: wire.id });
       this.wireMoveDrag = { wire };

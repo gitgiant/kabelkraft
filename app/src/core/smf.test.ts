@@ -4,7 +4,8 @@ import { parseSmf, writeSmf } from './smf';
 
 function roundTrip(notes: ComposerNote[], lengthBeats = 8, tempo = 120) {
   const bytes = writeSmf(notes, lengthBeats, tempo);
-  return parseSmf(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  const copy = new Uint8Array(bytes); // fresh, non-shared ArrayBuffer
+  return parseSmf(copy.buffer as ArrayBuffer);
 }
 
 describe('SMF round-trip', () => {

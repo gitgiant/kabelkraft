@@ -10,6 +10,7 @@ import { MODULE_DEFS } from './core/registry';
 import { decodeSample, encodeSample, parseSampleKey, sampleKey, type SampleData } from './core/samples';
 import { deserializeProject, serializeProject } from './core/serialize';
 import { parseKkGroup } from './core/aiimport';
+import { parseKkProject, type KkProjectGroup } from './core/aiproject';
 import {
   defaultFace,
   exportKkmod,
@@ -73,23 +74,47 @@ export class AppState {
     this.emit('visualizerChanged');
   }
 
-  /** Composer modules with an anchored piano-roll panel open. */
+  /** Composer modules with the piano-roll editor open (module grown in place). */
   composerOpen = new Set<string>();
   /** Topmost/active panel — receives keyboard shortcuts, raised z-order. */
   composerActive: string | null = null;
+  /** Compact tile sizes remembered across open ↔ shrink (per module). */
+  private composerShrunkSize = new Map<string, { w?: number; h?: number }>();
+
+  /** Tile size while the piano roll is open (world px, within def max clamp). */
+  static readonly COMPOSER_OPEN_W = 720;
+  static readonly COMPOSER_OPEN_H = 480;
 
   openComposer(moduleId: string): void {
-    if (this.graph.modules.get(moduleId)?.type !== 'composer') return;
+    const mod = this.graph.modules.get(moduleId);
+    if (mod?.type !== 'composer') return;
+    if (!this.composerOpen.has(moduleId)) {
+      // Grow the tile so the roll has room; remember the compact size.
+      this.composerShrunkSize.set(moduleId, { w: mod.w, h: mod.h });
+      mod.w = Math.max(mod.w ?? 0, AppState.COMPOSER_OPEN_W);
+      mod.h = Math.max(mod.h ?? 0, AppState.COMPOSER_OPEN_H);
+    }
     this.composerOpen.add(moduleId);
     this.composerActive = moduleId;
     this.emit('composerChanged');
   }
 
-  /** Close one panel (or all when no id is given). */
+  /** Shrink one editor back to the compact tile (or all when no id given). */
   closeComposer(moduleId?: string): void {
-    if (moduleId === undefined) this.composerOpen.clear();
-    else this.composerOpen.delete(moduleId);
-    if (this.composerActive === moduleId || moduleId === undefined) {
+    const ids = moduleId === undefined ? [...this.composerOpen] : [moduleId];
+    for (const id of ids) {
+      if (!this.composerOpen.delete(id)) continue;
+      const mod = this.graph.modules.get(id);
+      const prev = this.composerShrunkSize.get(id);
+      this.composerShrunkSize.delete(id);
+      if (mod && prev) {
+        if (prev.w === undefined) delete mod.w;
+        else mod.w = prev.w;
+        if (prev.h === undefined) delete mod.h;
+        else mod.h = prev.h;
+      }
+    }
+    if (moduleId === undefined || this.composerActive === moduleId) {
       this.composerActive = [...this.composerOpen][this.composerOpen.size - 1] ?? null;
     }
     this.emit('composerChanged');
@@ -450,14 +475,18 @@ export class AppState {
 
   /** Group the current multi-selection. Returns the group, or null if <2 items. */
   groupSelection(): string | null {
-    // Only top-level items (no parent group) can be grouped together.
-    const moduleIds = [...this.selectedModuleIds].filter(
-      (id) => this.graph.modules.has(id) && !this.graph.groupOfModule(id),
-    );
-    const groupIds = [...this.selectedGroupIds].filter(
-      (id) => this.graph.groups.has(id) && !this.graph.parentGroup(id),
-    );
+    // Items must share one parent context — all top-level, or all directly
+    // inside the SAME group. The new group nests inside that parent
+    // (encapsulation: groups can contain groups).
+    const moduleIds = [...this.selectedModuleIds].filter((id) => this.graph.modules.has(id));
+    const groupIds = [...this.selectedGroupIds].filter((id) => this.graph.groups.has(id));
     if (moduleIds.length + groupIds.length < 2) return null;
+    const parents = new Set<string | null>([
+      ...moduleIds.map((id) => this.graph.groupOfModule(id)?.id ?? null),
+      ...groupIds.map((id) => this.graph.parentGroup(id)?.id ?? null),
+    ]);
+    if (parents.size !== 1) return null; // can't group across boundaries
+    const parentId = [...parents][0];
     this.beginUndoable();
     // Collapsed tile lands at the centroid of its members.
     let cx = 0;
@@ -474,6 +503,13 @@ export class AppState {
     }
     const n = moduleIds.length + groupIds.length;
     const group = this.graph.createGroup(`Group ${this.graph.groups.size + 1}`, moduleIds, groupIds, cx / n, cy / n);
+    // Members leave their old parent; the new group takes their place in it.
+    if (parentId) {
+      const parent = this.graph.groups.get(parentId)!;
+      parent.moduleIds = parent.moduleIds.filter((id) => !moduleIds.includes(id));
+      parent.groupIds = parent.groupIds.filter((id) => !groupIds.includes(id));
+      parent.groupIds.push(group.id);
+    }
     this.clearSelection();
     this.selectedGroupIds.add(group.id);
     this.emit('graphChanged');
@@ -819,6 +855,97 @@ export class AppState {
     this.emit('graphChanged');
     this.emit('selectionChanged');
     return { ok: true, errors: [], warnings, groupId: group.id, moduleIds: [...idMap.values()] };
+  }
+
+  // -- AI project import (whole-project generation) ---------------------------
+
+  /**
+   * Validate an AI-written .kkproject and REPLACE the current project with it:
+   * fresh graph, nested groups, tempo, composer clips riding in module data.
+   * Structural errors abort with nothing touched. One undo step restores the
+   * previous project (sample PCM stays in this.samples, so undo re-links it).
+   */
+  importAiProject(text: string): { ok: boolean; errors: string[]; warnings: string[] } {
+    const result = parseKkProject(text, MODULE_DEFS);
+    if (!result.ok || !result.project) {
+      return { ok: false, errors: result.errors, warnings: result.warnings };
+    }
+    const project = result.project;
+    const warnings = [...result.warnings];
+    this.beginUndoable();
+
+    this.graph = new Graph(MODULE_DEFS);
+
+    // AI positions are hints: use them when they spread out, otherwise grid.
+    const xs = project.modules.map((m) => m.x);
+    const ys = project.modules.map((m) => m.y);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    const useHints = Math.max(...xs) - minX + (Math.max(...ys) - minY) > 100;
+
+    const idMap = new Map<string, string>();
+    project.modules.forEach((m, i) => {
+      const pos = useHints
+        ? { x: m.x - minX, y: m.y - minY }
+        : { x: (i % 4) * 320, y: Math.floor(i / 4) * 300 };
+      const inst = createInstance(this.graph.def(m.type), pos.x, pos.y);
+      inst.params = { ...inst.params, ...m.params };
+      if (m.data) inst.data = { ...inst.data, ...m.data };
+      if (m.label) inst.label = m.label;
+      this.graph.addModule(inst);
+      idMap.set(m.id, inst.id);
+    });
+
+    for (const w of project.wires) {
+      const res = this.graph.connect(
+        { moduleId: idMap.get(w.from.module)!, portId: w.from.port },
+        { moduleId: idMap.get(w.to.module)!, portId: w.to.port },
+      );
+      if (!res.ok) {
+        warnings.push(`Wire ${w.from.module}.${w.from.port} → ${w.to.module}.${w.to.port} dropped: ${res.reason}`);
+      }
+    }
+
+    // Groups, children before parents so child ids resolve (nesting).
+    const byId = new Map(project.groups.map((g) => [g.id, g]));
+    const gidMap = new Map<string, string>();
+    const make = (g: KkProjectGroup): string => {
+      const made = gidMap.get(g.id);
+      if (made) return made;
+      const childIds = g.groupIds.map((cid) => make(byId.get(cid)!));
+      const memberIds = g.moduleIds.map((mid) => idMap.get(mid)!);
+      // Tile lands at the centroid of every module inside, nested included.
+      const all = [...this.collectModules(g, byId)].map((mid) => this.graph.modules.get(idMap.get(mid)!)!);
+      const cx = all.length ? all.reduce((s, m) => s + m.x, 0) / all.length : 0;
+      const cy = all.length ? all.reduce((s, m) => s + m.y, 0) / all.length : 0;
+      const group = this.graph.createGroup(g.name, memberIds, childIds, cx, cy);
+      group.collapsed = g.collapsed;
+      gidMap.set(g.id, group.id);
+      return group.id;
+    };
+    for (const g of project.groups) make(g);
+
+    this.projectName = project.name;
+    this.transport.tempo = project.tempo;
+    this.transport.songPosition = 0;
+    this.clearSelection();
+    this.heldVoices.clear();
+    this.engine.syncGraph(this.graph);
+    this.engine.sendTransport(this.transport, 0);
+    this.emit('projectLoaded');
+    this.emit('graphChanged');
+    this.emit('transportChanged');
+    this.emit('selectionChanged');
+    return { ok: true, errors: [], warnings };
+  }
+
+  /** All module ids inside a parsed project group, nested children included. */
+  private collectModules(g: KkProjectGroup, byId: Map<string, KkProjectGroup>): Set<string> {
+    const out = new Set<string>(g.moduleIds);
+    for (const cid of g.groupIds) {
+      for (const m of this.collectModules(byId.get(cid)!, byId)) out.add(m);
+    }
+    return out;
   }
 
   // -- Selection --------------------------------------------------------

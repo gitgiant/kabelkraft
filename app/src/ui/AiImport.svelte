@@ -2,17 +2,19 @@
   import { onMount } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
   import { extractJson } from '../core/aiimport';
+  import { generateProjectSpecPack, parseKkProject } from '../core/aiproject';
+  import { MODULE_DEFS } from '../core/registry';
   import { generateSpecPack } from '../core/aispec';
   import {
-    CLAUDE_MODELS,
     generatePatch,
+    generateProject,
     loadSettings,
     providerLabel,
     providerReady,
-    saveSettings,
     type AiSettings,
   } from '../core/aiprovider';
   import { appState } from '../state';
+  import AiSettingsPanel from './AiSettingsPanel.svelte';
 
   // PRD §10.2: copy the spec pack for an external chatbot, paste its JSON
   // reply (or drop a .kkgroup file), validate readably, insert as a group.
@@ -20,6 +22,9 @@
   // instead — same spec pack, same validator, with an automatic repair loop.
 
   let open = $state(false);
+  // 'patch' = insert a module group; 'project' = replace the whole project
+  // (same providers, same repair loop, project-wide spec with embedded MIDI).
+  let mode = $state<'patch' | 'project'>('patch');
   let text = $state('');
   let errors = $state<string[]>([]);
   let warnings = $state<string[]>([]);
@@ -37,20 +42,29 @@
   let placing = $state(false);
 
   onMount(() => {
-    const onToggle = () => {
-      open = !open;
+    const toggle = (m: 'patch' | 'project') => {
+      if (open && mode === m) {
+        open = false;
+        return;
+      }
+      mode = m;
+      open = true;
       errors = [];
       warnings = [];
       imported = false;
       readyPatch = '';
       placing = false;
     };
+    const onToggle = () => toggle('patch');
+    const onToggleProject = () => toggle('project');
     window.addEventListener('kk-ai-import', onToggle);
+    window.addEventListener('kk-ai-project', onToggleProject);
     // Drag the ready-patch chip anywhere over the canvas to place it there.
     window.addEventListener('dragover', onWindowDragOver);
     window.addEventListener('drop', onWindowDrop);
     return () => {
       window.removeEventListener('kk-ai-import', onToggle);
+      window.removeEventListener('kk-ai-project', onToggleProject);
       window.removeEventListener('dragover', onWindowDragOver);
       window.removeEventListener('drop', onWindowDrop);
     };
@@ -102,8 +116,31 @@
 
   let userPrompt = $state('');
 
-  function persistSettings() {
-    saveSettings(settings);
+  /** Project import replaces everything — validate, confirm, import, lay out. */
+  function importProject(t: string) {
+    imported = false;
+    // Validate first so a broken reply shows errors without a confirm prompt.
+    const check = parseKkProject(t, MODULE_DEFS);
+    if (!check.ok) {
+      errors = check.errors;
+      warnings = check.warnings;
+      return;
+    }
+    if (
+      appState.graph.modules.size > 0 &&
+      !confirm('Load the AI project? This replaces the current project (undo restores it).')
+    ) {
+      return;
+    }
+    const result = appState.importAiProject(t);
+    errors = result.errors;
+    warnings = result.warnings;
+    if (result.ok) {
+      patchCanvas.autoArrange();
+      imported = true;
+      text = '';
+      setTimeout(() => (open = false), 900);
+    }
   }
 
   async function generate() {
@@ -116,14 +153,17 @@
     imported = false;
     readyPatch = '';
     try {
-      const result = await generatePatch(prompt, settings, 3, (s) => (genStatus = s));
+      const gen = mode === 'project' ? generateProject : generatePatch;
+      const result = await gen(prompt, settings, 3, (s) => (genStatus = s));
       text = result.text;
-      if (result.ok) {
+      if (!result.ok) {
+        runImport(); // surface the validation errors (nothing is inserted)
+      } else if (mode === 'project') {
+        importProject(result.text); // whole project: no chip, load it
+      } else {
         // Hold it as a draggable chip instead of auto-inserting (PRD §10).
         readyPatch = result.text;
         readyName = patchName(result.text);
-      } else {
-        runImport(); // surface the validation errors (nothing is inserted)
       }
     } catch (e) {
       errors = [(e as Error).message];
@@ -136,13 +176,18 @@
   async function copySpec() {
     // Spec + the user's request in one paste-able block.
     const prompt = userPrompt.trim();
-    const payload = prompt ? `${generateSpecPack()}\n\nUSER PROMPT: ${prompt}` : generateSpecPack();
+    const spec = mode === 'project' ? generateProjectSpecPack() : generateSpecPack();
+    const payload = prompt ? `${spec}\n\nUSER PROMPT: ${prompt}` : spec;
     await navigator.clipboard.writeText(payload);
     copied = true;
     setTimeout(() => (copied = false), 2000);
   }
 
   function runImport() {
+    if (mode === 'project') {
+      importProject(text);
+      return;
+    }
     imported = false;
     const result = appState.importAiPatch(text, patchCanvas.viewCenter());
     errors = result.errors;
@@ -174,7 +219,7 @@
   <div class="ai-backdrop" class:placing>
     <div class="ai-dialog" role="dialog" aria-label="Import AI Patch" tabindex="-1" ondragover={(e) => e.preventDefault()} ondrop={onDrop}>
       <div class="ai-header">
-        <span class="ai-title">AI Patch</span>
+        <span class="ai-title">{mode === 'project' ? 'AI Project' : 'AI Patch'}</span>
         <span class="provider-tag" title="Active AI backend (configure with Setup)">{providerLabel(settings)}</span>
         <span class="spacer"></span>
         <button class="setup-btn" class:active={showSettings} onclick={() => (showSettings = !showSettings)} title="Configure an AI backend">
@@ -184,45 +229,20 @@
       </div>
 
       {#if showSettings}
-        <div class="settings">
-          <div class="settings-row">
-            <span class="settings-label">Backend</span>
-            <div class="provider-pick">
-              <label><input type="radio" name="prov" value="none" bind:group={settings.provider} onchange={persistSettings} /> Off (copy/paste)</label>
-              <label><input type="radio" name="prov" value="claude" bind:group={settings.provider} onchange={persistSettings} /> Claude</label>
-              <label><input type="radio" name="prov" value="local" bind:group={settings.provider} onchange={persistSettings} /> Local LLM</label>
-            </div>
-          </div>
-
-          {#if settings.provider === 'claude'}
-            <div class="settings-row">
-              <span class="settings-label">API key</span>
-              <input class="grow" type="password" placeholder="sk-ant-…" bind:value={settings.claude.apiKey} onchange={persistSettings} spellcheck="false" autocomplete="off" />
-            </div>
-            <div class="settings-row">
-              <span class="settings-label">Model</span>
-              <select bind:value={settings.claude.model} onchange={persistSettings}>
-                {#each CLAUDE_MODELS as m}<option value={m}>{m}</option>{/each}
-              </select>
-            </div>
-            <p class="settings-note">Key is stored in this browser only and sent directly to Anthropic.</p>
-          {:else if settings.provider === 'local'}
-            <div class="settings-row">
-              <span class="settings-label">Base URL</span>
-              <input class="grow" type="text" placeholder="http://localhost:11434/v1" bind:value={settings.local.baseUrl} onchange={persistSettings} spellcheck="false" />
-            </div>
-            <div class="settings-row">
-              <span class="settings-label">Model</span>
-              <input class="grow" type="text" placeholder="llama3.1" bind:value={settings.local.model} onchange={persistSettings} spellcheck="false" />
-            </div>
-            <p class="settings-note">Any OpenAI-compatible endpoint (Ollama, LM Studio). The server must allow this page's origin (CORS).</p>
-          {/if}
-        </div>
+        <AiSettingsPanel bind:settings />
       {/if}
 
       <p class="ai-help">
         {#if readyPatch}
           Patch ready — <strong>drag it onto the canvas</strong> to place it where you drop, or <strong>Place</strong> it in the center.
+        {:else if mode === 'project'}
+          {#if providerReady(settings)}
+            Describe the whole piece — instruments, style, structure — and click <strong>Generate</strong>.
+            The AI writes composers, synths, effects, mixer and output, music included. <strong>Replaces the current project</strong> (undo restores it).
+          {:else}
+            1. Describe the piece you want, copy, and paste it into any chatbot.<br />
+            2. Paste the JSON it answers with below. <strong>Replaces the current project</strong> (undo restores it).
+          {/if}
         {:else if providerReady(settings)}
           Describe the sound you want and click <strong>Generate</strong> — it's built and validated, then drag it onto the canvas.
         {:else}
@@ -255,7 +275,9 @@
           class="ai-prompt"
           type="text"
           bind:value={userPrompt}
-          placeholder="e.g. a warm dub bassline with tape delay"
+          placeholder={mode === 'project'
+            ? 'e.g. a chill lofi loop: drums, sub bass, e-piano chords, vinyl noise'
+            : 'e.g. a warm dub bassline with tape delay'}
           spellcheck="false"
           onkeydown={(e) => { if (e.key === 'Enter' && providerReady(settings)) generate(); }}
         />
@@ -272,7 +294,9 @@
 
       <textarea
         bind:value={text}
-        placeholder={'{ "kind": "kkgroup", ... }  — markdown reply with a ```json block works too'}
+        placeholder={mode === 'project'
+          ? '{ "kind": "kkproject", ... }  — markdown reply with a ```json block works too'
+          : '{ "kind": "kkgroup", ... }  — markdown reply with a ```json block works too'}
         spellcheck="false"
       ></textarea>
 
@@ -287,7 +311,11 @@
         </div>
       {/if}
       {#if imported}
-        <div class="messages success">✓ Imported as a module group — it's selected on the canvas.</div>
+        <div class="messages success">
+          {mode === 'project'
+            ? '✓ Project loaded — press Play to hear it.'
+            : "✓ Imported as a module group — it's selected on the canvas."}
+        </div>
       {/if}
 
       <div class="ai-actions">
@@ -365,47 +393,6 @@
   }
   .generate:disabled {
     opacity: 0.5;
-  }
-  .settings {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    background: var(--control);
-    border: 1px solid var(--panel-border);
-    border-radius: 8px;
-    padding: 10px 12px;
-  }
-  .settings-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .settings-label {
-    width: 64px;
-    flex-shrink: 0;
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-  .provider-pick {
-    display: flex;
-    gap: 14px;
-    flex-wrap: wrap;
-  }
-  .provider-pick label {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 12px;
-    color: var(--text);
-  }
-  .settings .grow {
-    flex: 1;
-    font-size: 12px;
-  }
-  .settings-note {
-    font-size: 11px;
-    color: var(--text-dim);
-    margin: 0;
   }
   .ready {
     display: flex;

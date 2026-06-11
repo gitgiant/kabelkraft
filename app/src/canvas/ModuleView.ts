@@ -142,7 +142,14 @@ export class ModuleView extends Container {
     const lo = ModuleView.FIXED_MIN_TYPES.has(this.instance.type)
       ? base
       : Math.max(80, base * 0.7);
-    return Math.min(base * 3, Math.max(lo, v));
+    return Math.min(base * 3, Math.max(lo, this.rollMin(base), v));
+  }
+
+  /** While the piano roll is open inside a composer, the tile can't shrink
+   * below a usable editor size (shrink via the title-bar toggle instead). */
+  private rollMin(base: number): number {
+    if (this.instance.type !== 'composer' || !appState.composerOpen.has(this.instance.id)) return 0;
+    return base === this.def.width ? 600 : 400;
   }
 
   // -- construction ----------------------------------------------------------
@@ -245,6 +252,39 @@ export class ModuleView extends Container {
     });
     title.position.set(8, 5);
     this.addChild(title);
+
+    // Composer: group-tile-style title-bar toggle — ⛶ opens the roll in
+    // place, ⤡ shrinks back to the compact preview tile.
+    if (this.instance.type === 'composer') {
+      const open = appState.composerOpen.has(this.instance.id);
+      const glyph = new Text({
+        text: open ? '⤡' : '⛶',
+        style: { fontSize: 11, fill: theme.textDim },
+      });
+      glyph.anchor.set(1, 0);
+      glyph.position.set(this.w - 8, 6);
+      glyph.eventMode = 'none';
+      this.addChild(glyph);
+      const hit = new Graphics().rect(this.w - 24, 2, 20, 20).fill({ color: 0xffffff, alpha: 0.001 });
+      hit.eventMode = 'static';
+      hit.cursor = 'pointer';
+      hit.on('pointerdown', (e) => {
+        e.stopPropagation();
+        if (appState.composerOpen.has(this.instance.id)) appState.closeComposer(this.instance.id);
+        else appState.openComposer(this.instance.id);
+      });
+      hit.on('pointerover', (e) =>
+        this.tooltip.show(
+          open
+            ? ['Shrink', 'Collapse back to the compact clip tile.']
+            : ['Open piano roll', 'Expand the editor inside the module.'],
+          e.clientX,
+          e.clientY,
+        ),
+      );
+      hit.on('pointerout', () => this.tooltip.hide());
+      this.addChild(hit);
+    }
 
     this.body.eventMode = 'static';
     this.body.cursor = 'grab';

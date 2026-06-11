@@ -59,6 +59,15 @@ class SmplModule {
     for (const v of this.voices) v.active = false;
   }
 
+  /** Hard kill (stop ×2): cut all playing sample voices instantly. */
+  panic() {
+    for (const v of this.voices) {
+      v.active = false;
+      v.stage = 'off';
+      v.env = 0;
+    }
+  }
+
   noteOn(voiceId, pitch, velocity, extras) {
     if (!this.sample) return;
     const tn = Math.round(this.params.trigNote ?? -1);
@@ -277,6 +286,20 @@ class AdsrModule {
     if (this.held.size === 0 && this.stage !== 'off') this.stage = 'release';
   }
 
+  /** Hard kill (stop ×2): silence instantly instead of riding out a release. */
+  panic() {
+    this.held.clear();
+    this.stage = 'off';
+    this.env = 0;
+    this.value = 0;
+    this.controlOut.out = 0;
+    for (const st of this.lanes) {
+      st.stage = 'off';
+      st.env = 0;
+    }
+    if (this.gateOut) this.gateOut.fill(0);
+  }
+
   /** Advance one envelope state (`{stage, env}`) by `step` seconds. */
   advance(st, step) {
     const p = this.params;
@@ -373,6 +396,16 @@ class VoiceModule {
   noteOff(voiceId) {
     for (const s of this.slots) {
       if (s.active && s.voiceId === voiceId) s.active = false;
+    }
+  }
+
+  /** Hard kill: drop every slot so gates read 0 next block (stop ×2). A slot
+   * can wedge open if its note-off got lost (e.g. the source wire was deleted
+   * mid-note) — panic is the escape hatch. */
+  panic() {
+    for (const s of this.slots) {
+      s.active = false;
+      s.retrig = false;
     }
   }
 
@@ -1073,6 +1106,13 @@ class ArpModule {
     for (const n of this.activeNotes) emitOff(this.id, n.voiceId);
     this.activeNotes = [];
     this.lastStepIndex = -1;
+  }
+
+  /** Hard kill (stop ×2): also drop the held/latched chord so the free-running
+   * clock stops emitting new steps. */
+  panic() {
+    this.held = [];
+    this.physHeld = 0;
   }
 }
 
@@ -2642,7 +2682,10 @@ class EngineProcessor extends AudioWorkletProcessor {
     const end = start + blockBeats;
 
     for (const note of notes) {
-      const s = ((note.start % len) + len) % len;
+      // Notes at/past the loop end are inert — folding them modulo the loop
+      // would replay a long MIDI import's tail on top of the loop start.
+      const s = note.start;
+      if (s >= len) continue;
       const hit = (s >= start && s < end) || (end > len && s < end - len);
       if (!hit) continue;
       const prob = note.prob === undefined ? 1 : note.prob;

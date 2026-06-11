@@ -119,6 +119,54 @@
     URL.revokeObjectURL(a.href);
   }
 
+  // -- Drag-to-hide: grip under the toolbar slides it away -------------------
+
+  let toolbarEl: HTMLDivElement;
+  // null = open at natural (auto) height so flex-wrap reflow keeps working.
+  let toolbarHeight = $state<number | null>(null);
+  let tDragging = $state(false);
+  let tDragStartY = 0;
+  let tDragStartHeight = 0;
+  let tDragMoved = false;
+  let tOpenTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function openToolbar() {
+    toolbarHeight = toolbarEl.scrollHeight;
+    clearTimeout(tOpenTimer);
+    tOpenTimer = setTimeout(() => (toolbarHeight = null), 180);
+  }
+
+  function onTGripDown(e: PointerEvent) {
+    tDragging = true;
+    tDragMoved = false;
+    tDragStartY = e.clientY;
+    tDragStartHeight = toolbarHeight ?? toolbarEl.scrollHeight;
+    clearTimeout(tOpenTimer);
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function onTGripMove(e: PointerEvent) {
+    if (!tDragging) return;
+    const dy = e.clientY - tDragStartY;
+    if (Math.abs(dy) > 3) tDragMoved = true;
+    toolbarHeight = Math.max(0, Math.min(toolbarEl.scrollHeight, tDragStartHeight + dy));
+  }
+
+  function onTGripUp() {
+    if (!tDragging) return;
+    tDragging = false;
+    const full = toolbarEl.scrollHeight;
+    const h = toolbarHeight ?? full;
+    if (!tDragMoved) {
+      if (h > 0) toolbarHeight = 0;
+      else openToolbar();
+    } else if (h < full / 2) {
+      toolbarHeight = 0;
+    } else {
+      openToolbar();
+    }
+  }
+
   async function importKkmod(e: Event) {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
@@ -130,7 +178,12 @@
   }
 </script>
 
-<div class="toolbar">
+<div
+  class="toolbar-clip"
+  class:dragging={tDragging}
+  style={toolbarHeight === null ? '' : `height: ${toolbarHeight}px`}
+>
+<div class="toolbar" bind:this={toolbarEl}>
   <div class="tgroup">
     <span class="logo">KabelKraft</span>
     <input class="project-name" bind:value={projectName} title="Project name" />
@@ -216,6 +269,13 @@
       🤖 AI
     </button>
     <button
+      class="ai-project-toggle"
+      onclick={() => window.dispatchEvent(new CustomEvent('kk-ai-project'))}
+      title="AI project: generate a complete project — composers, synths, effects, mixer, output — with the music embedded"
+    >
+      🪄 AI Project
+    </button>
+    <button
       class="library-toggle"
       onclick={() => window.dispatchEvent(new CustomEvent('kk-toggle-library'))}
       title="Sample Library: browse your own folders, audition, drag onto Sampler/Drum pads"
@@ -234,6 +294,18 @@
     {/if}
   </div>
 </div>
+</div>
+<button
+  class="toolbar-grip"
+  title="Drag or click to hide/show the toolbar"
+  aria-label="Hide or show toolbar"
+  onpointerdown={onTGripDown}
+  onpointermove={onTGripMove}
+  onpointerup={onTGripUp}
+  onpointercancel={onTGripUp}
+>
+  {toolbarHeight === 0 ? '▾' : '▴'}
+</button>
 
 {#if tutorialPrompt}
   <div class="tutorial-backdrop">
@@ -249,6 +321,34 @@
 {/if}
 
 <style>
+  .toolbar-clip {
+    overflow: hidden;
+    flex-shrink: 0;
+    transition: height 0.15s ease;
+  }
+  .toolbar-clip.dragging {
+    transition: none;
+  }
+  .toolbar-grip {
+    display: block;
+    width: 100%;
+    height: 12px;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    border-bottom: 1px solid var(--panel-border);
+    background: var(--panel);
+    color: var(--text-dim);
+    font-size: 8px;
+    line-height: 1;
+    cursor: ns-resize;
+    touch-action: none;
+    user-select: none;
+  }
+  .toolbar-grip:hover {
+    background: var(--control);
+    color: var(--text);
+  }
   .toolbar {
     display: flex;
     align-items: center;

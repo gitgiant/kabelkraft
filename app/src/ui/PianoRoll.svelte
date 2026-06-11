@@ -17,29 +17,49 @@
     COMPOSER_MIN_NOTE_LEN,
     type ComposerNote,
   } from '../core/composer';
+  import type { ComposerClip } from '../core/composer';
+  import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
+  import {
+    generateMidiClip,
+    loadSettings,
+    providerLabel,
+    providerReady,
+    type AiSettings,
+  } from '../core/aiprovider';
   import { parseSmf, writeSmf, type SmfFile } from '../core/smf';
   import { patchCanvas } from '../canvas/PatchCanvas';
   import { appState } from '../state';
+  import AiSettingsPanel from './AiSettingsPanel.svelte';
 
   // PRD §8.3 reworked: full piano-roll editor for the Composer module.
   // Keys on the left, zoomable free-time note grid, per-note parameter lane,
   // cut/copy/paste/undo/redo, quantize/humanize/randomize, MIDI file I/O.
   // Edits commit straight to the module's data, so the engine stays live.
-  // The panel is anchored over its module on the canvas (one per composer).
+  // The panel sits INSIDE the module: it pins to the tile's face area each
+  // frame and CSS-scales with the canvas zoom, so the module's own title bar,
+  // ports and resize handles stay the controls — same as any group tile.
 
   const { moduleId }: { moduleId: string } = $props();
   let title = $state('Composer');
 
-  // Anchored placement (px, viewport-fixed), recomputed each frame.
-  const GAP = 8;
+  // Module face rect in tile-local px — must match ModuleView's buildFace()
+  // (x = 18, top = TITLE_H + 10, bottom inset 12).
+  const MODULE_TITLE_H = 24;
+  const INSET_X = 18;
+  const INSET_T = MODULE_TITLE_H + 10;
+  const INSET_B = 12;
+
+  // Placement (viewport px) + canvas zoom scale, recomputed each frame.
   let panelLeft = $state(0);
   let panelTop = $state(0);
+  let scale = $state(1);
   let onScreen = $state(true);
   let active = $state(true);
 
-  // Resizable panel (drag the corner handle).
-  let panelW = $state(620);
-  let panelH = $state(420);
+  // Logical panel size (pre-scale px) — derived from the module tile size;
+  // resize the module to resize the editor.
+  let panelW = $state(684);
+  let panelH = $state(434);
 
   // View: zoom in px/beat and px/semitone, scroll in px.
   let zoomX = $state(56);
@@ -114,7 +134,7 @@
     };
   });
 
-  /** Pin the panel over its module each frame (Q1=b: position only, not scale). */
+  /** Pin the panel over the module's face area each frame, tracking zoom. */
   function reposition() {
     const r = patchCanvas.clientRectFor(moduleId);
     if (!r || !r.onScreen) {
@@ -122,11 +142,11 @@
       return;
     }
     onScreen = true;
-    // Prefer top-right of the module; flip left if it would overflow.
-    let l = r.left + r.width + GAP;
-    if (l + panelW > window.innerWidth - 4) l = r.left - panelW - GAP;
-    panelLeft = Math.max(4, Math.min(window.innerWidth - panelW - 4, l));
-    panelTop = Math.max(4, Math.min(window.innerHeight - panelH - 4, r.top));
+    scale = r.scale;
+    panelW = r.width / r.scale - INSET_X * 2;
+    panelH = r.height / r.scale - INSET_T - INSET_B;
+    panelLeft = r.left + INSET_X * r.scale;
+    panelTop = r.top + INSET_T * r.scale;
   }
 
   /** Pull notes from the module data (open, undo/redo, external change). */
@@ -181,8 +201,14 @@
     return g > 0 ? Math.floor(b / g) * g : b;
   }
 
+  // Measured .body box (logical px, pre-transform) — keeps the canvas
+  // attribute size equal to its CSS size so rendering stays crisp and
+  // pointer mapping stays 1:1 at zoom 1.
+  let bodyW = $state(600);
+  let bodyH = $state(250);
+
   function gridSize(): { w: number; h: number } {
-    return { w: Math.max(50, panelW - KEYS_W - 26), h: Math.max(50, panelH - 188) };
+    return { w: Math.max(50, bodyW - KEYS_W - 2), h: Math.max(50, bodyH) };
   }
 
   function noteAt(x: number, y: number): ComposerNote | null {
@@ -355,9 +381,11 @@
   let drag: DragMode = null;
   let marquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
 
-  function gridPos(e: PointerEvent): { x: number; y: number } {
+  /** Client → canvas-logical px (the panel is CSS-scaled with the zoom). */
+  function gridPos(e: { clientX: number; clientY: number }): { x: number; y: number } {
     const r = gridEl!.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
+    const k = r.width > 0 ? gridEl!.width / r.width : 1;
+    return { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k };
   }
 
   function onGridDown(e: PointerEvent) {
@@ -429,8 +457,8 @@
     const { x, y } = gridPos(e);
 
     if (drag.kind === 'pan') {
-      scrollX = Math.max(0, drag.sx - (e.clientX - drag.startX));
-      scrollY = clampScrollY(drag.sy - (e.clientY - drag.startY));
+      scrollX = Math.max(0, drag.sx - (e.clientX - drag.startX) / scale);
+      scrollY = clampScrollY(drag.sy - (e.clientY - drag.startY) / scale);
       return;
     }
     if (drag.kind === 'marquee') {
@@ -484,10 +512,7 @@
 
   function onGridWheel(e: WheelEvent) {
     e.preventDefault();
-    const { x, y } = (() => {
-      const r = gridEl!.getBoundingClientRect();
-      return { x: e.clientX - r.left, y: e.clientY - r.top };
-    })();
+    const { x, y } = gridPos(e);
     if (e.ctrlKey || e.metaKey) {
       // Ctrl + wheel: zoom the X axis around the cursor.
       const beat = xToBeat(x);
@@ -512,7 +537,8 @@
     if (!moduleId) return;
     keysEl!.setPointerCapture(e.pointerId);
     const r = keysEl!.getBoundingClientRect();
-    previewPitch = Math.min(127, Math.max(0, yToPitch(e.clientY - r.top)));
+    const k = r.height > 0 ? keysEl!.height / r.height : 1;
+    previewPitch = Math.min(127, Math.max(0, yToPitch((e.clientY - r.top) * k)));
     appState.noteOn(moduleId, 'roll-preview', previewPitch, 0.8);
   }
 
@@ -535,8 +561,9 @@
   function onLaneMove(e: PointerEvent) {
     if (!laneDragging) return;
     const r = laneEl!.getBoundingClientRect();
-    const x = e.clientX - r.left;
-    const y = Math.min(LANE_H, Math.max(0, e.clientY - r.top));
+    const k = r.width > 0 ? laneEl!.width / r.width : 1;
+    const x = (e.clientX - r.left) * k;
+    const y = Math.min(LANE_H, Math.max(0, (e.clientY - r.top) * k));
     const bipolar = laneParam === 'pan';
     const v = bipolar
       ? Math.min(1, Math.max(-1, ((LANE_H / 2 - y) / (LANE_H / 2 - 4))))
@@ -666,8 +693,10 @@
 
   function doImport() {
     if (!importFile || !moduleId) return;
+    // Drop notes past the longest possible loop — they could never play and
+    // would otherwise sit inert (or worse, confuse edits) past the dead zone.
     const picked = importFile.notes.filter(
-      (n) => importTracks[n.track] && importChannels[n.channel],
+      (n) => importTracks[n.track] && importChannels[n.channel] && n.start < COMPOSER_MAX_LENGTH,
     );
     appState.beginUndoable();
     const incoming = picked.map((n) => ({ ...n }) as ComposerNote);
@@ -687,6 +716,89 @@
     importFile = null;
   }
 
+  // -- AI MIDI generation (mirrors the AI Patch dialog; shares its backend) ----
+
+  let aiOpen = $state(false);
+  let aiText = $state('');
+  let aiPrompt = $state('');
+  let aiErrors = $state<string[]>([]);
+  let aiWarnings = $state<string[]>([]);
+  let aiSettings = $state<AiSettings>(loadSettings());
+  let aiShowSettings = $state(false);
+  let aiGenerating = $state(false);
+  let aiGenStatus = $state('');
+  let aiCopied = $state(false);
+  let aiReplace = $state(true);
+  let aiSuccess = $state('');
+
+  function openAi() {
+    aiSettings = loadSettings(); // pick up changes made in the AI Patch dialog
+    aiErrors = [];
+    aiWarnings = [];
+    aiSuccess = '';
+    aiOpen = true;
+  }
+
+  async function aiCopySpec() {
+    await navigator.clipboard.writeText(generateMidiSpecPack(aiPrompt));
+    aiCopied = true;
+    setTimeout(() => (aiCopied = false), 2000);
+  }
+
+  /** Validated clip → composer data (one undo step), then close. */
+  function aiApply(clip: ComposerClip, name?: string) {
+    appState.beginUndoable();
+    const incoming = clip.notes.map((n) => ({ ...n }));
+    if (aiReplace) {
+      notes = incoming;
+      clipLength = clip.length;
+    } else {
+      notes = [...notes, ...incoming];
+      clipLength = Math.max(clipLength, clip.length);
+    }
+    suppressSync = true;
+    appState.setModuleData(moduleId, 'length', clipLength);
+    suppressSync = false;
+    selected = new Set();
+    commit();
+    aiSuccess = `✓ Imported ${incoming.length} notes${name ? ` — “${name}”` : ''}.`;
+    aiText = '';
+    setTimeout(() => {
+      aiOpen = false;
+      aiSuccess = '';
+    }, 900);
+  }
+
+  function aiImport() {
+    const result = parseKkMidi(aiText);
+    aiErrors = result.errors;
+    aiWarnings = result.warnings;
+    if (result.ok && result.clip) aiApply(result.clip, result.name);
+  }
+
+  async function aiGenerate() {
+    const prompt = aiPrompt.trim();
+    if (!prompt || aiGenerating) return;
+    aiGenerating = true;
+    aiGenStatus = '';
+    aiErrors = [];
+    aiWarnings = [];
+    aiSuccess = '';
+    try {
+      const result = await generateMidiClip(prompt, aiSettings, 3, (s) => (aiGenStatus = s));
+      aiText = result.text;
+      const parsed = parseKkMidi(result.text);
+      aiErrors = parsed.errors;
+      aiWarnings = parsed.warnings;
+      if (parsed.ok && parsed.clip) aiApply(parsed.clip, parsed.name);
+    } catch (e) {
+      aiErrors = [(e as Error).message];
+    } finally {
+      aiGenerating = false;
+      aiGenStatus = '';
+    }
+  }
+
   // -- keyboard shortcuts -----------------------------------------------------
 
   function onKeyDown(e: KeyboardEvent) {
@@ -694,10 +806,11 @@
     if (!active) return;
     const tag = (document.activeElement?.tagName ?? '').toLowerCase();
     if (tag === 'input' || tag === 'select') return;
-    if (quantOpen || importOpen) {
+    if (quantOpen || importOpen || aiOpen) {
       if (e.key === 'Escape') {
         quantOpen = false;
         importOpen = false;
+        aiOpen = false;
       }
       return;
     }
@@ -719,26 +832,6 @@
     }
   }
 
-  // -- panel resize -------------------------------------------------------------
-
-  function onResizeDown(e: PointerEvent) {
-    e.preventDefault();
-    const startW = panelW;
-    const startH = panelH;
-    const sx = e.clientX;
-    const sy = e.clientY;
-    const onMove = (ev: PointerEvent) => {
-      panelW = Math.min(window.innerWidth - 24, Math.max(560, startW + ev.clientX - sx));
-      panelH = Math.min(window.innerHeight - 24, Math.max(360, startH + ev.clientY - sy));
-      scrollY = clampScrollY(scrollY);
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
 </script>
 
 <svelte:window onkeydown={onKeyDown} />
@@ -746,11 +839,10 @@
 <div
   class="piano-roll"
   class:active
-  style="left:{panelLeft}px;top:{panelTop}px;width:{panelW}px;height:{panelH}px;visibility:{onScreen ? 'visible' : 'hidden'}"
+  style="left:{panelLeft}px;top:{panelTop}px;width:{panelW}px;height:{panelH}px;transform:scale({scale});visibility:{onScreen ? 'visible' : 'hidden'}"
   onpointerdown={() => appState.raiseComposer(moduleId)}
 >
-      <div class="header">
-        <span class="title">Piano Roll — {title}</span>
+      <div class="toolbar-row">
         <label title="Loop length in beats (4 per bar)">
           Length
           <input
@@ -760,7 +852,7 @@
             step="1"
             value={clipLength}
             onchange={(e) => commitLength(Number((e.target as HTMLInputElement).value))}
-          /> beats
+          />
         </label>
         <label title="Drawing/moving snap; Off = free (unquantized) notes">
           Snap
@@ -768,23 +860,8 @@
             {#each Object.keys(SNAP_BEATS) as s (s)}<option value={s}>{s}</option>{/each}
           </select>
         </label>
-        <span class="spacer"></span>
-        <span class="hint">draw: click · delete: right-click · select: ctrl-drag / shift-click · pan: middle-drag · zoom: ctrl-wheel (alt = rows)</span>
-        <button onclick={close} title="Close (Esc)">✕</button>
-      </div>
-
-      <div class="toolbar-row">
-        <button onclick={doCut} disabled={!selected.size} title="Cut selection (Ctrl+X)">Cut</button>
-        <button onclick={doCopy} disabled={!selected.size} title="Copy selection (Ctrl+C)">Copy</button>
-        <button onclick={doPaste} disabled={!clipboard.length} title="Paste in place (Ctrl+V)">Paste</button>
         <span class="divider"></span>
-        <button onclick={() => appState.undo()} title="Undo (Ctrl+Z)">↶ Undo</button>
-        <button onclick={() => appState.redo()} title="Redo (Ctrl+Y)">↷ Redo</button>
-        <span class="divider"></span>
-        <button onclick={() => (quantOpen = true)} title="Snap notes to a grid (with options)">Quantize…</button>
-        <button onclick={doHumanize} title="Small random timing/velocity drift — applies to selection or all">Humanize</button>
-        <button onclick={doRandomize} title="Scramble pitches and velocities — selection or all">Randomize</button>
-        <span class="divider"></span>
+        <button class="ai-btn" onclick={openAi} title="Generate a clip with AI (prompt → MIDI JSON), or paste MIDI JSON from any chatbot">✨ AI MIDI</button>
         <label class="file-btn" title="Load notes from a .mid file (channel options follow)">
           Load MIDI
           <input type="file" accept=".mid,.midi,audio/midi" onchange={pickMidi} />
@@ -792,9 +869,23 @@
         <button onclick={saveMidi} title="Download the clip as a standard MIDI file">Save MIDI</button>
         <span class="spacer"></span>
         <span class="count">{notes.length} notes{selected.size ? ` · ${selected.size} selected` : ''}</span>
+        <button onclick={close} title="Shrink to the compact tile (Esc)">⤡</button>
       </div>
 
-      <div class="body">
+      <div class="toolbar-row">
+        <button onclick={doCut} disabled={!selected.size} title="Cut selection (Ctrl+X)">Cut</button>
+        <button onclick={doCopy} disabled={!selected.size} title="Copy selection (Ctrl+C)">Copy</button>
+        <button onclick={doPaste} disabled={!clipboard.length} title="Paste in place (Ctrl+V)">Paste</button>
+        <span class="divider"></span>
+        <button onclick={() => appState.undo()} title="Undo (Ctrl+Z)">↶</button>
+        <button onclick={() => appState.redo()} title="Redo (Ctrl+Y)">↷</button>
+        <span class="divider"></span>
+        <button onclick={() => (quantOpen = true)} title="Snap notes to a grid (with options)">Quantize…</button>
+        <button onclick={doHumanize} title="Small random timing/velocity drift — applies to selection or all">Humanize</button>
+        <button onclick={doRandomize} title="Scramble pitches and velocities — selection or all">Randomize</button>
+      </div>
+
+      <div class="body" bind:clientWidth={bodyW} bind:clientHeight={bodyH}>
         <canvas
           bind:this={keysEl}
           width={KEYS_W}
@@ -815,6 +906,7 @@
           onpointercancel={onGridUp}
           onwheel={onGridWheel}
           oncontextmenu={(e) => e.preventDefault()}
+          title="draw: click · delete: right-click · select: ctrl-drag / shift-click · pan: middle-drag · zoom: ctrl-wheel (alt = rows)"
         ></canvas>
       </div>
 
@@ -833,12 +925,6 @@
           title="Drag to paint the selected per-note parameter"
         ></canvas>
       </div>
-
-      <div
-        class="resize-handle"
-        onpointerdown={onResizeDown}
-        title="Drag to resize the editor"
-      ></div>
     </div>
 
     {#if quantOpen}
@@ -861,6 +947,78 @@
           <div class="popup-actions">
             <button class="primary" onclick={doQuantize}>Apply</button>
             <button onclick={() => (quantOpen = false)}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if aiOpen}
+      <div class="popup-backdrop">
+        <div class="popup ai-midi" role="dialog" aria-label="AI MIDI">
+          <div class="popup-title ai-title-row">
+            <span>AI MIDI — {title}</span>
+            <span class="provider-tag" title="Active AI backend (configure with Setup)">{providerLabel(aiSettings)}</span>
+            <span class="ai-spacer"></span>
+            <button class:active={aiShowSettings} onclick={() => (aiShowSettings = !aiShowSettings)} title="Configure an AI backend">⚙ Setup</button>
+            <button onclick={() => (aiOpen = false)} title="Close (Esc)">✕</button>
+          </div>
+
+          {#if aiShowSettings}
+            <AiSettingsPanel bind:settings={aiSettings} />
+          {/if}
+
+          <p class="ai-help">
+            {#if providerReady(aiSettings)}
+              Describe the riff/beat you want and click <strong>Generate</strong> — it's validated and lands in this clip.
+            {:else}
+              1. Describe the clip, copy, and paste it into any chatbot.<br />
+              2. Paste the JSON it answers with below and hit Import.
+            {/if}
+          </p>
+
+          <div class="ai-prompt-row">
+            <input
+              type="text"
+              bind:value={aiPrompt}
+              placeholder="e.g. a moody 8-bar minor-key arpeggio with ghost notes"
+              spellcheck="false"
+              onkeydown={(e) => { if (e.key === 'Enter' && providerReady(aiSettings)) aiGenerate(); }}
+            />
+            {#if providerReady(aiSettings)}
+              <button class="primary" onclick={aiGenerate} disabled={aiGenerating || aiPrompt.trim().length === 0}>
+                {aiGenerating ? '… ' + aiGenStatus : '✨ Generate'}
+              </button>
+            {:else}
+              <button onclick={aiCopySpec} title="Copies the MIDI spec followed by USER PROMPT: your text">
+                {aiCopied ? '✓ Copied!' : '📋 Copy Spec + Prompt'}
+              </button>
+            {/if}
+          </div>
+
+          <textarea
+            bind:value={aiText}
+            placeholder={'{ "kind": "kkmidi", "length": 16, "notes": [...] }  — markdown reply with a ```json block works too'}
+            spellcheck="false"
+          ></textarea>
+
+          {#if aiErrors.length > 0}
+            <div class="ai-messages ai-errors">
+              {#each aiErrors as e (e)}<div>✗ {e}</div>{/each}
+            </div>
+          {/if}
+          {#if aiWarnings.length > 0}
+            <div class="ai-messages ai-warnings">
+              {#each aiWarnings as w (w)}<div>⚠ {w}</div>{/each}
+            </div>
+          {/if}
+          {#if aiSuccess}
+            <div class="ai-messages ai-success">{aiSuccess}</div>
+          {/if}
+
+          <label><input type="checkbox" bind:checked={aiReplace} /> Replace existing notes (off = merge)</label>
+          <div class="popup-actions">
+            <button class="primary" onclick={aiImport} disabled={aiText.trim().length === 0}>Import</button>
+            <button onclick={() => (aiOpen = false)}>Cancel</button>
           </div>
         </div>
       </div>
@@ -890,7 +1048,7 @@
             {/each}
           </div>
           <label><input type="checkbox" bind:checked={importReplace} /> Replace existing notes (off = merge)</label>
-          <label><input type="checkbox" bind:checked={importSetLength} /> Set loop length from file ({Math.ceil(importFile.lengthBeats)} beats)</label>
+          <label><input type="checkbox" bind:checked={importSetLength} /> Set loop length from file ({Math.min(COMPOSER_MAX_LENGTH, Math.ceil(importFile.lengthBeats))} beats{importFile.lengthBeats > COMPOSER_MAX_LENGTH ? ` — file is ${Math.ceil(importFile.lengthBeats)}, notes past the max are dropped` : ''})</label>
           <div class="popup-actions">
             <button class="primary" onclick={doImport}>Import</button>
             <button onclick={() => { importOpen = false; importFile = null; }}>Cancel</button>
@@ -903,38 +1061,30 @@
   .piano-roll {
     position: fixed;
     z-index: 60;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+    transform-origin: 0 0;
     background: var(--panel);
     border: 1px solid var(--panel-border);
-    border-radius: 10px;
-    padding: 12px;
+    border-radius: 6px;
+    padding: 8px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
     box-sizing: border-box;
+    overflow: hidden;
   }
   .piano-roll.active {
     z-index: 61;
     border-color: var(--accent);
-    box-shadow: 0 8px 34px rgba(0, 0, 0, 0.55);
   }
-  .header,
   .toolbar-row {
     display: flex;
     align-items: center;
     gap: 6px;
     flex-wrap: nowrap;
-  }
-  .title {
-    font-weight: 700;
-    color: var(--text);
-    font-size: 13px;
-    white-space: nowrap;
-  }
-  .hint {
-    font-size: 10px;
-    color: var(--text-dim);
-    text-align: right;
+    flex: none;
+    height: 26px;
+    min-width: 0;
+    overflow: hidden;
   }
   .count {
     font-size: 11px;
@@ -966,11 +1116,13 @@
     flex: 1;
     min-height: 0;
     gap: 2px;
+    overflow: hidden;
   }
   canvas {
     border-radius: 4px;
     touch-action: none;
     display: block;
+    flex: none;
   }
   canvas.grid {
     cursor: crosshair;
@@ -999,17 +1151,6 @@
     inset: 0;
     opacity: 0;
     cursor: pointer;
-  }
-  .resize-handle {
-    position: absolute;
-    right: 2px;
-    bottom: 2px;
-    width: 16px;
-    height: 16px;
-    cursor: nwse-resize;
-    background: linear-gradient(135deg, transparent 50%, var(--text-dim) 50%);
-    border-bottom-right-radius: 8px;
-    opacity: 0.6;
   }
   .popup-backdrop {
     position: fixed;
@@ -1062,6 +1203,68 @@
     display: flex;
     gap: 8px;
     justify-content: flex-end;
+  }
+  .popup.ai-midi {
+    width: 540px;
+    max-width: 92vw;
+  }
+  .ai-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .provider-tag {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-dim);
+    border: 1px solid var(--panel-border);
+    border-radius: 5px;
+    padding: 1px 6px;
+  }
+  .ai-spacer {
+    flex: 1;
+  }
+  .ai-title-row button.active {
+    outline: 1px solid var(--accent);
+  }
+  .ai-help {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 0;
+    line-height: 1.7;
+  }
+  .ai-prompt-row {
+    display: flex;
+    gap: 8px;
+  }
+  .ai-prompt-row input {
+    flex: 1;
+    font-size: 12px;
+  }
+  .popup.ai-midi textarea {
+    min-height: 140px;
+    resize: vertical;
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+  }
+  .ai-messages {
+    font-size: 12px;
+    border-radius: 6px;
+    padding: 8px 10px;
+    max-height: 110px;
+    overflow-y: auto;
+  }
+  .ai-errors {
+    background: rgba(255, 80, 80, 0.12);
+    color: #ff8080;
+  }
+  .ai-warnings {
+    background: rgba(255, 177, 61, 0.1);
+    color: var(--accent);
+  }
+  .ai-success {
+    background: rgba(82, 224, 122, 0.12);
+    color: #52e07a;
   }
   button.primary {
     background: var(--accent);

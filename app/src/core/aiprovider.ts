@@ -14,6 +14,8 @@
 import { MODULE_DEFS } from './registry';
 import { generateSpecPack } from './aispec';
 import { parseKkGroup } from './aiimport';
+import { MIDI_SPEC, parseKkMidi } from './aimidi';
+import { generateProjectSpecPack, parseKkProject } from './aiproject';
 
 export type ProviderKind = 'none' | 'claude' | 'local';
 
@@ -72,7 +74,12 @@ interface ChatMessage {
   content: string;
 }
 
-async function callClaude(s: AiSettings, system: string, messages: ChatMessage[]): Promise<string> {
+async function callClaude(
+  s: AiSettings,
+  system: string,
+  messages: ChatMessage[],
+  maxTokens: number,
+): Promise<string> {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -84,7 +91,7 @@ async function callClaude(s: AiSettings, system: string, messages: ChatMessage[]
     },
     body: JSON.stringify({
       model: s.claude.model,
-      max_tokens: 8192,
+      max_tokens: maxTokens,
       system,
       messages,
     }),
@@ -124,8 +131,13 @@ async function callLocal(s: AiSettings, system: string, messages: ChatMessage[])
   return text;
 }
 
-function call(s: AiSettings, system: string, messages: ChatMessage[]): Promise<string> {
-  if (s.provider === 'claude') return callClaude(s, system, messages);
+function call(
+  s: AiSettings,
+  system: string,
+  messages: ChatMessage[],
+  maxTokens: number,
+): Promise<string> {
+  if (s.provider === 'claude') return callClaude(s, system, messages, maxTokens);
   if (s.provider === 'local') return callLocal(s, system, messages);
   return Promise.reject(new Error('No AI provider is configured.'));
 }
@@ -141,25 +153,30 @@ export interface GenerateResult {
 
 /**
  * Prompt → API → validate → repair loop. On a validation failure the readable
- * errors (the same ones the v1 importer shows) are fed back to the model up to
- * `maxAttempts` times. Returns the best text so the caller can insert it — or
- * surface the errors — via the normal importAiPatch path.
+ * errors are fed back to the model up to `maxAttempts` times. Returns the best
+ * text so the caller can insert it — or surface the errors — via the normal
+ * import path. Shared by patch and MIDI-clip generation.
  */
-export async function generatePatch(
+async function generateWithSpec(
+  system: string,
+  noun: string,
+  validate: (text: string) => { ok: boolean; errors: string[] },
   userPrompt: string,
   settings: AiSettings,
-  maxAttempts = 3,
+  maxAttempts: number,
   onProgress?: (status: string) => void,
+  // A full project is much bigger than a patch; non-streaming requests should
+  // stay ≤ ~16K output tokens (within every offered model's output cap).
+  maxTokens = 8192,
 ): Promise<GenerateResult> {
-  const system = generateSpecPack();
   const messages: ChatMessage[] = [{ role: 'user', content: userPrompt }];
 
   let last = '';
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    onProgress?.(attempt === 1 ? 'Generating patch…' : `Fixing validation errors (try ${attempt})…`);
-    last = await call(settings, system, messages);
+    onProgress?.(attempt === 1 ? `Generating ${noun}…` : `Fixing validation errors (try ${attempt})…`);
+    last = await call(settings, system, messages, maxTokens);
 
-    const result = parseKkGroup(last, MODULE_DEFS);
+    const result = validate(last);
     if (result.ok) return { text: last, ok: true, attempts: attempt };
 
     // Feed the structural errors back so the model can repair (PRD §10.3).
@@ -168,11 +185,65 @@ export async function generatePatch(
       messages.push({
         role: 'user',
         content:
-          'That patch failed validation:\n' +
+          `That ${noun} failed validation:\n` +
           result.errors.map((e) => `- ${e}`).join('\n') +
-          '\n\nReturn a corrected patch as a single JSON code block.',
+          `\n\nReturn a corrected ${noun} as a single JSON code block.`,
       });
     }
   }
   return { text: last, ok: false, attempts: maxAttempts };
+}
+
+export function generatePatch(
+  userPrompt: string,
+  settings: AiSettings,
+  maxAttempts = 3,
+  onProgress?: (status: string) => void,
+): Promise<GenerateResult> {
+  return generateWithSpec(
+    generateSpecPack(),
+    'patch',
+    (text) => parseKkGroup(text, MODULE_DEFS),
+    userPrompt,
+    settings,
+    maxAttempts,
+    onProgress,
+  );
+}
+
+/** Whole-project flavour: same providers and repair loop, .kkproject spec/validator. */
+export function generateProject(
+  userPrompt: string,
+  settings: AiSettings,
+  maxAttempts = 3,
+  onProgress?: (status: string) => void,
+): Promise<GenerateResult> {
+  return generateWithSpec(
+    generateProjectSpecPack(),
+    'project',
+    (text) => parseKkProject(text, MODULE_DEFS),
+    userPrompt,
+    settings,
+    maxAttempts,
+    onProgress,
+    16000,
+  );
+}
+
+/** MIDI-clip flavour: same providers and repair loop, .kkmidi spec/validator. */
+export function generateMidiClip(
+  userPrompt: string,
+  settings: AiSettings,
+  maxAttempts = 3,
+  onProgress?: (status: string) => void,
+): Promise<GenerateResult> {
+  return generateWithSpec(
+    MIDI_SPEC,
+    'MIDI clip',
+    parseKkMidi,
+    userPrompt,
+    settings,
+    maxAttempts,
+    onProgress,
+  );
 }

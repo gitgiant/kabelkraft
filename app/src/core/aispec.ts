@@ -36,7 +36,7 @@ Rules:
 - Tempo-aware modules sync to the Master Transport implicitly; you rarely need a \`transport\` module inside a group.
 `;
 
-const SIGNAL_FLOW = `
+export const SIGNAL_FLOW = `
 ## Building instruments from components
 
 There is no single "synth" or "drum" module — you build instruments by wiring
@@ -212,16 +212,9 @@ The \`composer\` clip is the beat: each note's pitch picks a drum (36=kick, 37=s
 \`trigNote\`. The user loads samples onto each voice; the kit ships with defaults.
 `;
 
-export function generateSpecPack(): string {
+/** Module catalog section, generated from the live registry (shared with the project spec). */
+export function moduleCatalogSection(): string {
   const lines: string[] = [];
-  lines.push('# KabelKraft AI patch spec');
-  lines.push('');
-  lines.push(
-    'You are writing a patch for KabelKraft, a modular audio playground. ' +
-      'Modules are connected with typed wires. Produce a single JSON code block in the format below.',
-  );
-  lines.push(FORMAT_RULES);
-  lines.push(SIGNAL_FLOW);
   lines.push('## Module catalog');
   lines.push('');
   for (const def of MODULE_DEFS.values()) {
@@ -241,6 +234,20 @@ export function generateSpecPack(): string {
     }
     lines.push('');
   }
+  return lines.join('\n');
+}
+
+export function generateSpecPack(): string {
+  const lines: string[] = [];
+  lines.push('# KabelKraft AI patch spec');
+  lines.push('');
+  lines.push(
+    'You are writing a patch for KabelKraft, a modular audio playground. ' +
+      'Modules are connected with typed wires. Produce a single JSON code block in the format below.',
+  );
+  lines.push(FORMAT_RULES);
+  lines.push(SIGNAL_FLOW);
+  lines.push(moduleCatalogSection());
   lines.push(FACE_RULES);
   lines.push(EXAMPLES);
   return lines.join('\n');
