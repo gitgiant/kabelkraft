@@ -1,12 +1,16 @@
 /**
  * In-app AI patch generation (PRD §10.3, "Integrated AI v2"). Wraps the v1
  * spec-pack + validator so a configured backend can go prompt → API → validate
- * → repair → insert without the copy/paste round trip. Two backends share one
- * interface:
- *   - "claude": Anthropic Messages API, called directly from the browser with a
- *     user-supplied key (needs the dangerous-direct-browser-access CORS header).
- *   - "local":  any OpenAI-compatible chat endpoint (Ollama, LM Studio, …) — a
- *     local llama or similar.
+ * → repair → insert without the copy/paste round trip. Three backends share
+ * one interface:
+ *   - "claude":     Anthropic Messages API, called directly from the browser with
+ *                   a user-supplied key (needs the dangerous-direct-browser-access
+ *                   CORS header).
+ *   - "openrouter": OpenRouter's OpenAI-compatible API. The key can be pasted or
+ *                   obtained keyboard-free via the PKCE OAuth flow below.
+ *   - "custom":     any OpenAI-compatible chat endpoint — local (Ollama,
+ *                   LM Studio) or hosted (OpenAI, Groq, Mistral, …) with an
+ *                   optional bearer key.
  * When the provider is "none" (nothing configured) the UI falls back to the
  * existing copy-spec / paste-reply flow; this module is never called.
  */
@@ -20,35 +24,60 @@ import { generateProjectSpecPack, parseKkProject } from './aiproject';
 import { generateVisualSpecPack, parseKkVis } from './aivisual';
 import type { Graph } from './graph';
 
-export type ProviderKind = 'none' | 'claude' | 'local';
+export type ProviderKind = 'none' | 'claude' | 'openrouter' | 'custom';
 
 export interface AiSettings {
   provider: ProviderKind;
   claude: { apiKey: string; model: string };
-  local: { baseUrl: string; model: string };
+  openrouter: { apiKey: string; model: string };
+  custom: { baseUrl: string; apiKey: string; model: string };
 }
 
 /** Claude models worth offering for patch generation (best JSON adherence first). */
 export const CLAUDE_MODELS = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'];
+
+/** Fill-in presets for the custom OpenAI-compatible backend. */
+export const CUSTOM_PRESETS = [
+  { name: 'Ollama', baseUrl: 'http://localhost:11434/v1', model: 'llama3.1', needsKey: false },
+  { name: 'LM Studio', baseUrl: 'http://localhost:1234/v1', model: '', needsKey: false },
+  { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.4-mini', needsKey: true },
+  { name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', needsKey: true },
+  { name: 'Mistral', baseUrl: 'https://api.mistral.ai/v1', model: 'mistral-large-latest', needsKey: true },
+] as const;
+
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
 const STORAGE_KEY = 'kk-ai-settings';
 
 export const DEFAULT_SETTINGS: AiSettings = {
   provider: 'none',
   claude: { apiKey: '', model: 'claude-opus-4-8' },
-  // Ollama's OpenAI-compatible endpoint; LM Studio is http://localhost:1234/v1.
-  local: { baseUrl: 'http://localhost:11434/v1', model: 'llama3.1' },
+  openrouter: { apiKey: '', model: 'anthropic/claude-sonnet-4.6' },
+  custom: { baseUrl: 'http://localhost:11434/v1', apiKey: '', model: 'llama3.1' },
 };
+
+const PROVIDER_KINDS: ProviderKind[] = ['none', 'claude', 'openrouter', 'custom'];
 
 export function loadSettings(): AiSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return structuredClone(DEFAULT_SETTINGS);
-    const saved = JSON.parse(raw) as Partial<AiSettings>;
+    // v1 settings had provider "local" with a { local: { baseUrl, model } }
+    // block — that backend is now "custom" (same endpoint, optional key).
+    const saved = JSON.parse(raw) as Partial<AiSettings> & {
+      local?: { baseUrl?: string; model?: string };
+    };
+    const provider =
+      (saved.provider as string) === 'local'
+        ? 'custom'
+        : PROVIDER_KINDS.includes(saved.provider as ProviderKind)
+          ? (saved.provider as ProviderKind)
+          : DEFAULT_SETTINGS.provider;
     return {
-      provider: saved.provider ?? DEFAULT_SETTINGS.provider,
+      provider,
       claude: { ...DEFAULT_SETTINGS.claude, ...saved.claude },
-      local: { ...DEFAULT_SETTINGS.local, ...saved.local },
+      openrouter: { ...DEFAULT_SETTINGS.openrouter, ...saved.openrouter },
+      custom: { ...DEFAULT_SETTINGS.custom, ...saved.local, ...saved.custom },
     };
   } catch {
     return structuredClone(DEFAULT_SETTINGS);
@@ -59,16 +88,81 @@ export function saveSettings(s: AiSettings): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
 }
 
+/*
+ * OpenRouter PKCE OAuth (https://openrouter.ai/docs/use-cases/oauth-pkce) —
+ * a key without any copy/paste:
+ *   1. startOpenRouterAuth() opens openrouter.ai/auth in a popup with a
+ *      SHA-256 code challenge; the verifier waits in localStorage.
+ *   2. OpenRouter redirects the popup to public/oauth-openrouter.html, which
+ *      drops the one-time code into localStorage and closes itself.
+ *   3. The opener's "storage" listener sees OPENROUTER_CODE_KEY appear and
+ *      calls exchangeOpenRouterCode(code) → API key.
+ */
+
+const OPENROUTER_VERIFIER_KEY = 'kk-openrouter-verifier';
+/** localStorage key the OAuth callback page writes the one-time code to. */
+export const OPENROUTER_CODE_KEY = 'kk-openrouter-code';
+
+function base64url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+/** Open the OpenRouter consent popup. False = popup blocked. */
+export async function startOpenRouterAuth(): Promise<boolean> {
+  const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+  localStorage.setItem(OPENROUTER_VERIFIER_KEY, verifier);
+  localStorage.removeItem(OPENROUTER_CODE_KEY);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  const challenge = base64url(new Uint8Array(digest));
+  const callback = new URL('oauth-openrouter.html', window.location.href).toString();
+  const url =
+    `https://openrouter.ai/auth?callback_url=${encodeURIComponent(callback)}` +
+    `&code_challenge=${challenge}&code_challenge_method=S256`;
+  return window.open(url, 'kk-openrouter-auth', 'popup,width=480,height=720') != null;
+}
+
+/** Trade the callback's one-time code (+ stored verifier) for an API key. */
+export async function exchangeOpenRouterCode(code: string): Promise<string> {
+  const verifier = localStorage.getItem(OPENROUTER_VERIFIER_KEY) ?? '';
+  const res = await fetch(`${OPENROUTER_BASE_URL}/auth/keys`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code, code_verifier: verifier, code_challenge_method: 'S256' }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`OpenRouter key exchange ${res.status}: ${detail.slice(0, 300) || res.statusText}`);
+  }
+  const data = await res.json();
+  if (!data.key) throw new Error('OpenRouter returned no key.');
+  localStorage.removeItem(OPENROUTER_VERIFIER_KEY);
+  return data.key as string;
+}
+
 /** Is the selected provider actually usable (key / url present)? */
 export function providerReady(s: AiSettings): boolean {
   if (s.provider === 'claude') return s.claude.apiKey.trim().length > 0;
-  if (s.provider === 'local') return s.local.baseUrl.trim().length > 0;
+  if (s.provider === 'openrouter') return s.openrouter.apiKey.trim().length > 0;
+  if (s.provider === 'custom') return s.custom.baseUrl.trim().length > 0;
   return false;
+}
+
+/** Preset whose base URL matches, so labels read "Ollama" instead of "Custom". */
+export function presetFor(baseUrl: string) {
+  const url = baseUrl.trim().replace(/\/$/, '');
+  return CUSTOM_PRESETS.find((p) => p.baseUrl === url);
 }
 
 export function providerLabel(s: AiSettings): string {
   if (s.provider === 'claude') return `Claude (${s.claude.model})`;
-  if (s.provider === 'local') return `Local (${s.local.model})`;
+  if (s.provider === 'openrouter') return `OpenRouter (${s.openrouter.model})`;
+  if (s.provider === 'custom') {
+    const name = presetFor(s.custom.baseUrl)?.name ?? 'Custom';
+    return s.custom.model ? `${name} (${s.custom.model})` : name;
+  }
   return 'not configured';
 }
 
@@ -112,13 +206,24 @@ async function callClaude(
   return text;
 }
 
-async function callLocal(s: AiSettings, system: string, messages: ChatMessage[]): Promise<string> {
-  const base = s.local.baseUrl.trim().replace(/\/$/, '');
+/** OpenAI-compatible chat endpoint — OpenRouter, Ollama, LM Studio, OpenAI, … */
+async function callOpenAiCompatible(
+  target: { baseUrl: string; apiKey: string; model: string; label: string },
+  system: string,
+  messages: ChatMessage[],
+  extraHeaders: Record<string, string> = {},
+): Promise<string> {
+  const base = target.baseUrl.trim().replace(/\/$/, '');
+  const key = target.apiKey.trim();
   const res = await fetch(`${base}/chat/completions`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(key ? { authorization: `Bearer ${key}` } : {}),
+      ...extraHeaders,
+    },
     body: JSON.stringify({
-      model: s.local.model,
+      model: target.model,
       messages: [{ role: 'system', content: system }, ...messages],
       stream: false,
       temperature: 0.7,
@@ -126,11 +231,11 @@ async function callLocal(s: AiSettings, system: string, messages: ChatMessage[])
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`Local LLM ${res.status}: ${detail.slice(0, 300) || res.statusText}`);
+    throw new Error(`${target.label} ${res.status}: ${detail.slice(0, 300) || res.statusText}`);
   }
   const data = await res.json();
   const text: string = data.choices?.[0]?.message?.content ?? '';
-  if (!text) throw new Error('Local LLM returned an empty response.');
+  if (!text) throw new Error(`${target.label} returned an empty response.`);
   return text;
 }
 
@@ -141,7 +246,17 @@ function call(
   maxTokens: number,
 ): Promise<string> {
   if (s.provider === 'claude') return callClaude(s, system, messages, maxTokens);
-  if (s.provider === 'local') return callLocal(s, system, messages);
+  if (s.provider === 'openrouter') {
+    return callOpenAiCompatible(
+      { baseUrl: OPENROUTER_BASE_URL, ...s.openrouter, label: 'OpenRouter' },
+      system,
+      messages,
+      { 'x-title': 'KabelKraft' }, // app attribution on openrouter.ai
+    );
+  }
+  if (s.provider === 'custom') {
+    return callOpenAiCompatible({ ...s.custom, label: 'AI endpoint' }, system, messages);
+  }
   return Promise.reject(new Error('No AI provider is configured.'));
 }
 

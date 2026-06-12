@@ -274,7 +274,7 @@
     <button
       class="ai-toggle"
       onclick={() => window.dispatchEvent(new CustomEvent('kk-ai-import'))}
-      title="AI patches: generate in-app with Claude or a local LLM, or copy the spec for any chatbot"
+      title="AI patches: generate in-app with Claude, OpenRouter, or any OpenAI-compatible endpoint — or copy the spec for any chatbot"
     >
       🤖 AI
     </button>

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_SETTINGS,
+  exchangeOpenRouterCode,
   generatePatch,
   loadSettings,
   providerLabel,
@@ -37,9 +38,9 @@ const brokenPatch = JSON.stringify({
 });
 
 const claudeSettings: AiSettings = {
+  ...structuredClone(DEFAULT_SETTINGS),
   provider: 'claude',
   claude: { apiKey: 'sk-test', model: 'claude-opus-4-8' },
-  local: { ...DEFAULT_SETTINGS.local },
 };
 
 function claudeReply(text: string) {
@@ -70,6 +71,32 @@ describe('AI provider settings', () => {
     expect(providerReady(claudeSettings)).toBe(true);
     expect(providerReady({ ...claudeSettings, claude: { apiKey: '  ', model: 'x' } })).toBe(false);
     expect(providerLabel(claudeSettings)).toContain('Claude');
+
+    const or: AiSettings = { ...structuredClone(DEFAULT_SETTINGS), provider: 'openrouter' };
+    expect(providerReady(or)).toBe(false);
+    or.openrouter.apiKey = 'sk-or-test';
+    expect(providerReady(or)).toBe(true);
+    expect(providerLabel(or)).toContain('OpenRouter');
+
+    const custom: AiSettings = { ...structuredClone(DEFAULT_SETTINGS), provider: 'custom' };
+    expect(providerReady(custom)).toBe(true); // default Ollama URL, no key needed
+    expect(providerLabel(custom)).toContain('Ollama'); // preset recognized from URL
+  });
+
+  it('migrates v1 "local" settings to the custom backend', () => {
+    localStorage.setItem(
+      'kk-ai-settings',
+      JSON.stringify({
+        provider: 'local',
+        claude: { apiKey: '', model: 'claude-opus-4-8' },
+        local: { baseUrl: 'http://localhost:1234/v1', model: 'qwen3' },
+      }),
+    );
+    const loaded = loadSettings();
+    expect(loaded.provider).toBe('custom');
+    expect(loaded.custom.baseUrl).toBe('http://localhost:1234/v1');
+    expect(loaded.custom.model).toBe('qwen3');
+    expect(loaded.custom.apiKey).toBe('');
   });
 });
 
@@ -125,19 +152,81 @@ describe('generatePatch repair loop', () => {
     await expect(generatePatch('a bass', claudeSettings)).rejects.toThrow(/401/);
   });
 
-  it('calls the OpenAI-compatible endpoint for a local provider', async () => {
-    const local: AiSettings = {
-      provider: 'local',
-      claude: { ...DEFAULT_SETTINGS.claude },
-      local: { baseUrl: 'http://localhost:11434/v1', model: 'llama3.1' },
+  it('calls the OpenAI-compatible endpoint for the custom provider, no auth header without a key', async () => {
+    const custom: AiSettings = {
+      ...structuredClone(DEFAULT_SETTINGS),
+      provider: 'custom',
+      custom: { baseUrl: 'http://localhost:11434/v1', apiKey: '', model: 'llama3.1' },
     };
     const fetchMock = vi
       .fn()
       .mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: validPatch } }] }) });
     vi.stubGlobal('fetch', fetchMock);
 
-    const r = await generatePatch('a bass', local);
+    const r = await generatePatch('a bass', custom);
     expect(r.ok).toBe(true);
-    expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:11434/v1/chat/completions');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('http://localhost:11434/v1/chat/completions');
+    expect(init.headers.authorization).toBeUndefined();
+  });
+
+  it('sends a bearer key to a custom endpoint when configured', async () => {
+    const custom: AiSettings = {
+      ...structuredClone(DEFAULT_SETTINGS),
+      provider: 'custom',
+      custom: { baseUrl: 'https://api.groq.com/openai/v1', apiKey: 'gsk-test', model: 'llama-3.3-70b-versatile' },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: validPatch } }] }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await generatePatch('a bass', custom);
+    expect(fetchMock.mock.calls[0][1].headers.authorization).toBe('Bearer gsk-test');
+  });
+
+  it('routes the openrouter provider through openrouter.ai with bearer auth', async () => {
+    const or: AiSettings = {
+      ...structuredClone(DEFAULT_SETTINGS),
+      provider: 'openrouter',
+      openrouter: { apiKey: 'sk-or-test', model: 'anthropic/claude-sonnet-4.6' },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: validPatch } }] }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const r = await generatePatch('a bass', or);
+    expect(r.ok).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://openrouter.ai/api/v1/chat/completions');
+    expect(init.headers.authorization).toBe('Bearer sk-or-test');
+    expect(JSON.parse(init.body).model).toBe('anthropic/claude-sonnet-4.6');
+  });
+});
+
+describe('OpenRouter OAuth key exchange', () => {
+  it('posts the one-time code with the stored verifier and returns the key', async () => {
+    localStorage.setItem('kk-openrouter-verifier', 'test-verifier');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ key: 'sk-or-new' }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const key = await exchangeOpenRouterCode('one-time-code');
+    expect(key).toBe('sk-or-new');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://openrouter.ai/api/v1/auth/keys');
+    const body = JSON.parse(init.body);
+    expect(body.code).toBe('one-time-code');
+    expect(body.code_verifier).toBe('test-verifier');
+    // The verifier is single-use; a successful exchange must clear it.
+    expect(localStorage.getItem('kk-openrouter-verifier')).toBeNull();
+  });
+
+  it('surfaces a readable error when the exchange fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 403, statusText: 'Forbidden', text: async () => 'bad code' }),
+    );
+    await expect(exchangeOpenRouterCode('stale')).rejects.toThrow(/403/);
   });
 });

@@ -1,0 +1,37 @@
+<!doctype html>
+<!-- OpenRouter PKCE OAuth callback (core/aiprovider.ts). OpenRouter redirects
+     the consent popup here with ?code=…; the code goes into localStorage,
+     where the opener's "storage" listener picks it up and exchanges it for a
+     key. This page never sees the verifier or the key. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>KabelKraft — connecting OpenRouter…</title>
+    <style>
+      body {
+        background: #1a1a20;
+        color: #aaa;
+        font: 14px system-ui, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <p id="msg">Connecting…</p>
+    <script>
+      const code = new URLSearchParams(location.search).get('code');
+      if (code) {
+        localStorage.setItem('kk-openrouter-code', code);
+        document.getElementById('msg').textContent = 'Connected — you can close this window.';
+        window.close();
+      } else {
+        document.getElementById('msg').textContent =
+          'No authorization code received — close this window and try again.';
+      }
+    </script>
+  </body>
+</html>
