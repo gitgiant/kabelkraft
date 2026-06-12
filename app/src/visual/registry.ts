@@ -303,6 +303,17 @@ const blend: VisNodeDef = {
   ],
 };
 
+const visualin: VisNodeDef = {
+  type: 'visualin',
+  name: 'Visual In',
+  category: 'util',
+  description:
+    'The container Vis In pole — the frame from an upstream visualizer wired on the main ' +
+    'canvas. Blend it with local sources to layer scenes.',
+  ports: [{ ...visOut, description: 'Upstream visualizer frame (transparent when unwired).' }],
+  params: [{ id: 'fit', label: 'Fit', min: 0, max: 2, default: 0, options: FIT_OPTIONS }],
+};
+
 const output: VisNodeDef = {
   type: 'output',
   name: 'Output',
@@ -334,6 +345,7 @@ export const VIS_NODE_DEFS: Map<string, VisNodeDef> = new Map(
     bloom,
     mirror,
     blend,
+    visualin,
     output,
   ].map((d) => [d.type, d]),
 );

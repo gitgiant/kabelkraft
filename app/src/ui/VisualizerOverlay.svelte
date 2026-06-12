@@ -125,10 +125,9 @@
       return;
     }
     popup.win.requestAnimationFrame(popupLoop);
-    const mod = appState.graph.modules.get(popup.moduleId);
-    const g = mod ? visGraphOf(mod.data) : null;
-    if (popup.renderer && g && graphSupported(g)) {
-      popup.renderer.render(g, appState.visFeatures(popup.moduleId));
+    const frame = appState.visFrame(popup.moduleId);
+    if (popup.renderer && frame && graphSupported(frame.graph)) {
+      popup.renderer.render(frame);
     }
   }
 
@@ -155,8 +154,11 @@
 
     if (gpuMode) {
       if (renderer && graph && graphSupported(graph)) {
-        renderer.resolutionScale = res;
-        renderer.render(graph, features);
+        const frame = appState.visFrame(moduleId);
+        if (frame) {
+          renderer.resolutionScale = res;
+          renderer.render(frame);
+        }
       }
       return;
     }

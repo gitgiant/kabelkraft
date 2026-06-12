@@ -43,7 +43,7 @@ function texOr(env: RenderEnv, t: GPUTexture | null): GPUTextureView {
 
 /** Write a Float32Array into a node's cached uniform buffer and return it. */
 function uni(env: RenderEnv, nodeId: string, data: Float32Array): GPUBindingResource {
-  const buf = env.states.get(nodeId).uniform(env.device, data.byteLength);
+  const buf = env.states.get(env.ns + nodeId).uniform(env.device, data.byteLength);
   env.device.queue.writeBuffer(buf, 0, data);
   return { buffer: buf };
 }
@@ -106,7 +106,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
 
 const scope: NodeImpl = {
   render(env, node, _inputs, params) {
-    const state = env.states.get(node.id);
+    const state = env.states.get(env.ns + node.id);
     if (!state.storage) {
       state.storage = env.device.createBuffer({
         size: VIS_WINDOW * 4,
@@ -164,7 +164,7 @@ fn pfs(in: PVsOut) -> @location(0) vec4f {
 
 const particles: NodeImpl = {
   render(env, node, _inputs, params) {
-    const state = env.states.get(node.id);
+    const state = env.states.get(env.ns + node.id);
     const f = env.features;
     const W = env.width;
     const H = env.height;
@@ -256,7 +256,7 @@ const particles: NodeImpl = {
     });
 
     const out = env.pool.acquire(W, H);
-    const screenU = env.states.get(node.id).uniform(env.device, 16);
+    const screenU = env.states.get(env.ns + node.id).uniform(env.device, 16);
     env.device.queue.writeBuffer(screenU, 0, new Float32Array([W, H, 0, 0]));
     const pass = env.encoder.beginRenderPass({
       colorAttachments: [
@@ -377,8 +377,11 @@ const MEDIA_FS = /* wgsl */ `
 fn fs(in: VsOut) -> @location(0) vec4f {
   var uv = (in.uv - 0.5) * u.xy + 0.5;
   if (u.z > 0.5) { uv.x = 1 - uv.x; }
-  if (uv.x < 0 || uv.x > 1 || uv.y < 0 || uv.y > 1) { return vec4f(0); }
-  return textureSample(tex, samp, uv);
+  // Sample unconditionally (textureSample needs uniform control flow), then
+  // mask the letterbox region to transparent.
+  let inside = uv.x >= 0 && uv.x <= 1 && uv.y >= 0 && uv.y <= 1;
+  let c = textureSample(tex, samp, clamp(uv, vec2f(0), vec2f(1)));
+  return select(vec4f(0), c, inside);
 }
 `;
 
@@ -420,7 +423,7 @@ function drawMedia(
 /** (Re)upload the current video frame into the node's persistent texture. */
 function uploadVideoFrame(env: RenderEnv, nodeId: string, video: HTMLVideoElement): GPUTexture | null {
   if (video.readyState < 2 || video.videoWidth === 0) return null;
-  const state = env.states.get(nodeId);
+  const state = env.states.get(env.ns + nodeId);
   if (!state.texture || state.texW !== video.videoWidth || state.texH !== video.videoHeight) {
     state.texture?.destroy();
     state.texture = createPersistentTexture(env.device, video.videoWidth, video.videoHeight);
@@ -437,7 +440,7 @@ function uploadVideoFrame(env: RenderEnv, nodeId: string, video: HTMLVideoElemen
 
 const image: NodeImpl = {
   render(env, node, _inputs, params) {
-    const state = env.states.get(node.id);
+    const state = env.states.get(env.ns + node.id);
     const src = (node.data?.src as string) ?? null;
     if (src !== state.srcKey && !state.loading) {
       state.srcKey = src;
@@ -472,7 +475,7 @@ const image: NodeImpl = {
 
 const video: NodeImpl = {
   render(env, node, _inputs, params) {
-    const state = env.states.get(node.id);
+    const state = env.states.get(env.ns + node.id);
     const src = (node.data?.src as string) ?? null;
     if (src !== state.srcKey) {
       state.srcKey = src;
@@ -497,7 +500,7 @@ const video: NodeImpl = {
 
 const webcam: NodeImpl = {
   render(env, node, _inputs, params) {
-    const state = env.states.get(node.id);
+    const state = env.states.get(env.ns + node.id);
     if (!state.video && !state.loading) {
       state.loading = true;
       void navigator.mediaDevices
@@ -525,6 +528,16 @@ const webcam: NodeImpl = {
   },
 };
 
+// -- visual in (container pole) -------------------------------------------------
+
+const visualin: NodeImpl = {
+  render(env, node, _inputs, params) {
+    if (!env.upstream) return null;
+    // Upstream frames may be a different resolution — fit like media sources.
+    return drawMedia(env, node, env.upstream, env.upstream.width, env.upstream.height, params.fit, 0);
+  },
+};
+
 // -- text layer ----------------------------------------------------------------
 // Glyphs rasterize on an OffscreenCanvas (no WGSL font madness) and upload as
 // a texture each frame — text is one layer among many, so it blends like any
@@ -536,7 +549,7 @@ function hslCss(h: number, s: number, l: number, a = 1): string {
 
 const textlayer: NodeImpl = {
   render(env, node, _inputs, params) {
-    const state = env.states.get(node.id);
+    const state = env.states.get(env.ns + node.id);
     const f = env.features;
     const live = f?.text ?? '';
     const stack = f?.textStack ?? [];
@@ -873,10 +886,10 @@ fn fs(in: VsOut) -> @location(0) vec4f {
   let c = in.uv - 0.5;
   let rot = mat2x2f(cos(u.y), -sin(u.y), sin(u.y), cos(u.y));
   let uvP = rot * c * u.x + 0.5;
-  var fb = vec4f(0);
-  if (uvP.x >= 0 && uvP.x <= 1 && uvP.y >= 0 && uvP.y <= 1) {
-    fb = textureSample(prev, samp, uvP) * u.z;
-  }
+  // Sample unconditionally (uniform control flow), mask outside the frame.
+  let inside = uvP.x >= 0 && uvP.x <= 1 && uvP.y >= 0 && uvP.y <= 1;
+  let prevC = textureSample(prev, samp, clamp(uvP, vec2f(0), vec2f(1)));
+  let fb = select(vec4f(0), prevC * u.z, inside);
   // screen-combine keeps trails luminous without blowing out
   return cur + fb * (1 - cur.a);
 }
@@ -884,7 +897,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
 
 const feedback: NodeImpl = {
   render(env, node, inputs, params) {
-    const state = env.states.get(node.id);
+    const state = env.states.get(env.ns + node.id);
     if (!state.texture || state.texW !== env.width || state.texH !== env.height) {
       state.texture?.destroy();
       state.texture = createPersistentTexture(env.device, env.width, env.height);
@@ -956,6 +969,7 @@ export const NODE_IMPLS: Record<string, NodeImpl> = {
   video,
   webcam,
   textlayer,
+  visualin,
   blur,
   pixelate,
   feedback,

@@ -374,9 +374,9 @@ export class Graph {
     if (!check.ok) return check;
     const type = this.port(from)!.type;
 
-    // Control/color fan-in: one wire only; last-connected wins (PRD §4.3).
+    // Control/color/visual fan-in: one wire only; last-connected wins (PRD §4.3).
     let detached: Wire | undefined;
-    if (type === 'control' || type === 'color') {
+    if (type === 'control' || type === 'color' || type === 'visual') {
       const existing = this.wiresInto(to);
       if (existing.length > 0) {
         detached = existing[0];

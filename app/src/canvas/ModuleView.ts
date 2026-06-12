@@ -1685,6 +1685,18 @@ export class ModuleView extends Container {
     this.addChild(edit);
   }
 
+  /** Cheap screen-bounds test for thumbnail culling (stage is in screen px). */
+  private tileOnScreen(): boolean {
+    const gp = this.getGlobalPosition();
+    const s = this.worldTransform.a;
+    return (
+      gp.x + this.w * s > 0 &&
+      gp.x < window.innerWidth &&
+      gp.y + this.h * s > 0 &&
+      gp.y < window.innerHeight
+    );
+  }
+
   /**
    * Tile thumbnail — Canvas2D-equivalent approximation of the container's
    * visual graph (first source node wins), driven by the UI-side feature hub.
@@ -1697,10 +1709,11 @@ export class ModuleView extends Container {
       if (thumb.renderer) {
         this.visG.clear();
         this.visSprite.visible = true;
-        if ((this.visTick++ & 3) === 0) {
-          const graph = visGraphOf(this.instance.data);
-          if (graph && graphSupported(graph)) {
-            thumb.renderer.render(graph, appState.visFeatures(this.instance.id));
+        // ¼ rate, and culled entirely while the tile is off screen.
+        if ((this.visTick++ & 3) === 0 && this.tileOnScreen()) {
+          const frame = appState.visFrame(this.instance.id);
+          if (frame && graphSupported(frame.graph)) {
+            thumb.renderer.render(frame);
             thumb.texture.source.update();
           }
         }

@@ -146,7 +146,7 @@ draws the thumbnail texture.
   Text Input, Note Names.
 - whisper.cpp local setup explored separately (native STT path).
 
-## Phase 4 — Chaining
+## Phase 4 — Chaining ✅ done 2026-06-12
 
 - `visual` wire legal on main canvas between containers (+ visual pole).
 - Cross-container topological scheduling, shared device/texture pool,

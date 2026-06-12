@@ -59,6 +59,7 @@ test('visualizer container computes features and big view opens', async ({ page 
   await page.locator('.vis-overlay button[title="Close (Esc)"]').click();
   await expect(page.locator('.vis-overlay')).toBeHidden();
   expect(errors).toEqual([]);
+  expect(await page.evaluate(() => window.__kk.visGpuErrors())).toBe(0);
 });
 
 test('visual graph editing: effect chain renders and editor opens', async ({ page }) => {
@@ -139,6 +140,7 @@ test('visual graph editing: effect chain renders and editor opens', async ({ pag
   await page.locator('.vised button[title="Close (Esc)"]').click();
   await expect(page.locator('.vised')).toBeHidden();
   expect(errors).toEqual([]);
+  expect(await page.evaluate(() => window.__kk.visGpuErrors())).toBe(0);
 });
 
 test('text wire: producer → container → Text Layer renders', async ({ page }) => {
@@ -194,6 +196,73 @@ test('text wire: producer → container → Text Layer renders', async ({ page }
     await page.locator('.vis-overlay button[title="Close (Esc)"]').click();
   }
   expect(errors).toEqual([]);
+  expect(await page.evaluate(() => window.__kk.visGpuErrors())).toBe(0);
+});
+
+test('visual wire chains containers: A renders into B via Visual In', async ({ page }) => {
+  const errors = captureErrors(page);
+  await bootWithAudio(page);
+  const rig = await classicRig(page);
+
+  const ids = await page.evaluate(({ synth }) => {
+    const s = window.__kk;
+    const a = s.addModule('visualizer', 300, 500); // keeps init spectrum graph
+    const b = s.addModule('visualizer', 700, 500);
+    s.connect({ moduleId: synth, portId: 'out' }, { moduleId: a.id, portId: 'in' });
+    const chainWire = s.connect(
+      { moduleId: a.id, portId: 'vout' },
+      { moduleId: b.id, portId: 'vin' },
+    );
+    // B = upstream frame warped, plus nothing local.
+    s.setVisGraph(b.id, {
+      nodes: [
+        { id: 'v1', type: 'visualin', x: 40, y: 60, params: {} },
+        { id: 'v2', type: 'warp', x: 240, y: 60, params: { amount: 0.5, freq: 10, speed: 1 } },
+        { id: 'v3', type: 'output', x: 440, y: 60, params: {} },
+      ],
+      wires: [
+        { id: 'vw1', from: { nodeId: 'v1', portId: 'out' }, to: { nodeId: 'v2', portId: 'in' } },
+        { id: 'vw2', from: { nodeId: 'v2', portId: 'out' }, to: { nodeId: 'v3', portId: 'in' } },
+      ],
+    });
+    return { a: a.id, b: b.id, chained: chainWire.ok };
+  }, { synth: rig.synth });
+  expect(ids.chained).toBe(true);
+
+  // The frame builder resolves the chain (and survives a wire-back cycle).
+  const chain = await page.evaluate(({ a, b }) => {
+    const s = window.__kk;
+    const frame = s.visFrame(b)!;
+    const cycleWire = s.connect({ moduleId: b, portId: 'vout' }, { moduleId: a, portId: 'vin' });
+    const cycled = s.visFrame(b)!; // must terminate, breaking the loop
+    return {
+      upstreamId: frame.upstream[0]?.id,
+      cycleWireOk: cycleWire.ok,
+      cycledDepthOk: cycled.upstream[0]?.upstream.length === 0,
+    };
+  }, ids);
+  expect(chain.upstreamId).toBe(ids.a);
+  expect(chain.cycleWireOk).toBe(true);
+  expect(chain.cycledDepthOk).toBe(true);
+
+  await play(page);
+  const gpu = await page.evaluate(() => 'gpu' in navigator);
+  if (gpu) {
+    await page.evaluate(({ b }) => {
+      const c = window.__kkCanvas;
+      const p = c.clientPointFor(b);
+      if (p) c.panBy(400 - p.x, 300 - p.y);
+      window.__kk.openVisualizer(b);
+    }, ids);
+    await expect(page.locator('.vis-overlay')).toBeVisible();
+    const before = await page.evaluate(() => window.__kk.visFramesRendered());
+    await expect
+      .poll(() => page.evaluate(() => window.__kk.visFramesRendered()), { timeout: 5000 })
+      .toBeGreaterThan(before + 10);
+    await page.locator('.vis-overlay button[title="Close (Esc)"]').click();
+  }
+  expect(errors).toEqual([]);
+  expect(await page.evaluate(() => window.__kk.visGpuErrors())).toBe(0);
 });
 
 test('double-clicking the tile scene opens the visual graph editor', async ({ page }) => {

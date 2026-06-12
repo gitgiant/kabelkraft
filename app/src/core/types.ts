@@ -4,7 +4,15 @@
  * JSON schema, and (later) the AI spec pack.
  */
 
-export type PortType = 'audio' | 'note' | 'control' | 'trigger' | 'transport' | 'color' | 'text';
+export type PortType =
+  | 'audio'
+  | 'note'
+  | 'control'
+  | 'trigger'
+  | 'transport'
+  | 'color'
+  | 'text'
+  | 'visual';
 
 export type PortDirection = 'in' | 'out';
 
@@ -17,6 +25,7 @@ export const PORT_TYPE_COLORS: Record<PortType, number> = {
   transport: 0xf0f0f0, // white
   color: 0xb070ff, // violet — carries a live RGB value (Color Gen → UI tints)
   text: 0xb9c0cc, // steel — carries live string events (lyrics, readouts)
+  visual: 0x52e0c4, // teal — carries a rendered frame (visualizer chaining)
 };
 
 /** One text-stream event (text wires). Interim events stream while a final one is forming. */

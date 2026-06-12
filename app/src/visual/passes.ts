@@ -224,12 +224,15 @@ export class NodeStateStore {
     return s;
   }
 
-  /** Dispose state for nodes no longer in the graph (stops webcam tracks). */
-  prune(liveIds: ReadonlySet<string>): void {
+  /**
+   * Dispose state for nodes no longer rendered (stops webcam tracks).
+   * Keys are "<containerId>/<nodeId>" (chained containers share one store);
+   * multi-pass nodes append ":suffix" — same lifetime as their base key.
+   */
+  prune(liveKeys: ReadonlySet<string>): void {
     for (const [id, s] of this.states) {
-      // Multi-pass nodes key sub-states as "nodeId:suffix" — same lifetime.
       const base = id.split(':')[0];
-      if (!liveIds.has(base)) {
+      if (!liveKeys.has(base)) {
         s.dispose();
         this.states.delete(id);
       }
@@ -257,6 +260,10 @@ export interface RenderEnv {
   time: number;
   /** Seconds since last frame. */
   dt: number;
+  /** State-key namespace, "<containerId>/" — chained containers share the store. */
+  ns: string;
+  /** Frame from the container's Vis In pole (upstream visualizer), if wired. */
+  upstream: GPUTexture | null;
 }
 
 /**

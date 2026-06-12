@@ -235,6 +235,8 @@ const visualizer: ModuleDef = {
     { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note events spawn particles / flashes.' },
     { id: 'mod', label: 'Mod', type: 'control', direction: 'in', description: 'Modulates scene intensity (0–1).' },
     { id: 'text', label: 'Text', type: 'text', direction: 'in', description: 'Text stream for Text Layer nodes (lyrics, readouts); multiple wires merge.' },
+    { id: 'vin', label: 'Vis In', type: 'visual', direction: 'in', description: 'Frame from another visualizer — appears inside as a Visual In node, for layering scenes.' },
+    { id: 'vout', label: 'Vis Out', type: 'visual', direction: 'out', description: 'This visualizer’s rendered frame; chain it into another visualizer’s Vis In.' },
   ],
   params: [],
   customFace: true,

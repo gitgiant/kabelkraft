@@ -26,8 +26,9 @@ import { Engine } from './engine/engine';
 import type { MeterReading, StatusMessage } from './engine/messages';
 import { encodeWav } from './engine/wav';
 import { VisFeatureHub } from './visual/features';
+import { visGraphOf } from './visual/migrate';
 import { createVisRingBuffer } from './visual/ring';
-import { visFramesRendered } from './visual/runtime';
+import { visFramesRendered, visGpuErrors, type ContainerFrame } from './visual/runtime';
 import type { VisFeatures, VisGraphData } from './visual/types';
 
 export type StateEvent =
@@ -78,6 +79,31 @@ export class AppState {
   /** Total frames the WebGPU visual runtime rendered (e2e progress probe). */
   visFramesRendered(): number {
     return visFramesRendered();
+  }
+
+  /** WebGPU validation errors this session (0 = shaders healthy) — e2e probe. */
+  visGpuErrors(): number {
+    return visGpuErrors();
+  }
+
+  /**
+   * Build the render chain for one visualizer: its graph + features plus the
+   * upstream containers wired into its Vis In pole (cycles broken — an
+   * already-visited container upstream is skipped).
+   */
+  visFrame(moduleId: string, visited: Set<string> = new Set()): ContainerFrame | null {
+    const mod = this.graph.modules.get(moduleId);
+    if (mod?.type !== 'visualizer' || visited.has(moduleId)) return null;
+    const graph = visGraphOf(mod.data);
+    if (!graph) return null;
+    visited.add(moduleId);
+    const upstream: ContainerFrame[] = [];
+    for (const w of this.graph.wires.values()) {
+      if (w.type !== 'visual' || w.to.moduleId !== moduleId || w.to.portId !== 'vin') continue;
+      const up = this.visFrame(w.from.moduleId, visited);
+      if (up) upstream.push(up);
+    }
+    return { id: moduleId, graph, features: this.visFeatures(moduleId), upstream };
   }
 
   // -- text streams (VISUALIZER_ENGINE_PLAN.md Phase 3) -----------------------

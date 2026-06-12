@@ -35,6 +35,13 @@ export function graphSupported(graph: VisGraphData | null): boolean {
 
 let devicePromise: Promise<GPUDevice | null> | null = null;
 
+/** WebGPU validation errors this session (shader/pipeline bugs) — e2e probe. */
+let gpuErrors = 0;
+
+export function visGpuErrors(): number {
+  return gpuErrors;
+}
+
 /** Shared device across all containers/views; null = WebGPU unavailable. */
 export function getDevice(): Promise<GPUDevice | null> {
   devicePromise ??= (async () => {
@@ -45,6 +52,12 @@ export function getDevice(): Promise<GPUDevice | null> {
       device?.lost.then(() => {
         devicePromise = null;
       });
+      if (device) {
+        device.onuncapturederror = (e) => {
+          gpuErrors++;
+          console.error('WebGPU validation error:', e.error.message);
+        };
+      }
       return device;
     } catch {
       return null;
@@ -75,6 +88,20 @@ fn fs(in: VsOut) -> @location(0) vec4f {
   return vec4f(c.rgb + bg * (1 - c.a), 1);
 }
 `;
+
+/**
+ * One container plus the upstream containers feeding its Vis In pole —
+ * built by the caller (state.visFrame) from main-canvas visual wires, with
+ * cycles already broken.
+ */
+export interface ContainerFrame {
+  /** Container module id — namespaces node state across the chain. */
+  id: string;
+  graph: VisGraphData;
+  features: VisFeatures | null;
+  /** Rendered before this container; [0] feeds the Visual In node. */
+  upstream: ContainerFrame[];
+}
 
 export class ContainerRenderer {
   private pool: TexturePool;
@@ -107,8 +134,44 @@ export class ContainerRenderer {
    */
   resolutionScale = 1;
 
-  /** Draw one frame of the container's graph into the canvas. */
-  render(graph: VisGraphData, features: VisFeatures | null): void {
+  /** Render one container graph; recurses into upstream containers first. */
+  private evalContainer(
+    base: Omit<RenderEnv, 'ns' | 'upstream' | 'features'>,
+    frame: ContainerFrame,
+    liveKeys: Set<string>,
+  ): GPUTexture | null {
+    const upstream =
+      frame.upstream.length > 0 ? this.evalContainer(base, frame.upstream[0], liveKeys) : null;
+    const env: RenderEnv = { ...base, ns: `${frame.id}/`, upstream, features: frame.features };
+    const textures = new Map<string, GPUTexture | null>();
+    let final: GPUTexture | null = null;
+    for (const node of topoOrder(frame.graph)) {
+      const def = VIS_NODE_DEFS.get(node.type);
+      if (!def) continue;
+      liveKeys.add(env.ns + node.id);
+      if (node.type === 'output') {
+        const wire = frame.graph.wires.find((w) => w.to.nodeId === node.id && w.to.portId === 'in');
+        final = wire ? (textures.get(wire.from.nodeId) ?? null) : null;
+        continue;
+      }
+      const impl = NODE_IMPLS[node.type];
+      if (!impl) continue;
+      const inputs = visualInPorts(def).map((port) => {
+        const wire = frame.graph.wires.find(
+          (w) => w.to.nodeId === node.id && w.to.portId === port.id,
+        );
+        return wire ? (textures.get(wire.from.nodeId) ?? null) : null;
+      });
+      textures.set(
+        node.id,
+        impl.render(env, node, inputs, resolveParams(frame.graph, node, frame.features)),
+      );
+    }
+    return final;
+  }
+
+  /** Draw one frame of the container chain into the canvas. */
+  render(frame: ContainerFrame): void {
     const el = this.canvas as HTMLCanvasElement;
     const s = Math.max(0.25, Math.min(3, this.resolutionScale));
     const w = el.clientWidth ? Math.round(el.clientWidth * s) : this.canvas.width;
@@ -125,37 +188,19 @@ export class ContainerRenderer {
     const dt = Math.min(0.1, Math.max(0.001, now - this.lastTime));
     this.lastTime = now;
 
-    const env: RenderEnv = {
+    const base = {
       device: this.device,
       encoder: this.device.createCommandEncoder(),
       pool: this.pool,
       states: this.states,
       width: this.canvas.width,
       height: this.canvas.height,
-      features,
       time: now,
       dt,
     };
-
-    // Evaluate the DAG.
-    const textures = new Map<string, GPUTexture | null>();
-    let final: GPUTexture | null = null;
-    for (const node of topoOrder(graph)) {
-      const def = VIS_NODE_DEFS.get(node.type);
-      if (!def) continue;
-      if (node.type === 'output') {
-        const wire = graph.wires.find((w) => w.to.nodeId === node.id && w.to.portId === 'in');
-        final = wire ? (textures.get(wire.from.nodeId) ?? null) : null;
-        continue;
-      }
-      const impl = NODE_IMPLS[node.type];
-      if (!impl) continue;
-      const inputs = visualInPorts(def).map((port) => {
-        const wire = graph.wires.find((w) => w.to.nodeId === node.id && w.to.portId === port.id);
-        return wire ? (textures.get(wire.from.nodeId) ?? null) : null;
-      });
-      textures.set(node.id, impl.render(env, node, inputs, resolveParams(graph, node, features)));
-    }
+    const liveKeys = new Set<string>();
+    const final = this.evalContainer(base, frame, liveKeys);
+    const env = base as unknown as RenderEnv;
 
     // Blit (or clear) to the canvas.
     const view = this.ctx.getCurrentTexture().createView();
@@ -186,7 +231,7 @@ export class ContainerRenderer {
 
     this.device.queue.submit([env.encoder.finish()]);
     this.pool.endFrame();
-    this.states.prune(new Set(graph.nodes.map((n) => n.id)));
+    this.states.prune(liveKeys);
     framesRendered++;
   }
 

@@ -134,7 +134,14 @@
     raf = requestAnimationFrame(tickPreview);
     reposition();
     if (previewRenderer && moduleId) {
-      previewRenderer.render($state.snapshot(graph) as VisGraphData, appState.visFeatures(moduleId));
+      // Local working copy of the graph + the live upstream chain.
+      const chain = appState.visFrame(moduleId);
+      previewRenderer.render({
+        id: moduleId,
+        graph: $state.snapshot(graph) as VisGraphData,
+        features: appState.visFeatures(moduleId),
+        upstream: chain?.upstream ?? [],
+      });
     }
   }
 
