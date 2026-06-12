@@ -4,6 +4,7 @@ import {
   bootWithAudio,
   captureErrors,
   classicRig,
+  clearPatch,
   play,
   pollPeak,
   settleFrames,
@@ -131,6 +132,41 @@ test('sample voice plays injected PCM pitched by the sequencer', async ({ page }
   expect(roundTrip.embedded).toBe(1);
   expect(roundTrip.restoredName).toBe('test-sine.wav');
   expect(roundTrip.restoredLength).toBe(22050);
+});
+
+test('Drum Synth starter grooves on play with live-synthesized voices', async ({ page }) => {
+  const errors = captureErrors(page);
+  await bootWithAudio(page);
+  await clearPatch(page); // the boot starter's group would only add noise here
+
+  await page.locator('.starter-entry', { hasText: 'Drum Synth' }).click();
+
+  // One faced group; the trigger rows arrive with the preset beat applied.
+  const info = await page.evaluate(() => {
+    const s = window.__kk;
+    const group = [...s.graph.groups.values()][0];
+    const mods = [...s.graph.modules.values()];
+    const kickSeq = mods.find((m) => m.type === 'sequencer' && m.label === 'Kick');
+    const steps = (kickSeq?.data.steps ?? []) as Array<{ on: boolean }>;
+    return {
+      groups: s.graph.groups.size,
+      faceElements: group?.face?.elements.length ?? 0,
+      kickStepsOn: steps.filter((st) => st.on).length,
+      mixerId: mods.find((m) => m.type === 'mixer')?.id ?? '',
+      outId: mods.find((m) => m.type === 'audioOut')?.id ?? '',
+    };
+  });
+  expect(info.groups).toBe(1);
+  expect(info.faceElements).toBeGreaterThan(30); // 808 panel: knobs + pattern views
+  expect(info.kickStepsOn).toBe(2); // preset beat: kick on 1 and 3
+
+  // No samples anywhere — the drums are synthesized live, yet play makes sound.
+  await play(page);
+  await pollPeak(page, info.mixerId);
+  await pollPeak(page, info.outId);
+
+  await settleFrames(page, 5);
+  expect(errors).toEqual([]);
 });
 
 test('theme switch via Options persists in the unified settings', async ({ page }) => {
