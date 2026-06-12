@@ -10,3 +10,6 @@ key.pem
 # Stray test media (downloaded MIDI samples)
 *.mid
 *.midi
+
+# Legal drafts and notes (local only until lawyer-reviewed)
+legal/
