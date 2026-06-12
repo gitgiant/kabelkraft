@@ -49,6 +49,7 @@ export type StateEvent =
   | 'faceEditorChanged' // face editor opened/closed
   | 'faceLearnChanged' // face learn armed/canceled/completed
   | 'composerChanged' // piano-roll editor opened/closed
+  | 'composerAiRequest' // container 🤖 button: open a composer's AI popup
   | 'rangeConfigChanged'; // knob/slider range popup opened/closed
 
 type Listener = () => void;
@@ -378,6 +379,17 @@ export class AppState {
   /** Tile size while the piano roll is open (world px, within def max clamp). */
   static readonly COMPOSER_OPEN_W = 720;
   static readonly COMPOSER_OPEN_H = 480;
+
+  /** Container-tile 🤖: open the piano roll (growing it if needed) with its
+   * AI popup up. The PianoRoll component consumes the request on mount/event. */
+  composerAiRequest: string | null = null;
+
+  requestComposerAi(moduleId: string): void {
+    this.openComposer(moduleId);
+    if (!this.composerOpen.has(moduleId)) return; // not a composer
+    this.composerAiRequest = moduleId;
+    this.emit('composerAiRequest');
+  }
 
   openComposer(moduleId: string): void {
     const mod = this.graph.modules.get(moduleId);
@@ -1197,6 +1209,127 @@ export class AppState {
     this.emit('graphChanged');
     this.emit('selectionChanged');
     return { ok: true, errors: [], warnings, groupId: group.id, moduleIds: [...idMap.values()] };
+  }
+
+  /**
+   * AI edit of an existing group (container 🤖 button): validate a .kkgroup
+   * reply and swap the group's contents in place — same group id, tile
+   * position, and color, so intrinsic-pole wires and canvas placement survive.
+   * External wires reconnect to module ids the model kept (the group context
+   * tells it to keep them); the rest drop with warnings. One undo step.
+   */
+  replaceAiGroup(
+    groupId: string,
+    text: string,
+  ): { ok: boolean; errors: string[]; warnings: string[]; groupId?: string; moduleIds: string[] } {
+    const group = this.graph.groups.get(groupId);
+    if (!group) return { ok: false, errors: ['The group no longer exists.'], warnings: [], moduleIds: [] };
+    const result = parseKkGroup(text, MODULE_DEFS);
+    if (!result.ok || !result.patch) {
+      return { ok: false, errors: result.errors, warnings: result.warnings, moduleIds: [] };
+    }
+    const patch = result.patch;
+    const warnings = [...result.warnings];
+    this.beginUndoable();
+
+    // Record wires crossing the boundary by inner module id + port; they are
+    // reconnected after the swap wherever the model kept the id.
+    const members = this.graph.modulesInGroup(groupId);
+    const external: Array<{ outside: PortRef; insideId: string; insidePort: string; toInside: boolean }> = [];
+    for (const w of this.graph.wires.values()) {
+      const fromIn = members.has(w.from.moduleId);
+      const toIn = members.has(w.to.moduleId);
+      if (fromIn === toIn) continue;
+      external.push(
+        fromIn
+          ? { outside: w.to, insideId: w.from.moduleId, insidePort: w.from.portId, toInside: false }
+          : { outside: w.from, insideId: w.to.moduleId, insidePort: w.to.portId, toInside: true },
+      );
+    }
+
+    // Drop the old contents: member modules (their wires go too) and nested
+    // child groups. The group object itself survives.
+    for (const id of members) this.graph.removeModule(id);
+    const dropGroups = (id: string) => {
+      const grp = this.graph.groups.get(id);
+      if (!grp) return;
+      for (const child of grp.groupIds) dropGroups(child);
+      if (id !== groupId) this.graph.groups.delete(id);
+    };
+    dropGroups(groupId);
+    group.groupIds = [];
+
+    // Insert the new contents around the tile (importAiPatch layout rules).
+    const xs = patch.modules.map((m) => m.x);
+    const ys = patch.modules.map((m) => m.y);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    const useHints = Math.max(...xs) - minX + (Math.max(...ys) - minY) > 100;
+    const idMap = new Map<string, string>();
+    patch.modules.forEach((m, i) => {
+      const pos = useHints
+        ? { x: group.x + (m.x - minX), y: group.y + (m.y - minY) }
+        : { x: group.x + (i % 3) * 320, y: group.y + Math.floor(i / 3) * 300 };
+      const inst = createInstance(this.graph.def(m.type), pos.x, pos.y);
+      inst.params = { ...inst.params, ...m.params };
+      if (m.data) inst.data = { ...inst.data, ...m.data };
+      if (m.label) inst.label = m.label;
+      this.graph.addModule(inst);
+      idMap.set(m.id, inst.id);
+    });
+    group.moduleIds = [...idMap.values()];
+    group.name = patch.name;
+
+    for (const w of patch.wires) {
+      const res = this.graph.connect(
+        { moduleId: idMap.get(w.from.module)!, portId: w.from.port },
+        { moduleId: idMap.get(w.to.module)!, portId: w.to.port },
+      );
+      if (!res.ok) {
+        warnings.push(`Wire ${w.from.module}.${w.from.port} → ${w.to.module}.${w.to.port} dropped: ${res.reason}`);
+      }
+    }
+
+    for (const ext of external) {
+      const inner = idMap.get(ext.insideId);
+      if (!inner) {
+        warnings.push(`External wire to ${ext.insideId}.${ext.insidePort} dropped: the module was removed.`);
+        continue;
+      }
+      const innerRef = { moduleId: inner, portId: ext.insidePort };
+      const res = ext.toInside
+        ? this.graph.connect(ext.outside, innerRef)
+        : this.graph.connect(innerRef, ext.outside);
+      if (!res.ok) warnings.push(`External wire to ${ext.insideId}.${ext.insidePort} dropped: ${res.reason}`);
+    }
+
+    // Face: a reply face replaces the old one (bindings remapped to the new
+    // instance ids); no reply face keeps the old layout minus dead bindings.
+    const remapFace = (face: FaceSpec): FaceSpec => ({
+      ...face,
+      elements: face.elements.map((el) => ({
+        ...el,
+        moduleId: el.moduleId ? idMap.get(el.moduleId) : undefined,
+        moduleId2: el.moduleId2 ? idMap.get(el.moduleId2) : undefined,
+      })),
+    });
+    if (patch.face) {
+      const face = remapFace(patch.face);
+      pruneFaceBindings(this.graph, groupId, face);
+      group.face = face;
+      group.collapsed = true;
+    } else if (group.face) {
+      const face = remapFace(group.face);
+      pruneFaceBindings(this.graph, groupId, face);
+      group.face = face;
+    }
+
+    this.syncEngine();
+    this.clearSelection();
+    this.selectedGroupIds.add(groupId);
+    this.emit('graphChanged');
+    this.emit('selectionChanged');
+    return { ok: true, errors: [], warnings, groupId, moduleIds: [...idMap.values()] };
   }
 
   // -- AI project import (whole-project generation) ---------------------------

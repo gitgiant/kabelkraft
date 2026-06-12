@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
-  import { buildAiContext, withContext } from '../core/aicontext';
+  import { buildAiContext, buildGroupContext, withContext } from '../core/aicontext';
 import { extractJson } from '../core/aiimport';
   import { generateProjectSpecPack, parseKkProject } from '../core/aiproject';
   import { MODULE_DEFS } from '../core/registry';
@@ -23,9 +23,12 @@ import { extractJson } from '../core/aiimport';
   // instead — same spec pack, same validator, with an automatic repair loop.
 
   let open = $state(false);
-  // 'patch' = insert a module group; 'project' = replace the whole project
-  // (same providers, same repair loop, project-wide spec with embedded MIDI).
-  let mode = $state<'patch' | 'project'>('patch');
+  // 'patch' = insert a module group; 'project' = replace the whole project;
+  // 'group' = edit ONE existing group in place (container 🤖 button) — its
+  // full configuration rides along in the prompt context.
+  let mode = $state<'patch' | 'project' | 'group'>('patch');
+  // Target of a 'group' edit.
+  let groupId = $state('');
   let text = $state('');
   let errors = $state<string[]>([]);
   let warnings = $state<string[]>([]);
@@ -43,12 +46,13 @@ import { extractJson } from '../core/aiimport';
   let placing = $state(false);
 
   onMount(() => {
-    const toggle = (m: 'patch' | 'project') => {
-      if (open && mode === m) {
+    const toggle = (m: 'patch' | 'project' | 'group', target = '') => {
+      if (open && mode === m && groupId === target) {
         open = false;
         return;
       }
       mode = m;
+      groupId = target;
       open = true;
       errors = [];
       warnings = [];
@@ -58,14 +62,17 @@ import { extractJson } from '../core/aiimport';
     };
     const onToggle = () => toggle('patch');
     const onToggleProject = () => toggle('project');
+    const onToggleGroup = (e: Event) => toggle('group', (e as CustomEvent<{ groupId: string }>).detail.groupId);
     window.addEventListener('kk-ai-import', onToggle);
     window.addEventListener('kk-ai-project', onToggleProject);
+    window.addEventListener('kk-ai-group', onToggleGroup);
     // Drag the ready-patch chip anywhere over the canvas to place it there.
     window.addEventListener('dragover', onWindowDragOver);
     window.addEventListener('drop', onWindowDrop);
     return () => {
       window.removeEventListener('kk-ai-import', onToggle);
       window.removeEventListener('kk-ai-project', onToggleProject);
+      window.removeEventListener('kk-ai-group', onToggleGroup);
       window.removeEventListener('dragover', onWindowDragOver);
       window.removeEventListener('drop', onWindowDrop);
     };
@@ -117,6 +124,20 @@ import { extractJson } from '../core/aiimport';
 
   let userPrompt = $state('');
 
+  /** Group edit: swap the target group's contents in place (one undo step). */
+  function importGroupEdit(t: string) {
+    imported = false;
+    const result = appState.replaceAiGroup(groupId, t);
+    errors = result.errors;
+    warnings = result.warnings;
+    if (result.ok) {
+      patchCanvas.popInImport(result.moduleIds, result.groupId);
+      imported = true;
+      text = '';
+      setTimeout(() => (open = false), 900);
+    }
+  }
+
   /** Project import replaces everything — validate, confirm, import, lay out. */
   function importProject(t: string) {
     imported = false;
@@ -155,13 +176,19 @@ import { extractJson } from '../core/aiimport';
     readyPatch = '';
     try {
       const gen = mode === 'project' ? generateProject : generatePatch;
-      const contextual = withContext(buildAiContext(appState.graph), prompt);
+      const context =
+        mode === 'group'
+          ? `${buildAiContext(appState.graph)}\n\n${buildGroupContext(appState.graph, groupId)}`
+          : buildAiContext(appState.graph);
+      const contextual = withContext(context, prompt);
       const result = await gen(contextual, settings, 3, (s) => (genStatus = s));
       text = result.text;
       if (!result.ok) {
         runImport(); // surface the validation errors (nothing is inserted)
       } else if (mode === 'project') {
         importProject(result.text); // whole project: no chip, load it
+      } else if (mode === 'group') {
+        importGroupEdit(result.text); // in-place edit: no chip, rebuild it
       } else {
         // Hold it as a draggable chip instead of auto-inserting (PRD §10).
         readyPatch = result.text;
@@ -179,7 +206,10 @@ import { extractJson } from '../core/aiimport';
     // Spec + live context + the user's request in one paste-able block.
     const prompt = userPrompt.trim();
     const spec = mode === 'project' ? generateProjectSpecPack() : generateSpecPack();
-    const context = buildAiContext(appState.graph);
+    const context =
+      mode === 'group'
+        ? `${buildAiContext(appState.graph)}\n\n${buildGroupContext(appState.graph, groupId)}`
+        : buildAiContext(appState.graph);
     const payload = prompt ? `${spec}\n\n${withContext(context, prompt)}` : `${spec}\n\n${context}`;
     await navigator.clipboard.writeText(payload);
     copied = true;
@@ -189,6 +219,10 @@ import { extractJson } from '../core/aiimport';
   function runImport() {
     if (mode === 'project') {
       importProject(text);
+      return;
+    }
+    if (mode === 'group') {
+      importGroupEdit(text);
       return;
     }
     imported = false;
@@ -222,7 +256,13 @@ import { extractJson } from '../core/aiimport';
   <div class="ai-backdrop" class:placing>
     <div class="ai-dialog" role="dialog" aria-label="Import AI Patch" tabindex="-1" ondragover={(e) => e.preventDefault()} ondrop={onDrop}>
       <div class="ai-header">
-        <span class="ai-title">{mode === 'project' ? 'AI Project' : 'AI Patch'}</span>
+        <span class="ai-title">
+          {mode === 'project'
+            ? 'AI Project'
+            : mode === 'group'
+              ? `AI Edit — ${appState.graph.groups.get(groupId)?.name ?? 'Group'}`
+              : 'AI Patch'}
+        </span>
         <span class="provider-tag" title="Active AI backend (configure with Setup)">{providerLabel(settings)}</span>
         <span class="spacer"></span>
         <button class="setup-btn" class:active={showSettings} onclick={() => (showSettings = !showSettings)} title="Configure an AI backend">
@@ -245,6 +285,14 @@ import { extractJson } from '../core/aiimport';
           {:else}
             1. Describe the piece you want, copy, and paste it into any chatbot.<br />
             2. Paste the JSON it answers with below. <strong>Replaces the current project</strong> (undo restores it).
+          {/if}
+        {:else if mode === 'group'}
+          {#if providerReady(settings)}
+            Describe the change — sound, wiring, face, inputs — and click <strong>Generate</strong>.
+            The AI knows this group's full configuration and <strong>rebuilds it in place</strong> (undo restores it).
+          {:else}
+            1. Describe the change you want, copy, and paste it into any chatbot — the group's full configuration rides along.<br />
+            2. Paste the JSON it answers with below. <strong>Rebuilds the group in place</strong> (undo restores it).
           {/if}
         {:else if providerReady(settings)}
           Describe the sound you want and click <strong>Generate</strong> — it's built and validated, then drag it onto the canvas.
@@ -280,7 +328,9 @@ import { extractJson } from '../core/aiimport';
           bind:value={userPrompt}
           placeholder={mode === 'project'
             ? 'e.g. a chill lofi loop: drums, sub bass, e-piano chords, vinyl noise'
-            : 'e.g. a warm dub bassline with tape delay'}
+            : mode === 'group'
+              ? 'e.g. add a chorus before the output and put a mix knob on the face'
+              : 'e.g. a warm dub bassline with tape delay'}
           spellcheck="false"
           onkeydown={(e) => { if (e.key === 'Enter' && providerReady(settings)) generate(); }}
         />
@@ -317,7 +367,9 @@ import { extractJson } from '../core/aiimport';
         <div class="messages success">
           {mode === 'project'
             ? '✓ Project loaded — press Play to hear it.'
-            : "✓ Imported as a module group — it's selected on the canvas."}
+            : mode === 'group'
+              ? "✓ Group rebuilt in place — it's selected on the canvas."
+              : "✓ Imported as a module group — it's selected on the canvas."}
         </div>
       {/if}
 

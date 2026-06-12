@@ -28,6 +28,7 @@ interface ExpandedFrame {
   group: ModuleGroup;
   g: Graphics;
   title: Text;
+  ai: Text;
   rename: Text;
   swatch: Graphics;
 }
@@ -472,6 +473,7 @@ export class PatchCanvas {
     for (const frame of this.frames.values()) {
       frame.g.destroy();
       frame.title.destroy();
+      frame.ai.destroy();
       frame.rename.destroy();
       frame.swatch.destroy();
     }
@@ -509,7 +511,13 @@ export class PatchCanvas {
         // Drag the title bar to move the whole group; a click (no drag) collapses.
         title.on('pointerdown', (e) => this.startFrameDrag(group, e));
         title.on('pointertap', () => appState.toggleGroupCollapsed(group.id));
-        // Rename + recolor on the frame title row (PRD §6).
+        // AI edit + rename + recolor on the frame title row (PRD §6).
+        const ai = new Text({ text: '🤖', style: { fontSize: 11, fill: theme.textDim } });
+        ai.eventMode = 'static';
+        ai.cursor = 'pointer';
+        ai.on('pointertap', () =>
+          window.dispatchEvent(new CustomEvent('kk-ai-group', { detail: { groupId: group.id } })),
+        );
         const rename = new Text({ text: '✎', style: { fontSize: 11, fill: theme.textDim } });
         rename.eventMode = 'static';
         rename.cursor = 'pointer';
@@ -526,9 +534,10 @@ export class PatchCanvas {
         swatch.on('pointertap', () => appState.recolorGroup(group.id, nextGroupColor(group.color)));
         this.frameLayer.addChild(g);
         this.frameLayer.addChild(title);
+        this.frameLayer.addChild(ai);
         this.frameLayer.addChild(rename);
         this.frameLayer.addChild(swatch);
-        this.frames.set(group.id, { group, g, title, rename, swatch });
+        this.frames.set(group.id, { group, g, title, ai, rename, swatch });
       }
     }
 
@@ -1092,7 +1101,7 @@ export class PatchCanvas {
   }
 
   private drawFrames(): void {
-    for (const { group, g, title, rename, swatch } of this.frames.values()) {
+    for (const { group, g, title, ai, rename, swatch } of this.frames.values()) {
       // Bounding box over visible member views (modules + nested group tiles).
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       const include = (x: number, y: number, w: number, h: number) => {
@@ -1119,7 +1128,8 @@ export class PatchCanvas {
         .fill({ color: group.color ?? theme.frameFill, alpha: 0.35 })
         .stroke({ width: 1.5, color: group.color ?? theme.groupStroke, alpha: 0.8 });
       title.position.set(minX - pad + 10, minY - pad - 10);
-      rename.position.set(title.position.x + title.width + 10, title.position.y + 1);
+      ai.position.set(title.position.x + title.width + 10, title.position.y + 1);
+      rename.position.set(ai.position.x + 20, title.position.y + 1);
       swatch.position.set(rename.position.x + 18, title.position.y + 8);
       // Wire-endpoint anchor for the group's intrinsic poles while expanded.
       this.frameAnchors.set(group.id, { x: minX - pad, y: minY - pad - 8 });

@@ -122,6 +122,16 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
     const offGraph = appState.on('graphChanged', () => {
       if (!suppressSync) syncNotes(true);
     });
+    // Container-tile 🤖 button: open this roll's AI popup. The request may
+    // predate this mount (button on a closed composer), so consume it both
+    // on mount and on the event.
+    const consumeAiRequest = () => {
+      if (appState.composerAiRequest !== moduleId) return;
+      appState.composerAiRequest = null;
+      openAi();
+    };
+    const offAi = appState.on('composerAiRequest', consumeAiRequest);
+    consumeAiRequest();
     const tick = () => {
       drawAll();
       reposition();
@@ -131,6 +141,7 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
     return () => {
       offActive();
       offGraph();
+      offAi();
       cancelAnimationFrame(raf);
     };
   });

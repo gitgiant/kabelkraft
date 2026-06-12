@@ -99,3 +99,63 @@ test('markdown chatbot reply with a json block imports too', async ({ page }) =>
   }, PATCH);
   expect(ok).toBe(true);
 });
+
+test('group AI edit: rebuilds the group in place, external wires survive kept ids', async ({ page }) => {
+  await boot(page);
+
+  // Seed a group, an external monitor wired from its osc, then open the
+  // group-scoped AI dialog (the container 🤖 button dispatches this event).
+  const seeded = await page.evaluate((patch) => {
+    const s = window.__kk;
+    const r = s.importAiPatch(patch, { x: 0, y: 0 });
+    const group = s.graph.groups.get(r.groupId!)!;
+    const osc = group.moduleIds.map((id) => s.graph.modules.get(id)!).find((m) => m.type === 'osc')!;
+    const lvl = s.addModule('levels', 900, 0);
+    s.connect({ moduleId: osc.id, portId: 'out' }, { moduleId: lvl.id, portId: 'in' });
+    window.dispatchEvent(new CustomEvent('kk-ai-group', { detail: { groupId: group.id } }));
+    return { groupId: group.id, oscId: osc.id, lvlId: lvl.id };
+  }, PATCH);
+
+  await expect(page.locator('.ai-dialog')).toBeVisible();
+  await expect(page.locator('.ai-dialog .ai-title')).toContainText('AI Edit — Bleep Group');
+
+  // An edit reply keeps the osc's id (per the group context rules) and
+  // replaces everything else with a bare osc → audioOut pair.
+  const edit = JSON.stringify({
+    kind: 'kkgroup',
+    formatVersion: 1,
+    name: 'Bleep 2',
+    modules: [
+      { id: seeded.oscId, type: 'osc', params: { wave: 2 } },
+      { id: 'out2', type: 'audioOut' },
+    ],
+    wires: [{ from: { module: seeded.oscId, port: 'out' }, to: { module: 'out2', port: 'in' } }],
+  });
+  await page.locator('.ai-dialog textarea').fill(edit);
+  await page.locator('.ai-dialog button.import').click();
+  await expect(page.locator('.ai-dialog .success')).toContainText('rebuilt');
+
+  const after = await page.evaluate(
+    ({ groupId, lvlId }) => {
+      const s = window.__kk;
+      const group = s.graph.groups.get(groupId);
+      return {
+        exists: !!group,
+        name: group?.name,
+        memberCount: group?.moduleIds.length,
+        memberTypes: group?.moduleIds.map((id) => s.graph.modules.get(id)!.type).sort(),
+        externalKept: [...s.graph.wires.values()].some(
+          (w) => w.to.moduleId === lvlId && group?.moduleIds.includes(w.from.moduleId),
+        ),
+        selected: s.selectedGroupIds.has(groupId),
+      };
+    },
+    seeded,
+  );
+  expect(after.exists).toBe(true); // same group id — edited in place
+  expect(after.name).toBe('Bleep 2');
+  expect(after.memberCount).toBe(2);
+  expect(after.memberTypes).toEqual(['audioOut', 'osc']);
+  expect(after.externalKept).toBe(true); // osc id kept → monitor wire reconnected
+  expect(after.selected).toBe(true);
+});
