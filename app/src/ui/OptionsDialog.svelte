@@ -92,16 +92,33 @@
   let deviceAccess = $state(audioPermissionGranted());
   let accessDenied = $state(false);
   let inputErrors = $state<Array<{ device: string; error: string }>>([]);
+  /** Open capture streams with the channel count the browser delivered. */
+  let captureInfo = $state<Array<{ label: string; channels: number }>>([]);
+  let outputChannels = $state(2);
+  let engineUp = $state(false);
+
+  /** Cheap engine read-outs (no enumerate) — safe to poll while the tab shows. */
+  function refreshChannelInfo(): void {
+    engineUp = appState.engine.started;
+    outputChannels = appState.engine.outputChannels;
+    captureInfo = appState.engine.inputChannelInfo().map((s) => ({
+      label:
+        inputs.find((d) => d.deviceId === s.deviceId)?.label ||
+        (s.deviceId ? s.deviceId : 'default input'),
+      channels: s.channels,
+    }));
+    inputErrors = [...appState.engine.inputErrors.entries()].map(([device, error]) => ({
+      device: inputs.find((d) => d.deviceId === device)?.label || device || 'default input',
+      error,
+    }));
+  }
 
   async function refreshDevices(): Promise<void> {
     const lists = await listAudioDevices();
     inputs = lists.inputs;
     outputs = lists.outputs;
     deviceAccess = audioPermissionGranted();
-    inputErrors = [...appState.engine.inputErrors.entries()].map(([device, error]) => ({
-      device: device || 'default input',
-      error,
-    }));
+    refreshChannelInfo();
   }
 
   /** Ask for capture permission so the full device list (with labels) appears. */
@@ -338,6 +355,7 @@
     const poll = setInterval(() => {
       if (!open) return;
       if (tab === 'midi') refreshMidi();
+      if (tab === 'audio') refreshChannelInfo();
       if (tab === 'debug') refreshDebug();
     }, 400);
 
@@ -503,7 +521,13 @@
                   <option value="">System default</option>
                   {#each outputs as o (o.deviceId)}<option value={o.deviceId}>{o.label}</option>{/each}
                 </select>
+                {#if engineUp}
+                  <span class="dim opt-out-channels">{outputChannels} ch</span>
+                {/if}
               </label>
+              {#if engineUp && outputChannels > 2}
+                <p class="pane-note dim">Multichannel output active — Audio Out modules pick their hardware pair (1-2 / 3-4 / …) with the Pair knob.</p>
+              {/if}
             {:else}
               <p class="pane-note dim">Output device selection isn't supported by this browser (Chrome/Edge only).</p>
             {/if}
@@ -515,6 +539,9 @@
               </select>
             </label>
             <p class="pane-note dim">Default capture device for Audio In modules; each module can also pick its own input on its device row. Lists refresh automatically when devices are plugged in.</p>
+            {#each captureInfo as c (c.label)}
+              <p class="pane-note dim opt-capture-info">🎙 {c.label}: capturing {c.channels} ch{c.channels > 2 ? ' — pick the pair on each Audio In module' : ''}</p>
+            {/each}
             {#each inputErrors as e (e.device)}
               <p class="pane-note opt-input-error">⚠ {e.device}: capture failed — {e.error}</p>
             {/each}

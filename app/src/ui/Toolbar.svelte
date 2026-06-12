@@ -16,6 +16,13 @@
   let canShrink = $state(false);
   let fileInput: HTMLInputElement;
   let kkmodInput: HTMLInputElement;
+  let showCacheDialog = $state(false);
+
+  function clearCacheAndReload() {
+    caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k)))).finally(() => {
+      location.reload();
+    });
+  }
 
   function refreshEditState() {
     canUndo = appState.canUndo;
@@ -166,7 +173,7 @@
 >
 <div class="toolbar" bind:this={toolbarEl}>
   <div class="tgroup">
-    <span class="logo">KabelKraft</span>
+    <span class="logo" ondblclick={() => showCacheDialog = true} title="Double-click to clear cache">KabelKraft</span>
     <input class="project-name" bind:value={projectName} title="Project name" />
     <button onclick={saveProject} title="Save project as .kkproj">Save</button>
     <button onclick={() => fileInput.click()} title="Load a .kkproj project">Load</button>
@@ -287,6 +294,19 @@
   </div>
 </div>
 </div>
+
+{#if showCacheDialog}
+  <div class="cache-dialog-backdrop" onclick={() => showCacheDialog = false}>
+    <div class="cache-dialog" onclick={(e) => e.stopPropagation()}>
+      <p>Clear browser cache and reload?</p>
+      <div class="cache-dialog-buttons">
+        <button onclick={clearCacheAndReload}>Clear & Restart</button>
+        <button onclick={() => showCacheDialog = false}>Cancel</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <button
   class="toolbar-grip"
   title="Drag or click to hide/show the toolbar"
@@ -409,5 +429,33 @@
   }
   .audio-on {
     padding: 0 6px;
+  }
+  .cache-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+  }
+  .cache-dialog {
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 260px;
+  }
+  .cache-dialog p {
+    margin: 0;
+    font-size: 14px;
+  }
+  .cache-dialog-buttons {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
   }
 </style>

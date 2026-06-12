@@ -84,16 +84,23 @@ export interface EngineAudioOptions {
 type SinkContext = AudioContext & { setSinkId?: (id: string) => Promise<void> };
 
 /**
- * Live-input capacity: the worklet node is built with this many stereo
- * inputs, each fed by one capture device. Distinct Audio In devices beyond
- * this share the last slot.
+ * Live-input capacity: the worklet node is built with this many inputs,
+ * each fed by one capture device (all of its channels). Distinct Audio In
+ * devices beyond this share the last slot.
  */
 export const INPUT_SLOTS = 4;
+
+/** Hardware output channel ceiling (4 pairs — covers typical interfaces). */
+export const MAX_OUTPUT_CHANNELS = 8;
+/** Capture channel ceiling requested from getUserMedia. */
+export const MAX_INPUT_CHANNELS = 8;
 
 interface InputStream {
   stream: MediaStream;
   source: MediaStreamAudioSourceNode;
   slot: number;
+  /** Channels the browser actually delivered for this device. */
+  channels: number;
 }
 
 export class Engine {
@@ -123,17 +130,32 @@ export class Engine {
     this.ctx = new AudioContext({
       latencyHint: opts?.latencyHint ?? 'interactive',
       ...(opts?.sampleRate ? { sampleRate: opts.sampleRate } : {}),
-    });
+      // Constructor-time sink (Chrome 110+) so maxChannelCount reflects the
+      // chosen interface, not the system default device.
+      ...(opts?.sinkId ? { sinkId: opts.sinkId } : {}),
+    } as AudioContextOptions);
     if (!this.ctx.audioWorklet) {
       throw new Error(
         'AudioWorklet unavailable — page must be served over HTTPS or localhost (secure context).',
       );
     }
-    if (opts?.sinkId) await this.setSinkId(opts.sinkId);
+    if (opts?.sinkId) await this.setSinkId(opts.sinkId); // fallback for non-constructor browsers
+    // Multichannel interfaces (MiniFuse 4 etc.): open every hardware output,
+    // discrete so channels 3+ aren't folded into a stereo downmix. Audio Out
+    // modules pick their pair (1-2 / 3-4 / …) via the `pair` param.
+    this.outCh = Math.max(2, Math.min(this.ctx.destination.maxChannelCount || 2, MAX_OUTPUT_CHANNELS));
+    if (this.outCh > 2) {
+      try {
+        this.ctx.destination.channelCount = this.outCh;
+        this.ctx.destination.channelInterpretation = 'discrete';
+      } catch {
+        this.outCh = 2; // device rejected the count — stereo it is
+      }
+    }
     await this.ctx.audioWorklet.addModule(`${import.meta.env.BASE_URL}engine-worklet.js`);
     this.node = new AudioWorkletNode(this.ctx, 'kabelkraft-engine', {
       numberOfInputs: INPUT_SLOTS,
-      outputChannelCount: [2],
+      outputChannelCount: [this.outCh],
     });
     this.node.port.onmessage = (e: MessageEvent<WorkletMessage>) => {
       if (e.data.type === 'status') {
@@ -145,6 +167,13 @@ export class Engine {
       }
     };
     this.master = this.ctx.createGain();
+    if (this.outCh > 2) {
+      // Explicit + discrete so the gain stage carries all hardware channels
+      // through untouched instead of mixing down to its default stereo.
+      this.master.channelCount = this.outCh;
+      this.master.channelCountMode = 'explicit';
+      this.master.channelInterpretation = 'discrete';
+    }
     this.node.connect(this.master);
     this.master.connect(this.ctx.destination);
   }
@@ -180,6 +209,22 @@ export class Engine {
   }
 
   // -- Live inputs (Audio In modules) ----------------------------------------
+
+  /** Hardware output channels the context opened with (≥2). */
+  private outCh = 2;
+
+  /** Channels the current output device is running (Options read-out, pair UI). */
+  get outputChannels(): number {
+    return this.outCh;
+  }
+
+  /** Per-device capture info for open streams (Options read-out, pair UI). */
+  inputChannelInfo(): Array<{ deviceId: string; channels: number }> {
+    return [...this.inputStreams.entries()].map(([deviceId, s]) => ({
+      deviceId,
+      channels: s.channels,
+    }));
+  }
 
   /** Options → Audio default capture device, used by Audio In modules set to ''. */
   defaultInputId = '';
@@ -234,16 +279,31 @@ export class Engine {
               echoCancellation: false,
               noiseSuppression: false,
               autoGainControl: false,
-              channelCount: { ideal: 2 },
+              // Ask for everything the interface has; the browser clamps to
+              // what the driver supports (stereo on most built-in mics).
+              channelCount: { ideal: MAX_INPUT_CHANNELS },
             },
           });
+          const track = stream.getAudioTracks()[0];
+          let channels = track?.getSettings().channelCount ?? 2;
+          // Some drivers open at fewer channels than they advertise — bump to
+          // the track's stated capability when there's more to be had.
+          const capMax = track?.getCapabilities?.().channelCount?.max ?? channels;
+          if (capMax > channels) {
+            await track
+              .applyConstraints({ channelCount: { exact: Math.min(capMax, MAX_INPUT_CHANNELS) } })
+              .then(() => {
+                channels = track.getSettings().channelCount ?? channels;
+              })
+              .catch(() => undefined);
+          }
           if (!this.ctx || !this.node) {
             for (const t of stream.getTracks()) t.stop();
             return;
           }
           const source = this.ctx.createMediaStreamSource(stream);
           source.connect(this.node, 0, slot);
-          entry = { stream, source, slot };
+          entry = { stream, source, slot, channels };
           this.inputStreams.set(dev, entry);
           this.inputErrors.delete(dev);
         } catch (err) {

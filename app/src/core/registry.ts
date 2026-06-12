@@ -207,6 +207,8 @@ const keyboard: ModuleDef = {
 };
 
 export const AUDIO_IN_CHANNELS = ['stereo', 'left', 'right', 'mono sum'] as const;
+/** Hardware channel pairs for multichannel interfaces (MiniFuse 4 etc.). */
+export const CHANNEL_PAIRS = ['1-2', '3-4', '5-6', '7-8'] as const;
 
 const audioInDef: ModuleDef = {
   type: 'audioIn',
@@ -214,13 +216,15 @@ const audioInDef: ModuleDef = {
   category: 'io',
   description:
     'Live audio from a capture device (microphone / audio interface). Click the device row to ' +
-    'pick an input; the browser asks for microphone permission on first use. Channels selects ' +
-    'which capture channels feed the stereo output.',
+    'pick an input; the browser asks for microphone permission on first use. Pair selects which ' +
+    'hardware channel pair to capture (multichannel interfaces); Channels selects how that pair ' +
+    'feeds the stereo output.',
   ports: [
     { id: 'out', label: 'Audio', type: 'audio', direction: 'out', description: 'Live input as a stereo stream.' },
   ],
   params: [
     { id: 'gain', label: 'Gain', min: 0, max: 4, default: 1, randomizable: false },
+    { id: 'pair', label: 'Pair', min: 0, max: CHANNEL_PAIRS.length - 1, default: 0, options: [...CHANNEL_PAIRS], randomizable: false },
     { id: 'channels', label: 'Channels', min: 0, max: AUDIO_IN_CHANNELS.length - 1, default: 0, options: [...AUDIO_IN_CHANNELS], randomizable: false },
     { id: 'mute', label: 'Mute', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
   ],
@@ -234,12 +238,15 @@ const audioOut: ModuleDef = {
   name: 'Audio Out',
   category: 'io',
   description:
-    'Routes audio to the output device. Brickwall safety limiter is ON by default (PRD §9.4).',
+    'Routes audio to the output device. Brickwall safety limiter is ON by default (PRD §9.4). ' +
+    'Pair picks the hardware output pair on multichannel interfaces (falls back to 1-2 when ' +
+    'the device has fewer channels).',
   ports: [
     { id: 'in', label: 'Audio', type: 'audio', direction: 'in', description: 'Audio to play; multiple wires are summed.' },
   ],
   params: [
     { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
+    { id: 'pair', label: 'Pair', min: 0, max: CHANNEL_PAIRS.length - 1, default: 0, options: [...CHANNEL_PAIRS], randomizable: false },
     { id: 'limiter', label: 'Limiter', min: 0, max: 1, default: 1, options: ['off', 'on'], randomizable: false },
   ],
   width: 210,

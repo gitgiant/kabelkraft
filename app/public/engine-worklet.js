@@ -1391,8 +1391,12 @@ class AudioInModule {
     const coef = Math.exp(-1 / (0.01 * sampleRate)); // ~10 ms gain smoothing
     const mode = Math.round(this.params.channels ?? 0);
     const bus = this.bus;
-    const chL = bus && bus.length > 0 ? bus[0] : null;
-    const chR = bus && bus.length > 1 ? bus[1] : chL;
+    // Hardware pair select (multichannel capture): base channel = pair × 2,
+    // folding back to 1-2 when the stream has fewer channels.
+    let base = Math.round(this.params.pair ?? 0) * 2;
+    if (!bus || base >= bus.length) base = 0;
+    const chL = bus && bus.length > base ? bus[base] : null;
+    const chR = bus && bus.length > base + 1 ? bus[base + 1] : chL;
     if (!chL) {
       this.outL.fill(0);
       this.outR.fill(0);
@@ -2912,8 +2916,7 @@ class EngineProcessor extends AudioWorkletProcessor {
     const procStart = Date.now();
     const out = outputs[0];
     const blockSize = out[0].length;
-    out[0].fill(0);
-    if (out[1]) out[1].fill(0);
+    for (let c = 0; c < out.length; c++) out[c].fill(0);
 
     this.runSequencers(blockSize);
 
@@ -3010,9 +3013,15 @@ class EngineProcessor extends AudioWorkletProcessor {
       mod.render(blockSize);
 
       if (mod.type === 'audioOut') {
+        // Hardware pair select (multichannel output): base channel = pair × 2,
+        // folding back to 1-2 when the device has fewer channels.
+        let base = Math.round(mod.params.pair ?? 0) * 2;
+        if (base + 1 >= out.length) base = 0;
+        const oL = out[base];
+        const oR = out[base + 1];
         for (let i = 0; i < blockSize; i++) {
-          out[0][i] += mod.outL[i];
-          if (out[1]) out[1][i] += mod.outR[i];
+          oL[i] += mod.outL[i];
+          if (oR) oR[i] += mod.outR[i];
         }
       }
     }

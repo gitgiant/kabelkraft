@@ -52,6 +52,30 @@ test('audio in: mute and gain control the stream', async ({ page }) => {
   await pollPeakBelow(page, input, 0.001);
 });
 
+test('channel pair select folds to 1-2 when the device has fewer channels', async ({ page }) => {
+  const { input, levels } = await audioInRig(page);
+  const out = await page.evaluate((inputId) => {
+    const s = window.__kk;
+    const out = s.addModule('audioOut', 100, 300);
+    s.connect({ moduleId: inputId, portId: 'out' }, { moduleId: out.id, portId: 'in' });
+    return out.id;
+  }, input);
+
+  // Fake capture is mono/stereo and test output is stereo: pair 3-4 has no
+  // hardware channels on either side, so both modules fold back to 1-2 and
+  // audio keeps flowing.
+  await page.evaluate(
+    ({ input, out }) => {
+      window.__kk.setParam(input, 'pair', 1);
+      window.__kk.setParam(out, 'pair', 1);
+    },
+    { input, out },
+  );
+  await pollPeak(page, input, 0.01);
+  await pollPeak(page, levels, 0.01);
+  await pollPeak(page, out, 0.01);
+});
+
 test('options audio tab lists capture devices and default input select', async ({ page }) => {
   const errors = captureErrors(page);
   await bootWithAudio(page);
