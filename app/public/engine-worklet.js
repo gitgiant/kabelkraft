@@ -2259,6 +2259,63 @@ class ModulatorModule {
   }
 }
 
+// DJ-style channel strip used by the mixer: kill EQ + bipolar LP/HP filter.
+const MIX_EQ_FREQS = [120, 1000, 8000];
+const MIX_FILTER_Q = 1.3;
+const MIX_FILTER_DEADZONE = 0.05;
+
+class MixerStrip {
+  constructor() {
+    // [loL, midL, hiL] / [loR, midR, hiR] + one filter biquad per side.
+    this.eqL = [new Biquad(), new Biquad(), new Biquad()];
+    this.eqR = [new Biquad(), new Biquad(), new Biquad()];
+    this.fL = new Biquad();
+    this.fR = new Biquad();
+    this.coefKey = '';
+    this.eqFlat = true;
+    this.filterOn = false;
+  }
+
+  /** Recompute coefficients when the strip's EQ/filter params changed. */
+  update(lo, mid, hi, filt) {
+    const key = `${lo},${mid},${hi},${filt}`;
+    if (key === this.coefKey) return;
+    this.coefKey = key;
+    this.eqFlat = lo === 0 && mid === 0 && hi === 0;
+    if (!this.eqFlat) {
+      for (const b of [this.eqL, this.eqR]) {
+        b[0].lowShelf(MIX_EQ_FREQS[0], lo);
+        b[1].peak(MIX_EQ_FREQS[1], mid, 0.7);
+        b[2].highShelf(MIX_EQ_FREQS[2], hi);
+      }
+    }
+    // One knob: center off, left sweeps a lowpass down, right a highpass up.
+    this.filterOn = Math.abs(filt) > MIX_FILTER_DEADZONE;
+    if (this.filterOn) {
+      const t = (Math.abs(filt) - MIX_FILTER_DEADZONE) / (1 - MIX_FILTER_DEADZONE);
+      if (filt < 0) {
+        const f = 20000 * Math.pow(80 / 20000, t);
+        this.fL.lowpass(f, MIX_FILTER_Q);
+        this.fR.lowpass(f, MIX_FILTER_Q);
+      } else {
+        const f = 20 * Math.pow(8000 / 20, t);
+        this.fL.highpass(f, MIX_FILTER_Q);
+        this.fR.highpass(f, MIX_FILTER_Q);
+      }
+    }
+  }
+
+  processL(x) {
+    if (!this.eqFlat) x = this.eqL[2].process(this.eqL[1].process(this.eqL[0].process(x)));
+    return this.filterOn ? this.fL.process(x) : x;
+  }
+
+  processR(x) {
+    if (!this.eqFlat) x = this.eqR[2].process(this.eqR[1].process(this.eqR[0].process(x)));
+    return this.filterOn ? this.fR.process(x) : x;
+  }
+}
+
 class MixerModule {
   constructor(id, params) {
     this.id = id;
@@ -2272,29 +2329,69 @@ class MixerModule {
     };
     this.outL = new Float32Array(128);
     this.outR = new Float32Array(128);
+    // Strips 1–4 are input channels; strip 5 is the master bus.
+    this.strips = [];
+    this.audioOuts = {};
+    for (let ch = 1; ch <= 5; ch++) {
+      this.strips.push(new MixerStrip());
+      this.audioOuts[`send${ch}`] = makeStereoBuf();
+    }
+    this.busL = new Float32Array(128);
+    this.busR = new Float32Array(128);
+    // Per-channel meter peaks (post-EQ/filter, pre-fader), drained by postStatus.
+    this.chPeak = [0, 0, 0, 0];
   }
 
   render(blockSize) {
-    const master = this.params.master ?? 0.8;
-    this.outL.fill(0);
-    this.outR.fill(0);
+    const p = this.params;
+    this.busL.fill(0);
+    this.busR.fill(0);
     for (let ch = 1; ch <= 4; ch++) {
-      const lvl = this.params[`lvl${ch}`] ?? 0.8;
-      if (lvl === 0) continue;
-      const pan = this.params[`pan${ch}`] ?? 0;
+      const strip = this.strips[ch - 1];
+      strip.update(p[`eqLo${ch}`] ?? 0, p[`eqMid${ch}`] ?? 0, p[`eqHi${ch}`] ?? 0, p[`filt${ch}`] ?? 0);
+      const lvl = p[`lvl${ch}`] ?? 0.8;
+      const send = p[`send${ch}`] ?? 0;
+      const pan = p[`pan${ch}`] ?? 0;
       // Equal-power pan law.
       const angle = ((pan + 1) * Math.PI) / 4;
-      const gL = lvl * Math.cos(angle);
-      const gR = lvl * Math.sin(angle);
+      const gL = Math.cos(angle);
+      const gR = Math.sin(angle);
       const input = this.inputs[`in${ch}`];
+      const sendBuf = this.audioOuts[`send${ch}`];
+      let peak = this.chPeak[ch - 1];
       for (let i = 0; i < blockSize; i++) {
-        this.outL[i] += input.L[i] * gL;
-        this.outR[i] += input.R[i] * gR;
+        const l = strip.processL(input.L[i]);
+        const r = strip.processR(input.R[i]);
+        const a = Math.max(Math.abs(l), Math.abs(r));
+        if (a > peak) peak = a;
+        const fl = l * lvl;
+        const fr = r * lvl;
+        // Send taps post-fader, pre-pan (stereo).
+        sendBuf.L[i] = fl * send;
+        sendBuf.R[i] = fr * send;
+        this.busL[i] += fl * gL;
+        this.busR[i] += fr * gR;
       }
+      this.chPeak[ch - 1] = peak;
     }
+
+    // Master strip (ch 5) processes the summed bus the same way.
+    const strip = this.strips[4];
+    strip.update(p.eqLo5 ?? 0, p.eqMid5 ?? 0, p.eqHi5 ?? 0, p.filt5 ?? 0);
+    const lvl = p.lvl5 ?? 0.8;
+    const send = p.send5 ?? 0;
+    const pan = p.pan5 ?? 0;
+    const angle = ((pan + 1) * Math.PI) / 4;
+    const gL = Math.SQRT2 * Math.cos(angle); // balance: unity at center
+    const gR = Math.SQRT2 * Math.sin(angle);
+    const sendBuf = this.audioOuts.send5;
     for (let i = 0; i < blockSize; i++) {
-      this.outL[i] *= master;
-      this.outR[i] *= master;
+      const fl = strip.processL(this.busL[i]) * lvl;
+      const fr = strip.processR(this.busR[i]) * lvl;
+      sendBuf.L[i] = fl * send;
+      sendBuf.R[i] = fr * send;
+      this.outL[i] = fl * gL;
+      this.outR[i] = fr * gR;
     }
   }
 }
@@ -2813,9 +2910,13 @@ class EngineProcessor extends AudioWorkletProcessor {
           }
           const dst = mod.inputs && mod.inputs[w.toPortId];
           if (!dst) continue;
+          // Secondary audio outs (mixer send poles) live in src.audioOuts.
+          const aux = src.audioOuts && w.fromPortId && src.audioOuts[w.fromPortId];
+          const sL = aux ? aux.L : src.outL;
+          const sR = aux ? aux.R : src.outR;
           for (let i = 0; i < blockSize; i++) {
-            dst.L[i] += src.outL[i];
-            dst.R[i] += src.outR[i];
+            dst.L[i] += sL[i];
+            dst.R[i] += sR[i];
           }
         }
       }
@@ -2901,6 +3002,21 @@ class EngineProcessor extends AudioWorkletProcessor {
         n: prev.n + blockSize,
         clipped: prev.clipped || peak > 1,
       });
+
+      // Mixer channel meters (pre-fader), keyed "<id>:chN".
+      if (mod.chPeak) {
+        for (let c = 0; c < mod.chPeak.length; c++) {
+          const key = `${mod.id}:ch${c + 1}`;
+          const p = this.meterAcc.get(key) || { peak: 0, sumSq: 0, n: 0, clipped: false };
+          this.meterAcc.set(key, {
+            peak: Math.max(p.peak, mod.chPeak[c]),
+            sumSq: 0,
+            n: 0,
+            clipped: p.clipped || mod.chPeak[c] > 1,
+          });
+          mod.chPeak[c] = 0;
+        }
+      }
     }
 
     const now = currentTime;

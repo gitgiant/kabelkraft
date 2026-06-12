@@ -244,6 +244,7 @@ export class ModuleView extends Container {
     this.meterBar = null;
     this.clipDot = null;
     this.clipped = false;
+    this.mixMeters = [];
     this.grBar = null;
     this.vcfCurveG = null;
     this.ctrlG = null;
@@ -360,37 +361,52 @@ export class ModuleView extends Container {
     title.eventMode = 'none';
     this.addChild(title);
 
-    // Composer: group-tile-style title-bar toggle — ⛶ opens the roll in
-    // place, ⤡ shrinks back to the compact preview tile.
-    if (this.instance.type === 'composer') {
-      const open = appState.composerOpen.has(this.instance.id);
-      const glyph = new Text({
-        text: open ? '⤡' : '⛶',
-        style: { fontSize: 11, fill: theme.textDim },
-      });
-      glyph.anchor.set(1, 0);
-      glyph.position.set(this.w - 8, 6);
-      glyph.eventMode = 'none';
-      this.addChild(glyph);
-      const hit = new Graphics().rect(this.w - 24, 2, 20, 20).fill({ color: 0xffffff, alpha: 0.001 });
+    // Container title-bar buttons (GroupView pattern: fixed hit rects, since
+    // glyph bounds are font-dependent).
+    const titleButton = (glyph: string, x: number, tip: string[], onTap: () => void): void => {
+      const t = new Text({ text: glyph, style: { fontSize: 11, fill: theme.textDim } });
+      t.anchor.set(1, 0);
+      t.position.set(x, 6);
+      t.eventMode = 'none';
+      this.addChild(t);
+      const hit = new Graphics().rect(x - 14, 2, 18, 20).fill({ color: 0xffffff, alpha: 0.001 });
       hit.eventMode = 'static';
       hit.cursor = 'pointer';
       hit.on('pointerdown', (e) => {
         e.stopPropagation();
-        if (appState.composerOpen.has(this.instance.id)) appState.closeComposer(this.instance.id);
-        else appState.openComposer(this.instance.id);
+        onTap();
       });
-      hit.on('pointerover', (e) =>
-        this.tooltip.show(
-          open
-            ? ['Shrink', 'Collapse back to the compact clip tile.']
-            : ['Open piano roll', 'Expand the editor inside the module.'],
-          e.clientX,
-          e.clientY,
-        ),
-      );
+      hit.on('pointerover', (e) => this.tooltip.show(tip, e.clientX, e.clientY));
       hit.on('pointerout', () => this.tooltip.hide());
       this.addChild(hit);
+    };
+
+    // Composer: group-tile-style title-bar toggle — ⛶ opens the roll in
+    // place, ⤡ shrinks back to the compact preview tile — plus AI clip writing.
+    if (this.instance.type === 'composer') {
+      const open = appState.composerOpen.has(this.instance.id);
+      titleButton(
+        open ? '⤡' : '⛶',
+        this.w - 8,
+        open
+          ? ['Shrink', 'Collapse back to the compact clip tile.']
+          : ['Open piano roll', 'Expand the editor inside the module.'],
+        () => {
+          if (appState.composerOpen.has(this.instance.id)) appState.closeComposer(this.instance.id);
+          else appState.openComposer(this.instance.id);
+        },
+      );
+      titleButton('🤖', this.w - 28, ['AI clip', 'Describe a melody or beat — the AI writes this clip.'], () =>
+        appState.requestComposerAi(this.instance.id),
+      );
+    }
+
+    // Visualizer: AI scene writing — opens the graph editor, whose AI bar
+    // carries the container's full configuration (inputs + current graph).
+    if (this.instance.type === 'visualizer') {
+      titleButton('🤖', this.w - 8, ['AI visuals', 'Describe a scene — the AI rewrites this visual graph.'], () =>
+        appState.openVisEditor(this.instance.id),
+      );
     }
 
     this.body.eventMode = 'static';
@@ -1550,20 +1566,86 @@ export class ModuleView extends Container {
       .stroke({ width: 2, color: on ? theme.text : theme.moduleStroke });
   }
 
-  // -- mixer face: channel faders + pan knobs ------------------------------------
+  // -- mixer face: 5 console strips (4 channels + master bus) --------------------
+
+  private mixMeters: Array<{
+    key: string;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    bar: Graphics;
+    dot: Graphics;
+    clipped: boolean;
+  }> = [];
 
   private buildMixerFace(x: number, y: number, w: number): void {
     const chW = w / 5;
-    const panR = Math.max(11, Math.min(16, chW * 0.28));
-    const faderH = this.h - y - panR * 2 - 64;
-    const faderW = Math.max(10, Math.min(16, chW * 0.25));
-    for (let ch = 1; ch <= 4; ch++) {
+    const r = Math.max(9, Math.min(13, chW * 0.22));
+    const pitch = r * 2 + 24;
+    const knobIds = ['eqHi', 'eqMid', 'eqLo', 'filt', 'send'];
+    for (let ch = 1; ch <= 5; ch++) {
       const cx = x + (ch - 1) * chW + chW / 2;
-      this.buildFader(this.paramCtrl(this.paramSpec(`lvl${ch}`)), cx - faderW / 2, y, faderW, faderH);
-      this.buildKnob(this.paramCtrl(this.paramSpec(`pan${ch}`)), cx, y + faderH + panR + 30, panR);
+      knobIds.forEach((pid, k) => {
+        this.buildKnob(this.paramCtrl(this.paramSpec(`${pid}${ch}`)), cx, y + r + 12 + k * pitch, r);
+      });
+      const panCy = this.h - r - 24;
+      this.buildKnob(this.paramCtrl(this.paramSpec(`pan${ch}`)), cx, panCy, r);
+
+      // Fader with its strip meter beside it (channels pre-fader, master = out).
+      const fy = y + 24 + knobIds.length * pitch;
+      const fh = Math.max(40, panCy - r - 30 - fy);
+      const fw = Math.max(10, Math.min(14, chW * 0.22));
+      const mw = 5;
+      const fx = cx - (fw + 3 + mw) / 2;
+      this.buildFader(this.paramCtrl(this.paramSpec(`lvl${ch}`)), fx, fy, fw, fh);
+      const mx = fx + fw + 3;
+      this.addChild(new Graphics().roundRect(mx, fy, mw, fh, 2).fill(theme.inset));
+      const bar = new Graphics();
+      bar.eventMode = 'none';
+      this.addChild(bar);
+      const dot = new Graphics();
+      dot.eventMode = 'static';
+      dot.cursor = 'pointer';
+      this.addChild(dot);
+      const m = {
+        key: ch === 5 ? this.instance.id : `${this.instance.id}:ch${ch}`,
+        x: mx,
+        y: fy,
+        w: mw,
+        h: fh,
+        bar,
+        dot,
+        clipped: false,
+      };
+      dot.circle(mx + mw / 2, fy - 6, 3).fill(0x550000);
+      dot.on('pointerdown', (e) => {
+        e.stopPropagation();
+        m.clipped = false;
+      });
+      this.mixMeters.push(m);
     }
-    const mx = x + 4 * chW + chW / 2;
-    this.buildFader(this.paramCtrl(this.paramSpec('master')), mx - faderW / 2 - 1, y, faderW + 2, faderH);
+  }
+
+  /** Send poles show only while their knob is up or a wire is attached. */
+  private updateSendPoles(): void {
+    let wired: Set<string> | null = null;
+    for (let ch = 1; ch <= 5; ch++) {
+      const pid = `send${ch}`;
+      const dot = this.portDots.get(pid);
+      if (!dot) continue;
+      if ((this.instance.params[pid] ?? 0) > 0.001) {
+        dot.visible = true;
+        continue;
+      }
+      if (!wired) {
+        wired = new Set();
+        for (const wire of appState.graph.wires.values()) {
+          if (wire.from.moduleId === this.instance.id) wired.add(wire.from.portId);
+        }
+      }
+      dot.visible = wired.has(pid);
+    }
   }
 
   // -- composer face (PRD §8.3, piano roll) --------------------------------------
@@ -2799,6 +2881,22 @@ export class ModuleView extends Container {
         this.grBar
           .roundRect(this.grRect.x, this.grRect.y, this.grRect.w, bh, 3)
           .fill(0xff5050);
+      }
+    }
+    if (this.mixMeters.length > 0) {
+      this.updateSendPoles();
+      for (const m of this.mixMeters) {
+        const r = appState.meters[m.key];
+        const peak = r?.peak ?? 0;
+        if (r?.clipped) m.clipped = true;
+        m.bar.clear();
+        const bh = Math.min(1, peak) * m.h;
+        if (bh > 0.5) {
+          m.bar
+            .roundRect(m.x, m.y + m.h - bh, m.w, bh, 2)
+            .fill(peak > 1 ? 0xff3030 : peak > 0.85 ? 0xffb13d : 0x52e07a);
+        }
+        m.dot.clear().circle(m.x + m.w / 2, m.y - 6, 3).fill(m.clipped ? 0xff2020 : 0x550000);
       }
     }
     if (!this.meterBar) return;

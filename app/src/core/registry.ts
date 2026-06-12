@@ -3,7 +3,7 @@
  * Master Transport, Synth (classic), Keyboard, Audio Out, Levels.
  */
 
-import type { ModuleDef } from './module';
+import type { ModuleDef, ParamSpec } from './module';
 import { defaultNote } from './composer';
 import { ROOT_NAMES, SCALE_NAMES } from './scales';
 import { initVisGraph } from '../visual/migrate';
@@ -627,31 +627,45 @@ const eq: ModuleDef = {
   height: 200,
 };
 
+/** Strip params for one mixer channel (5 = the master bus strip). */
+function mixerStripParams(ch: number): ParamSpec[] {
+  const n = ch === 5 ? 'M' : String(ch);
+  return [
+    { id: `eqHi${ch}`, label: `Hi ${n}`, min: -60, max: 6, default: 0, unit: 'dB', randomizable: true },
+    { id: `eqMid${ch}`, label: `Mid ${n}`, min: -60, max: 6, default: 0, unit: 'dB', randomizable: true },
+    { id: `eqLo${ch}`, label: `Low ${n}`, min: -60, max: 6, default: 0, unit: 'dB', randomizable: true },
+    { id: `filt${ch}`, label: `Flt ${n}`, min: -1, max: 1, default: 0, randomizable: true },
+    { id: `send${ch}`, label: `Snd ${n}`, min: 0, max: 1, default: 0, randomizable: false },
+    { id: `lvl${ch}`, label: ch === 5 ? 'Master' : `Lvl ${n}`, min: 0, max: 1, default: 0.8, randomizable: false },
+    { id: `pan${ch}`, label: `Pan ${n}`, min: -1, max: 1, default: 0, randomizable: true },
+  ];
+}
+
 const mixer: ModuleDef = {
   type: 'mixer',
   name: 'Mixer',
   category: 'io',
-  description: '4-channel stereo mixer: per-channel level and pan, master level.',
+  description:
+    'DJ-style 4-channel stereo mixer + master strip: per-strip kill EQ (Hi/Mid/Low, -60..+6 dB), ' +
+    'one-knob LP/HP filter (left = lowpass sweep, right = highpass, center = off), post-fader FX ' +
+    'send (its send pole appears once the knob is up or wired), level fader with meter, and pan. ' +
+    'Channel meters read pre-fader; the master meter reads the final output.',
+  customFace: true,
   ports: [
     { id: 'in1', label: 'In 1', type: 'audio', direction: 'in', description: 'Channel 1 input.' },
     { id: 'in2', label: 'In 2', type: 'audio', direction: 'in', description: 'Channel 2 input.' },
     { id: 'in3', label: 'In 3', type: 'audio', direction: 'in', description: 'Channel 3 input.' },
     { id: 'in4', label: 'In 4', type: 'audio', direction: 'in', description: 'Channel 4 input.' },
-    audioOutPort('Mixed stereo output.'),
+    audioOutPort('Mixed stereo output (post-master strip).'),
+    { id: 'send1', label: 'Send 1', type: 'audio', direction: 'out', description: 'Channel 1 FX send (post-fader, pre-pan). Appears when the send knob is up.' },
+    { id: 'send2', label: 'Send 2', type: 'audio', direction: 'out', description: 'Channel 2 FX send (post-fader, pre-pan). Appears when the send knob is up.' },
+    { id: 'send3', label: 'Send 3', type: 'audio', direction: 'out', description: 'Channel 3 FX send (post-fader, pre-pan). Appears when the send knob is up.' },
+    { id: 'send4', label: 'Send 4', type: 'audio', direction: 'out', description: 'Channel 4 FX send (post-fader, pre-pan). Appears when the send knob is up.' },
+    { id: 'send5', label: 'Send M', type: 'audio', direction: 'out', description: 'Master FX send (post-master-fader, pre-pan). Appears when the send knob is up.' },
   ],
-  params: [
-    { id: 'lvl1', label: 'Lvl 1', min: 0, max: 1, default: 0.8, randomizable: false },
-    { id: 'pan1', label: 'Pan 1', min: -1, max: 1, default: 0, randomizable: true },
-    { id: 'lvl2', label: 'Lvl 2', min: 0, max: 1, default: 0.8, randomizable: false },
-    { id: 'pan2', label: 'Pan 2', min: -1, max: 1, default: 0, randomizable: true },
-    { id: 'lvl3', label: 'Lvl 3', min: 0, max: 1, default: 0.8, randomizable: false },
-    { id: 'pan3', label: 'Pan 3', min: -1, max: 1, default: 0, randomizable: true },
-    { id: 'lvl4', label: 'Lvl 4', min: 0, max: 1, default: 0.8, randomizable: false },
-    { id: 'pan4', label: 'Pan 4', min: -1, max: 1, default: 0, randomizable: true },
-    { id: 'master', label: 'Master', min: 0, max: 1, default: 0.8, randomizable: false },
-  ],
-  width: 280,
-  height: 280,
+  params: [1, 2, 3, 4, 5].flatMap(mixerStripParams),
+  width: 340,
+  height: 560,
 };
 
 // ---------------------------------------------------------------------------

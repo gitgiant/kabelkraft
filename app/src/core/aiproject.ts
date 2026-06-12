@@ -92,7 +92,8 @@ mixer → audioOut.
 - Each part feeds its own instrument: \`composer.notes → voice → osc/wtosc/smpl
   → vcf → vca → ...\` (see the signal-flow patterns above).
 - Per-part effects (delay, reverb, drive...) sit in that part's audio path.
-- All parts meet at a \`mixer\` (set per-channel levels) → optional master
+- All parts meet at a \`mixer\` (per-channel level/pan, kill EQ, LP/HP filter,
+  post-fader FX send poles, plus a master strip) → optional master
   effects (compressor, limiter, eq) → ONE \`audioOut\`.
 - Group each instrument chain (composer + voice + synth + its effects) into
   its own group; nest related groups (e.g. drum voices inside "Drums").
