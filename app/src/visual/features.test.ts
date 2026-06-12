@@ -82,6 +82,25 @@ describe('VisFeatureHub', () => {
     expect(f.waveL[VIS_WINDOW - 1]).toBeCloseTo(wave[VIS_WINDOW - 1], 5);
   });
 
+  it('text events feed the live line and karaoke stack', () => {
+    const hub = new VisFeatureHub();
+    hub.setSampleRate(SR);
+    hub.pushText('m1', 'hello wor', false); // interim
+    let f = hub.features('m1', 0)!;
+    expect(f).not.toBeNull(); // text-only container still gets features
+    expect(f.text).toBe('hello wor');
+    expect(f.textStack).toEqual([]);
+    expect(f.level).toBe(0); // silent audio
+    hub.pushText('m1', 'hello world', true); // final — reaches cached frame too
+    f = hub.features('m1', 1)!;
+    expect(f.text).toBe('hello world');
+    expect(f.textStack).toEqual(['hello world']);
+    for (let i = 0; i < 10; i++) hub.pushText('m1', `line ${i}`, true);
+    f = hub.features('m1', 100)!;
+    expect(f.textStack.length).toBe(8); // capped
+    expect(f.textStack[7]).toBe('line 9');
+  });
+
   it('returns null with no feed, and prunes deleted modules', () => {
     const hub = new VisFeatureHub();
     expect(hub.features('nope', 0)).toBeNull();

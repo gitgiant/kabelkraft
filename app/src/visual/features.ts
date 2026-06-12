@@ -110,6 +110,8 @@ export interface VisStatusFeed {
   onset: number;
 }
 
+const TEXT_STACK_MAX = 8;
+
 class ContainerFeed {
   ring: VisRingReader | null = null;
   /** Fallback windows from the last status post (no SAB path). */
@@ -119,6 +121,9 @@ class ContainerFeed {
   pendingNotes: number[] = [];
   ctrl = -1;
   onset = 0;
+  /** Live text line (interim events replace it; finals move to the stack). */
+  text = '';
+  textStack: string[] = [];
   cached: VisFeatures | null = null;
   cachedAt = -1;
 }
@@ -167,6 +172,26 @@ export class VisFeatureHub {
     }
   }
 
+  /**
+   * Deliver one text event into a container (from its text pole). Interim
+   * events update the live line in place; final events also push it onto the
+   * karaoke stack.
+   */
+  pushText(moduleId: string, text: string, final: boolean): void {
+    const f = this.feed(moduleId);
+    f.text = text;
+    if (final) {
+      f.textStack.push(text);
+      if (f.textStack.length > TEXT_STACK_MAX) f.textStack.shift();
+    }
+    // Text changes between analysis frames must reach the next features()
+    // call even within the cache window.
+    if (f.cached) {
+      f.cached.text = f.text;
+      f.cached.textStack = [...f.textStack];
+    }
+  }
+
   /** Drop feeds for deleted modules. */
   prune(liveIds: ReadonlySet<string>): void {
     for (const id of [...this.feeds.keys()]) if (!liveIds.has(id)) this.feeds.delete(id);
@@ -181,15 +206,18 @@ export class VisFeatureHub {
     if (!f) return null;
     if (f.cached && now - f.cachedAt < 2) return f.cached;
 
+    // No audio yet (text-only containers, engine not started) → silent
+    // windows; the feed existing at all means someone is feeding this module.
     const waveL = new Float32Array(VIS_WINDOW);
     const waveR = new Float32Array(VIS_WINDOW);
     if (f.ring) {
-      if (!f.ring.readLatest(waveL, waveR) && !f.hasFallback) return null;
+      if (!f.ring.readLatest(waveL, waveR) && f.hasFallback) {
+        waveL.set(f.fallbackL);
+        waveR.set(f.fallbackR);
+      }
     } else if (f.hasFallback) {
       waveL.set(f.fallbackL);
       waveR.set(f.fallbackR);
-    } else {
-      return null;
     }
 
     const wave = new Float32Array(VIS_WINDOW);
@@ -228,6 +256,8 @@ export class VisFeatureHub {
       centroid: fracSum > 0 ? weighted / fracSum : 0,
       notes: f.pendingNotes,
       ctrl: f.ctrl,
+      text: f.text,
+      textStack: [...f.textStack],
     };
     f.pendingNotes = [];
     f.onset = 0;

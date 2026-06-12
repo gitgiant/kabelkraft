@@ -19,7 +19,9 @@ import {
   type FaceSpec,
 } from './core/face';
 import { MidiManager } from './core/midi';
-import { DEFAULT_TRANSPORT, type TransportState } from './core/types';
+import { SttManager } from './core/stt';
+import { formatTransportText, noteName } from './core/texttools';
+import { DEFAULT_TRANSPORT, type TextEvent, type TransportState } from './core/types';
 import { Engine } from './engine/engine';
 import type { MeterReading, StatusMessage } from './engine/messages';
 import { encodeWav } from './engine/wav';
@@ -76,6 +78,61 @@ export class AppState {
   /** Total frames the WebGPU visual runtime rendered (e2e progress probe). */
   visFramesRendered(): number {
     return visFramesRendered();
+  }
+
+  // -- text streams (VISUALIZER_ENGINE_PLAN.md Phase 3) -----------------------
+
+  /** Speech-to-text sessions, one per stt module. */
+  readonly stt = new SttManager();
+  /** Latest text event per producer module (faces read this each frame). */
+  textValues: Record<string, TextEvent> = {};
+  /** Last emitted transport readout per transporttext module (change detection). */
+  private transportTextLast = new Map<string, string>();
+
+  /**
+   * Emit a text event from a producer module and route it along text wires
+   * into visualizer containers (text wires live UI-side, like color wires).
+   */
+  emitText(producerId: string, text: string, final = true): void {
+    this.textValues[producerId] = { text, final };
+    for (const w of this.graph.wires.values()) {
+      if (w.type !== 'text' || w.from.moduleId !== producerId) continue;
+      const target = this.graph.modules.get(w.to.moduleId);
+      if (target?.type === 'visualizer') this.visHub.pushText(target.id, text, final);
+    }
+  }
+
+  /** Toggle a Speech-to-Text module's mic session; returns the new state. */
+  toggleStt(moduleId: string): boolean {
+    if (this.stt.active(moduleId)) {
+      this.stt.stop(moduleId);
+      return false;
+    }
+    return this.stt.start(moduleId, (text, final) => this.emitText(moduleId, text, final));
+  }
+
+  /** Text Input module: send one typed line. */
+  sendTextInput(moduleId: string, text: string): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (!mod) return;
+    mod.data = { ...mod.data, lastText: text };
+    this.emitText(moduleId, text, true);
+  }
+
+  /** Per-status text producers driven by engine state (~30 Hz). */
+  private tickTextProducers(textNotes: Record<string, number[]>): void {
+    for (const mod of this.graph.modules.values()) {
+      if (mod.type === 'transporttext') {
+        const line = formatTransportText(mod.params.format ?? 0, this.transport);
+        if (this.transportTextLast.get(mod.id) !== line) {
+          this.transportTextLast.set(mod.id, line);
+          this.emitText(mod.id, line, true);
+        }
+      }
+    }
+    for (const [id, pitches] of Object.entries(textNotes)) {
+      if (pitches.length > 0) this.emitText(id, pitches.map(noteName).join(' '), true);
+    }
   }
   /** Live Color Gen outputs (packed 24-bit RGB) per module, for UI tints. */
   colorValues: Record<string, number> = {};
@@ -290,6 +347,7 @@ export class AppState {
       const now = performance.now();
       for (const id of status.noteActivity) this.noteFlash.set(id, now);
       this.transport.songPosition = status.songPosition;
+      this.tickTextProducers(status.textNotes ?? {});
     });
   }
 
@@ -323,6 +381,7 @@ export class AppState {
       }
     }
     this.visHub.prune(live);
+    this.stt.prune(new Set(this.graph.modules.keys()));
   }
 
   // -- Samples ------------------------------------------------------------

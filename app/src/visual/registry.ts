@@ -156,6 +156,27 @@ const webcam: VisNodeDef = {
   ],
 };
 
+export const TEXTLAYER_MODES = ['line', 'scroll', 'typewriter', 'stack'];
+
+const textlayer: VisNodeDef = {
+  type: 'textlayer',
+  name: 'Text Layer',
+  category: 'source',
+  description:
+    'Draws the container Text input (lyrics, readouts). Modes: line (current text), ' +
+    'scroll (marquee), typewriter, stack (karaoke history — interim words glow). ' +
+    'With nothing wired it shows the fallback text set in the inspector.',
+  ports: [modPort('size', 'text size'), visOut],
+  params: [
+    { id: 'mode', label: 'Mode', min: 0, max: TEXTLAYER_MODES.length - 1, default: 0, options: [...TEXTLAYER_MODES] },
+    { id: 'size', label: 'Size', min: 0.04, max: 0.3, default: 0.12 },
+    { id: 'hue', label: 'Hue', min: 0, max: 1, default: 0.55 },
+    { id: 'sat', label: 'Sat', min: 0, max: 1, default: 0 },
+    { id: 'speed', label: 'Speed', min: 0.2, max: 4, default: 1 },
+    { id: 'y', label: 'Y', min: 0.1, max: 0.9, default: 0.5 },
+  ],
+};
+
 // -- effects -------------------------------------------------------------
 
 const blur: VisNodeDef = {
@@ -302,6 +323,7 @@ export const VIS_NODE_DEFS: Map<string, VisNodeDef> = new Map(
     image,
     video,
     webcam,
+    textlayer,
     blur,
     pixelate,
     feedback,

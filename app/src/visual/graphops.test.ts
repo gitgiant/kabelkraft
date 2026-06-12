@@ -23,6 +23,8 @@ const FEATURES: VisFeatures = {
   centroid: 0.5,
   notes: [],
   ctrl: -1,
+  text: '',
+  textStack: [],
 };
 
 describe('topoOrder', () => {

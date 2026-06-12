@@ -90,6 +90,10 @@ export interface VisFeatures {
   notes: number[];
   /** Mod-input control value, −1 when unwired. */
   ctrl: number;
+  /** Live text line from the container's text pole ('' = none). Interim lines update in place. */
+  text: string;
+  /** Recent finalized lines, newest last (karaoke stack), capped. */
+  textStack: string[];
 }
 
 /** Analysis window length in samples (raw windows + FFT size). */

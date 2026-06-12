@@ -138,7 +138,7 @@ draws the thumbnail texture.
 - Pop-out display window.
 - (3D nodes are the *next* major catalog push after v1 ships.)
 
-## Phase 3 — Text
+## Phase 3 — Text ✅ done 2026-06-12 (whisper.cpp native STT still pending)
 
 - `text` wire type + pole support + `PORT_TYPE_COLORS` entry.
 - Text Layer node (OffscreenCanvas → texture; animation modes).

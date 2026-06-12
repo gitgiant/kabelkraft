@@ -525,6 +525,101 @@ const webcam: NodeImpl = {
   },
 };
 
+// -- text layer ----------------------------------------------------------------
+// Glyphs rasterize on an OffscreenCanvas (no WGSL font madness) and upload as
+// a texture each frame — text is one layer among many, so it blends like any
+// other visual source. Transparent background, premultiplied.
+
+function hslCss(h: number, s: number, l: number, a = 1): string {
+  return `hsl(${h * 360} ${s * 100}% ${l * 100}% / ${a})`;
+}
+
+const textlayer: NodeImpl = {
+  render(env, node, _inputs, params) {
+    const state = env.states.get(node.id);
+    const f = env.features;
+    const live = f?.text ?? '';
+    const stack = f?.textStack ?? [];
+    const fallback = (node.data?.text as string) ?? '';
+    const line = live || fallback;
+    if (!line && stack.length === 0) return null;
+
+    if (!state.canvas2d || state.texW !== env.width || state.texH !== env.height) {
+      state.canvas2d = new OffscreenCanvas(env.width, env.height);
+      state.texture?.destroy();
+      state.texture = createPersistentTexture(env.device, env.width, env.height);
+      state.texW = env.width;
+      state.texH = env.height;
+    }
+    // Typewriter restarts when the content changes.
+    const contentKey = `${line}|${stack.length}`;
+    if (state.srcKey !== contentKey) {
+      state.srcKey = contentKey;
+      state.mark = env.time;
+    }
+
+    const ctx = state.canvas2d.getContext('2d')!;
+    const W = env.width;
+    const H = env.height;
+    ctx.clearRect(0, 0, W, H);
+    const px = Math.max(10, params.size * H);
+    ctx.font = `700 ${px}px system-ui, sans-serif`;
+    ctx.textBaseline = 'middle';
+    const lum = 0.75;
+    const mode = Math.round(params.mode);
+    const yMid = params.y * H;
+
+    if (mode === 1) {
+      // scroll — marquee right→left, wraps.
+      ctx.fillStyle = hslCss(params.hue, params.sat, lum);
+      const tw = ctx.measureText(line).width;
+      const span = W + tw;
+      const xOff = span - ((env.time * params.speed * 0.12 * span) % span);
+      ctx.fillText(line, xOff - tw, yMid);
+    } else if (mode === 2) {
+      // typewriter — reveal by characters since last change.
+      const chars = Math.floor((env.time - state.mark) * params.speed * 18);
+      const shown = line.slice(0, Math.max(0, chars));
+      ctx.fillStyle = hslCss(params.hue, params.sat, lum);
+      ctx.textAlign = 'left';
+      const tw = ctx.measureText(line).width;
+      ctx.fillText(shown, Math.max(8, (W - tw) / 2), yMid);
+      ctx.textAlign = 'start';
+    } else if (mode === 3) {
+      // stack — karaoke history rising above the live line.
+      ctx.textAlign = 'center';
+      const lineH = px * 1.25;
+      const isInterim = live !== '' && live !== stack[stack.length - 1];
+      for (let i = 0; i < stack.length; i++) {
+        const age = stack.length - 1 - i; // 0 = newest
+        const y = yMid - (age + (isInterim ? 1 : 0)) * lineH;
+        if (y < -lineH) continue;
+        const fade = Math.max(0.12, 1 - age * 0.22);
+        ctx.fillStyle = hslCss(params.hue, params.sat, lum, fade);
+        ctx.fillText(stack[i], W / 2, y);
+      }
+      if (isInterim) {
+        ctx.fillStyle = hslCss(params.hue, Math.min(1, params.sat + 0.2), 0.85);
+        ctx.fillText(live, W / 2, yMid);
+      }
+      ctx.textAlign = 'start';
+    } else {
+      // line — current text centered.
+      ctx.textAlign = 'center';
+      ctx.fillStyle = hslCss(params.hue, params.sat, lum);
+      ctx.fillText(line, W / 2, yMid);
+      ctx.textAlign = 'start';
+    }
+
+    env.device.queue.copyExternalImageToTexture(
+      { source: state.canvas2d },
+      { texture: state.texture!, premultipliedAlpha: true },
+      { width: W, height: H },
+    );
+    return state.texture;
+  },
+};
+
 // -- one-input effects -------------------------------------------------------
 
 /** Builds a single-texture-in effect impl from a fragment shader. */
@@ -860,6 +955,7 @@ export const NODE_IMPLS: Record<string, NodeImpl> = {
   image,
   video,
   webcam,
+  textlayer,
   blur,
   pixelate,
   feedback,

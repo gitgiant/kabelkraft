@@ -4,7 +4,7 @@
  * JSON schema, and (later) the AI spec pack.
  */
 
-export type PortType = 'audio' | 'note' | 'control' | 'trigger' | 'transport' | 'color';
+export type PortType = 'audio' | 'note' | 'control' | 'trigger' | 'transport' | 'color' | 'text';
 
 export type PortDirection = 'in' | 'out';
 
@@ -16,7 +16,15 @@ export const PORT_TYPE_COLORS: Record<PortType, number> = {
   trigger: 0x52e07a, // green
   transport: 0xf0f0f0, // white
   color: 0xb070ff, // violet — carries a live RGB value (Color Gen → UI tints)
+  text: 0xb9c0cc, // steel — carries live string events (lyrics, readouts)
 };
+
+/** One text-stream event (text wires). Interim events stream while a final one is forming. */
+export interface TextEvent {
+  text: string;
+  /** False while still forming (speech interim results — karaoke feel). */
+  final: boolean;
+}
 
 /** Audio channel layout per wire — stereo by default (PRD §4.1). */
 export type ChannelLayout = 'mono' | 'stereo';

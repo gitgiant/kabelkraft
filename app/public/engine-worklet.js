@@ -1326,6 +1326,29 @@ class VisualizerModule {
   }
 }
 
+/** Note sink for the Note Names text producer — collects pitches for the status stream. */
+class NotenamesModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'notenames';
+    this.params = params;
+    this.recentNotes = [];
+  }
+
+  noteOn(voiceId, pitch) {
+    if (this.recentNotes.length < 16) this.recentNotes.push(pitch);
+  }
+
+  noteOff() {}
+
+  /** Drained with each status post. */
+  drainNotes() {
+    const notes = this.recentNotes;
+    this.recentNotes = [];
+    return notes;
+  }
+}
+
 // -- Color Gen (PRD: dynamic UI colors) ---------------------------------------
 // Reacts to audio/control input and emits a packed 24-bit RGB color in the
 // status stream. Color wires are routed view-side — the engine only computes
@@ -2459,6 +2482,8 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new LevelsModule(m.id, m.params));
           } else if (m.type === 'visualizer') {
             next.set(m.id, new VisualizerModule(m.id, m.params));
+          } else if (m.type === 'notenames') {
+            next.set(m.id, new NotenamesModule(m.id, m.params));
           } else if (m.type === 'colorgen') {
             next.set(m.id, new ColorGenModule(m.id, m.params));
           } else if (m.type === 'audioOut') {
@@ -2946,7 +2971,7 @@ class EngineProcessor extends AudioWorkletProcessor {
         mod.render(blockSize);
         continue;
       }
-      if (mod.type === 'sequencer' || mod.type === 'arp' || mod.type === 'composer' || mod.type === 'notethru' || mod.type === 'midiIn') continue;
+      if (mod.type === 'sequencer' || mod.type === 'arp' || mod.type === 'composer' || mod.type === 'notethru' || mod.type === 'midiIn' || mod.type === 'notenames') continue;
       if (mod.type === 'midiOut') {
         mod.collectCc();
         continue;
@@ -3050,6 +3075,7 @@ class EngineProcessor extends AudioWorkletProcessor {
     const spectra = {};
     const visData = {};
     const colorValues = {};
+    const textNotes = {};
     for (const mod of this.modules.values()) {
       if (mod.type === 'sequencer') seqSteps[mod.id] = mod.currentStep;
       if (mod.value !== undefined) controlValues[mod.id] = mod.value;
@@ -3057,6 +3083,10 @@ class EngineProcessor extends AudioWorkletProcessor {
       if (mod.type === 'peq') spectra[mod.id] = mod.spectrum();
       if (mod.type === 'visualizer') visData[mod.id] = mod.visData();
       if (mod.type === 'colorgen') colorValues[mod.id] = mod.colorValue();
+      if (mod.type === 'notenames') {
+        const notes = mod.drainNotes();
+        if (notes.length > 0) textNotes[mod.id] = notes;
+      }
     }
 
     this.port.postMessage({
@@ -3068,6 +3098,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       spectra,
       visData,
       colorValues,
+      textNotes,
       noteActivity: [...this.noteActivity],
       songPosition: this.transport.posBeats,
     });

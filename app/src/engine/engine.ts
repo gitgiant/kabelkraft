@@ -65,6 +65,7 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'cmath',
   'modmatrix',
   'colorgen',
+  'notenames',
 ]);
 
 export type StatusListener = (status: StatusMessage) => void;

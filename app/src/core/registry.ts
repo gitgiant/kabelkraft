@@ -234,6 +234,7 @@ const visualizer: ModuleDef = {
     { id: 'in', label: 'Audio', type: 'audio', direction: 'in', description: 'Audio to visualize; multiple wires are summed.' },
     { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note events spawn particles / flashes.' },
     { id: 'mod', label: 'Mod', type: 'control', direction: 'in', description: 'Modulates scene intensity (0–1).' },
+    { id: 'text', label: 'Text', type: 'text', direction: 'in', description: 'Text stream for Text Layer nodes (lyrics, readouts); multiple wires merge.' },
   ],
   params: [],
   customFace: true,
@@ -1049,11 +1050,76 @@ const notethru: ModuleDef = {
   height: 90,
 };
 
+// -- text producers (VISUALIZER_ENGINE_PLAN.md Phase 3) -----------------------
+
+export const TRANSPORT_TEXT_FORMATS = ['bar.beat', 'time', 'bpm'] as const;
+
+const stt: ModuleDef = {
+  type: 'stt',
+  name: 'Speech to Text',
+  category: 'data',
+  description:
+    'Streams microphone speech as live text (Web Speech API; asks for mic permission). ' +
+    'Interim words appear while you talk — wire Text into a Visualizer for karaoke-style ' +
+    'lyrics. Click the face to start/stop listening. Availability varies by browser.',
+  ports: [
+    { id: 'out', label: 'Text', type: 'text', direction: 'out', description: 'Recognized speech; interim + final lines.' },
+  ],
+  params: [],
+  width: 250,
+  height: 150,
+};
+
+const transporttext: ModuleDef = {
+  type: 'transporttext',
+  name: 'Transport Text',
+  category: 'data',
+  description:
+    'Emits the song position as text — bar.beat, elapsed time or BPM — for on-screen readouts.',
+  ports: [
+    { id: 'out', label: 'Text', type: 'text', direction: 'out', description: 'Formatted transport readout, updates while playing.' },
+  ],
+  params: [
+    { id: 'format', label: 'Format', min: 0, max: TRANSPORT_TEXT_FORMATS.length - 1, default: 0, options: [...TRANSPORT_TEXT_FORMATS], randomizable: false },
+  ],
+  width: 230,
+  height: 150,
+};
+
+const textinput: ModuleDef = {
+  type: 'textinput',
+  name: 'Text Input',
+  category: 'data',
+  description:
+    'Manual text source — click the face and type a line to send it (lyrics pushing, captions, labels).',
+  ports: [
+    { id: 'out', label: 'Text', type: 'text', direction: 'out', description: 'The typed line, emitted when entered.' },
+  ],
+  params: [],
+  width: 240,
+  height: 140,
+};
+
+const notenames: ModuleDef = {
+  type: 'notenames',
+  name: 'Note Names',
+  category: 'data',
+  description: 'Turns incoming notes into text ("C#4") — fun with arps and sequencers.',
+  ports: [
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Notes to name.' },
+    { id: 'out', label: 'Text', type: 'text', direction: 'out', description: 'Name of each played note.' },
+  ],
+  params: [],
+  width: 220,
+  height: 140,
+};
+
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
     transport, sequencer, arp, composer, notethru, lfo, adsr, random, keyboard, midiIn, midiOut,
     voice, osc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
     mixer, recorder, audioOut, levels, visualizer, colorgen,
+    stt, transporttext, textinput, notenames,
   ].map((d) => [d.type, d]),
 );

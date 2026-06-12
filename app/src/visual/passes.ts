@@ -184,6 +184,10 @@ export class NodeState {
   /** CPU particle sim. */
   particles: Particle[] = [];
   instanceData: Float32Array | null = null;
+  /** 2D rasterization surface (Text Layer). */
+  canvas2d: OffscreenCanvas | null = null;
+  /** Timestamp marker (typewriter restart on content change). */
+  mark = 0;
 
   uniform(device: GPUDevice, byteLength: number): GPUBuffer {
     let b = this.uniforms.get(byteLength);

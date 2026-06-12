@@ -141,6 +141,61 @@ test('visual graph editing: effect chain renders and editor opens', async ({ pag
   expect(errors).toEqual([]);
 });
 
+test('text wire: producer → container → Text Layer renders', async ({ page }) => {
+  const errors = captureErrors(page);
+  await bootWithAudio(page);
+
+  const ids = await page.evaluate(() => {
+    const s = window.__kk;
+    const input = s.addModule('textinput', 200, 500);
+    const vis = s.addModule('visualizer', 600, 500);
+    const wire = s.connect(
+      { moduleId: input.id, portId: 'out' },
+      { moduleId: vis.id, portId: 'text' },
+    );
+    // Text Layer in stack mode replaces the init spectrum graph.
+    s.setVisGraph(vis.id, {
+      nodes: [
+        { id: 'v1', type: 'textlayer', x: 40, y: 60, params: { mode: 3, size: 0.12 } },
+        { id: 'v2', type: 'output', x: 320, y: 60, params: {} },
+      ],
+      wires: [{ id: 'vw1', from: { nodeId: 'v1', portId: 'out' }, to: { nodeId: 'v2', portId: 'in' } }],
+    });
+    return { input: input.id, vis: vis.id, wired: wire.ok };
+  });
+  expect(ids.wired).toBe(true);
+
+  // Typed lines route along the text wire into the container's feature feed.
+  await page.evaluate(({ input }) => {
+    window.__kk.sendTextInput(input, 'hello stage');
+    window.__kk.sendTextInput(input, 'second line');
+  }, ids);
+  const feed = await page.evaluate(({ vis }) => {
+    const f = window.__kk.visFeatures(vis);
+    return f ? { text: f.text, stack: f.textStack } : null;
+  }, ids);
+  expect(feed).not.toBeNull();
+  expect(feed!.text).toBe('second line');
+  expect(feed!.stack).toEqual(['hello stage', 'second line']);
+
+  // Text Layer renders through the GPU path.
+  const gpu = await page.evaluate(() => 'gpu' in navigator);
+  if (gpu) {
+    await page.evaluate(({ vis }) => {
+      const c = window.__kkCanvas;
+      const p = c.clientPointFor(vis);
+      if (p) c.panBy(400 - p.x, 300 - p.y);
+      window.__kk.openVisualizer(vis);
+    }, ids);
+    const before = await page.evaluate(() => window.__kk.visFramesRendered());
+    await expect
+      .poll(() => page.evaluate(() => window.__kk.visFramesRendered()), { timeout: 5000 })
+      .toBeGreaterThan(before + 10);
+    await page.locator('.vis-overlay button[title="Close (Esc)"]').click();
+  }
+  expect(errors).toEqual([]);
+});
+
 test('double-clicking the tile scene opens the visual graph editor', async ({ page }) => {
   await boot(page);
   const id = await page.evaluate(() => {

@@ -516,6 +516,19 @@
               />
             </label>
           {/if}
+          {#if node.type === 'textlayer'}
+            <input
+              class="textfield"
+              type="text"
+              placeholder="Fallback text (when no wire)…"
+              value={(node.data?.text as string) ?? ''}
+              onchange={(e) => {
+                appState.beginUndoable();
+                node.data = { ...node.data, text: (e.currentTarget as HTMLInputElement).value };
+                apply(false);
+              }}
+            />
+          {/if}
           {#if node.type === 'video'}
             <label class="file">
               {node.data?.srcName ?? 'Pick video…'}
@@ -743,6 +756,15 @@
   }
   .file input {
     display: none;
+  }
+  .textfield {
+    width: 100%;
+    font-size: 12px;
+    padding: 5px 8px;
+    background: #1c1c26;
+    border: 1px solid #34343f;
+    border-radius: 6px;
+    color: var(--text, #e8e8ee);
   }
   .hint {
     font-size: 11px;
