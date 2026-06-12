@@ -8,7 +8,7 @@ import { Graph, type PortRef, type Wire } from './core/graph';
 import { createInstance, type ModuleInstance } from './core/module';
 import { MODULE_DEFS } from './core/registry';
 import { decodeSample, encodeSample, parseSampleKey, sampleKey, type SampleData } from './core/samples';
-import { deserializeProject, serializeProject } from './core/serialize';
+import { deserializeProject, serializeProject, type ProjectMeta } from './core/serialize';
 import { parseKkGroup } from './core/aiimport';
 import { planAutoWire } from './core/autowire';
 import { parseKkProject, type KkProjectGroup } from './core/aiproject';
@@ -32,6 +32,7 @@ import { visGraphOf } from './visual/migrate';
 import { createVisRingBuffer } from './visual/ring';
 import { ContainerRenderer, visFramesRendered, visGpuErrors, type ContainerFrame } from './visual/runtime';
 import { hslToRgbInt, rgbIntToHsl } from './core/color';
+import { appSettings } from './core/settings';
 import type { VisFeatures, VisGraphData } from './visual/types';
 
 export type StateEvent =
@@ -50,7 +51,8 @@ export type StateEvent =
   | 'faceLearnChanged' // face learn armed/canceled/completed
   | 'composerChanged' // piano-roll editor opened/closed
   | 'composerAiRequest' // container 🤖 button: open a composer's AI popup
-  | 'rangeConfigChanged'; // knob/slider range popup opened/closed
+  | 'rangeConfigChanged' // knob/slider range popup opened/closed
+  | 'projectMetaChanged'; // name/artists/description/picture edited
 
 type Listener = () => void;
 
@@ -59,6 +61,8 @@ export class AppState {
   readonly engine = new Engine();
   transport: TransportState = { ...DEFAULT_TRANSPORT };
   projectName = 'Untitled';
+  /** Descriptive metadata saved with the project (Options → Project). */
+  projectMeta: ProjectMeta = {};
 
   /** Live per-module meters from the engine, refreshed ~30 Hz. */
   meters: Record<string, MeterReading> = {};
@@ -68,6 +72,8 @@ export class AppState {
   controlValues: Record<string, number> = {};
   /** Live gain reduction (dB) per compressor/limiter, for GR meters. */
   gainReduction: Record<string, number> = {};
+  /** DSP health from the worklet (Options → Debug): load 0–1+, underrun count. */
+  enginePerf: { load: number; underruns: number } = { load: 0, underruns: 0 };
   /** Live input spectra (64 log bins, dB) per parametric EQ. */
   spectra: Record<string, number[]> = {};
   /** Live visualizer feeds (notes/ctrl/onset; raw windows only without SAB). */
@@ -504,6 +510,7 @@ export class AppState {
       const now = performance.now();
       for (const id of status.noteActivity) this.noteFlash.set(id, now);
       this.transport.songPosition = status.songPosition;
+      if (status.perf) this.enginePerf = status.perf;
       this.tickTextProducers(status.textNotes ?? {});
     });
   }
@@ -511,13 +518,33 @@ export class AppState {
   /** Start the engine (user gesture required) and prime it with current state. */
   async ensureEngine(): Promise<void> {
     const wasRunning = this.engine.running;
-    await this.engine.start();
+    const audio = appSettings().audio;
+    await this.engine.start(audio);
+    this.engine.setMasterGain(audio.muted ? 0 : audio.masterGain);
     if (!wasRunning) {
       this.visHub.setSampleRate(this.engine.sampleRate);
       this.syncEngine();
       this.engine.sendTransport(this.transport, this.transport.songPosition);
       this.resendSamples();
     }
+  }
+
+  /**
+   * Rebuild the AudioContext with the current Options → Audio settings
+   * (latency hint / sample rate / output device need construction-time values).
+   * Playback state, graph, and samples are restored; expect a brief dropout.
+   */
+  async restartEngine(): Promise<void> {
+    if (!this.engine.started) return;
+    const wasPlaying = this.transport.playing;
+    this.transport.playing = false;
+    await this.engine.stop();
+    await this.ensureEngine();
+    if (wasPlaying) {
+      this.transport.playing = true;
+      this.engine.sendTransport(this.transport, this.transport.songPosition);
+    }
+    this.emit('transportChanged');
   }
 
   /**
@@ -609,6 +636,17 @@ export class AppState {
 
   cancelMidiLearn(): void {
     this.midiLearn = null;
+    this.emit('midiChanged');
+  }
+
+  /** Drop one MIDI-learn binding (Options → MIDI mapping manager). */
+  removeMidiMapping(key: string): void {
+    if (this.midiMap.delete(key)) this.emit('midiChanged');
+  }
+
+  clearMidiMappings(): void {
+    if (this.midiMap.size === 0) return;
+    this.midiMap.clear();
     this.emit('midiChanged');
   }
 
@@ -1415,6 +1453,7 @@ export class AppState {
     for (const g of project.groups) make(g);
 
     this.projectName = project.name;
+    this.projectMeta = {};
     this.transport.tempo = project.tempo;
     this.transport.songPosition = 0;
     this.clearSelection();
@@ -1604,6 +1643,24 @@ export class AppState {
     this.emit('transportChanged');
   }
 
+  setTimeSignature(num: number, denom: number): void {
+    const n = Math.min(32, Math.max(1, Math.round(num)));
+    const d = [1, 2, 4, 8, 16, 32].includes(denom) ? denom : 4;
+    this.transport.timeSignature = { num: n, denom: d };
+    this.engine.sendTransport(this.transport);
+    this.emit('transportChanged');
+  }
+
+  setProjectName(name: string): void {
+    this.projectName = name.trim() || 'Untitled';
+    this.emit('projectMetaChanged');
+  }
+
+  setProjectMeta(patch: Partial<ProjectMeta>): void {
+    this.projectMeta = { ...this.projectMeta, ...patch };
+    this.emit('projectMetaChanged');
+  }
+
   setTempo(tempo: number): void {
     this.transport.tempo = Math.min(300, Math.max(20, tempo));
     for (const m of this.graph.modules.values()) {
@@ -1651,6 +1708,7 @@ export class AppState {
     }
     return serializeProject(
       this.projectName, this.graph, this.transport, samples, this.midiMapObject(), faceAssets,
+      Object.keys(this.projectMeta).length ? this.projectMeta : undefined,
     );
   }
 
@@ -1660,6 +1718,7 @@ export class AppState {
     const result = deserializeProject(json, MODULE_DEFS);
     this.graph = result.graph;
     this.projectName = result.name;
+    this.projectMeta = result.meta;
     this.transport = result.transport;
     this.selectedModuleId = null;
     this.selectedWireId = null;

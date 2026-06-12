@@ -26,6 +26,11 @@ export function visDisplayOf(data: Record<string, unknown> | undefined): VisDisp
   };
 }
 
+/** Clamp a container's display settings to the machine-wide ceiling (Options → Display). */
+export function clampVisDisplay(d: VisDisplay, cap: { fps: number; res: number }): VisDisplay {
+  return { fps: Math.min(d.fps, cap.fps), res: Math.min(d.res, cap.res) };
+}
+
 /**
  * rAF rate gate — the per-container vsync divider. rAF fires at the display
  * rate; due() says whether this callback should render to hold `fps`. The

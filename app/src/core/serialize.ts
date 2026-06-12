@@ -13,9 +13,19 @@ import { DEFAULT_TRANSPORT, type TransportState } from './types';
 
 export const FORMAT_VERSION = 2;
 
+/** Descriptive project metadata — display only, nothing reads it for behavior. */
+export interface ProjectMeta {
+  artists?: string;
+  description?: string;
+  /** Cover image data URL, downscaled on input (≤512px). */
+  picture?: string;
+}
+
 export interface ProjectFile {
   formatVersion: number;
   name: string;
+  /** Present only in explicit saves, like samples/faceAssets. */
+  meta?: ProjectMeta;
   transport: TransportState;
   modules: ModuleInstance[];
   wires: Wire[];
@@ -35,10 +45,12 @@ export function serializeProject(
   samples?: SerializedSample[],
   midiMap?: Record<string, { moduleId: string; paramId: string }>,
   faceAssets?: Record<string, string>,
+  meta?: ProjectMeta,
 ): string {
   const file: ProjectFile = {
     formatVersion: FORMAT_VERSION,
     name,
+    meta,
     transport: { ...transport, playing: false },
     modules: [...graph.modules.values()],
     wires: [...graph.wires.values()],
@@ -53,6 +65,7 @@ export function serializeProject(
 export interface LoadResult {
   graph: Graph;
   name: string;
+  meta: ProjectMeta;
   transport: TransportState;
   warnings: string[];
   samples: SerializedSample[];
@@ -133,9 +146,17 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
     if (graph.modules.has(target.moduleId)) midiMap[key] = target;
   }
 
+  const meta: ProjectMeta = {};
+  if (typeof raw.meta?.artists === 'string') meta.artists = raw.meta.artists;
+  if (typeof raw.meta?.description === 'string') meta.description = raw.meta.description;
+  if (typeof raw.meta?.picture === 'string' && raw.meta.picture.startsWith('data:image/')) {
+    meta.picture = raw.meta.picture;
+  }
+
   return {
     graph,
     name: raw.name ?? 'Untitled',
+    meta,
     transport: { ...DEFAULT_TRANSPORT, ...raw.transport, playing: false },
     warnings,
     samples: (raw.samples ?? []).filter((s) => graph.modules.has(s.moduleId)),

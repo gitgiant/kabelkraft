@@ -133,26 +133,33 @@ test('sample voice plays injected PCM pitched by the sequencer', async ({ page }
   expect(roundTrip.restoredLength).toBe(22050);
 });
 
-test('theme toggle switches theme and persists', async ({ page }) => {
+test('theme switch via Options persists in the unified settings', async ({ page }) => {
   await boot(page);
   const readBg = () =>
     page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--bg').trim());
 
   const before = await readBg();
-  await page.locator('.theme-toggle').click();
+  await page.locator('.options-toggle').click();
+  await page.locator('.options-tabs .tab[data-tab="display"]').click();
+  await page.locator('.opt-theme').selectOption('light');
   const after = await readBg();
   // Don't pin exact hex values — only that the theme actually changed and persists.
   expect(after).not.toBe(before);
-  expect(await page.evaluate(() => localStorage.getItem('kk-theme'))).toBe('light');
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem('kk-settings')!).display.theme),
+  ).toBe('light');
 
   await page.reload();
   expect(await readBg()).toBe(after);
-  await page.evaluate(() => localStorage.removeItem('kk-theme'));
+  await page.evaluate(() => localStorage.removeItem('kk-settings'));
 });
 
 test('tutorial steps auto-advance and complete', async ({ page }) => {
   await boot(page);
-  await page.locator('button[title="Start the tutorial"]').click();
+  // The tutorial now lives in Options → General (save prompt included).
+  await page.locator('.options-toggle').click();
+  await page.locator('.options-tabs .tab[data-tab="general"]').click();
+  await page.locator('.restart-tutorial').click();
   await page.locator('button.just-start').click(); // save prompt → skip saving
   await expect(page.locator('.tutorial-title')).toHaveText('Add an Oscillator');
 

@@ -6,6 +6,8 @@
  * (PRD §11.5: color = identity, shape/type-color = function).
  */
 
+import { appSettings, updateSettings } from './core/settings';
+
 export interface Theme {
   name: 'dark' | 'light';
   canvasBg: number;
@@ -108,11 +110,9 @@ export function onThemeChange(fn: ThemeListener): () => void {
 export function setTheme(name: 'dark' | 'light'): void {
   Object.assign(theme, name === 'light' ? LIGHT : DARK);
   applyCssVars();
-  try {
-    localStorage.setItem('kk-theme', name);
-  } catch {
-    // storage unavailable (e.g. some embedded contexts) — theme just won't persist
-  }
+  updateSettings((s) => {
+    s.display.theme = name;
+  });
   for (const fn of listeners) fn(theme);
 }
 
@@ -125,12 +125,6 @@ export function applyCssVars(): void {
 }
 
 export function initTheme(): void {
-  let saved: string | null = null;
-  try {
-    saved = localStorage.getItem('kk-theme');
-  } catch {
-    // ignore
-  }
-  Object.assign(theme, saved === 'light' ? LIGHT : DARK);
+  Object.assign(theme, appSettings().display.theme === 'light' ? LIGHT : DARK);
   applyCssVars();
 }

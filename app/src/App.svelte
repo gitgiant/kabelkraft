@@ -2,7 +2,10 @@
   import { onMount } from 'svelte';
   import { patchCanvas } from './canvas/PatchCanvas';
   import { appState } from './state';
+  import { appSettings, onSettingsChange, type AppSettings } from './core/settings';
+  import { clearAutosave, readAutosave, writeAutosave } from './core/autosave';
   import AiImport from './ui/AiImport.svelte';
+  import OptionsDialog from './ui/OptionsDialog.svelte';
   import FaceEditor from './ui/FaceEditor.svelte';
   import ModulePalette from './ui/ModulePalette.svelte';
   import PianoRoll from './ui/PianoRoll.svelte';
@@ -50,8 +53,76 @@
     }
   }
 
+  // -- Settings-driven chrome (Options dialog writes, this applies) ----------
+
+  function applyChrome(s: AppSettings) {
+    // Non-standard but supported by every current engine; scales chrome and
+    // canvas alike, and pointer coordinates stay consistent.
+    (document.documentElement.style as CSSStyleDeclaration & { zoom: string }).zoom =
+      s.display.uiScale === 1 ? '' : String(s.display.uiScale);
+    appState.midi.disabledInputs = new Set(s.midi.disabledInputs);
+  }
+
+  function onBeforeUnload(e: BeforeUnloadEvent) {
+    if (appSettings().general.confirmLeave) e.preventDefault();
+  }
+
+  // -- Autosave (Options → General): debounced full-project snapshot ---------
+
+  let restoreOffer = $state<{ savedAt: number; projectName: string } | null>(null);
+  let restoreJson: string | null = null;
+
+  function restoreSession(apply: boolean) {
+    if (apply && restoreJson) {
+      const warnings = appState.loadProject(restoreJson);
+      if (warnings.length) alert(`Session restored with warnings:\n${warnings.join('\n')}`);
+    } else {
+      void clearAutosave();
+    }
+    restoreOffer = null;
+    restoreJson = null;
+  }
+
   onMount(() => {
-    void patchCanvas.mount(canvasContainer).then(() => addPolySynth());
+    const s = appSettings();
+    applyChrome(s);
+    const offSettings = onSettingsChange(applyChrome);
+    window.addEventListener('beforeunload', onBeforeUnload);
+
+    void patchCanvas.mount(canvasContainer).then(() => {
+      addPolySynth();
+      // A fresh session starts at the configured default tempo.
+      if (s.general.defaultTempo !== appState.transport.tempo) {
+        appState.setTempo(s.general.defaultTempo);
+      }
+    });
+
+    // Offer to restore the last autosaved session (newer work may be lost).
+    void readAutosave().then((rec) => {
+      if (rec && appSettings().general.autosave) {
+        restoreOffer = { savedAt: rec.savedAt, projectName: rec.projectName };
+        restoreJson = rec.json;
+      }
+    });
+
+    let dirty = false;
+    let lastSave = Date.now();
+    const markDirty = () => (dirty = true);
+    const offDirty = (['graphChanged', 'paramChanged', 'sampleLoaded', 'projectMetaChanged'] as const)
+      .map((ev) => appState.on(ev, markDirty));
+    const saver = setInterval(() => {
+      const g = appSettings().general;
+      if (!g.autosave || !dirty) return;
+      if (Date.now() - lastSave < g.autosaveInterval * 1000) return;
+      dirty = false;
+      lastSave = Date.now();
+      void writeAutosave({
+        json: appState.serializeWithSamples(),
+        savedAt: lastSave,
+        projectName: appState.projectName,
+      }).catch(() => undefined);
+    }, 1000);
+
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     const offComposer = appState.on('composerChanged', () => {
@@ -60,7 +131,11 @@
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('beforeunload', onBeforeUnload);
       offComposer();
+      offSettings();
+      for (const off of offDirty) off();
+      clearInterval(saver);
     };
   });
 </script>
@@ -95,7 +170,23 @@
   <VisualizerOverlay />
   <AiImport />
   <FaceEditor />
+  <OptionsDialog />
 </div>
+
+{#if restoreOffer}
+  <div class="restore-backdrop">
+    <div class="restore-dialog" role="dialog" aria-label="Restore session">
+      <p>
+        Restore the autosaved session <strong>{restoreOffer.projectName}</strong>
+        from {new Date(restoreOffer.savedAt).toLocaleString()}?
+      </p>
+      <div class="restore-actions">
+        <button class="restore-yes" onclick={() => restoreSession(true)}>↩ Restore</button>
+        <button class="restore-no" onclick={() => restoreSession(false)}>Discard</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .layout {
@@ -114,5 +205,35 @@
     min-width: 0;
     overflow: hidden;
     touch-action: none; /* canvas owns all touch gestures (pinch-zoom, pan) */
+  }
+  .restore-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 95;
+  }
+  .restore-dialog {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 18px 22px;
+    max-width: 420px;
+  }
+  .restore-dialog p {
+    margin: 0 0 14px;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .restore-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .restore-yes {
+    background: var(--accent);
+    color: #1a1a20;
+    font-weight: 600;
   }
 </style>

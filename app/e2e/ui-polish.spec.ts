@@ -79,19 +79,23 @@ test('filter face: response curve drag sets cutoff + Q; knobs work', async ({ pa
   expect(errors).toEqual([]);
 });
 
-test('tutorial button asks about saving first; cancel aborts', async ({ page }) => {
+test('tutorial restart asks about saving first; cancel aborts', async ({ page }) => {
   await page.goto('/');
-  await page.locator('.toolbar button[title="Start the tutorial"]').click();
+  // The tutorial moved into Options → General.
+  await page.locator('.options-toggle').click();
+  await page.locator('.options-tabs .tab[data-tab="general"]').click();
+  await page.locator('.restart-tutorial').click();
   await expect(page.locator('.tutorial-dialog')).toBeVisible();
 
-  // Cancel: no tutorial.
+  // Cancel: no tutorial, Options stays open.
   await page.locator('button.cancel-tutorial').click();
   await expect(page.locator('.tutorial-dialog')).toBeHidden();
   await expect(page.locator('.tutorial')).toBeHidden();
 
-  // Start without saving launches it.
-  await page.locator('.toolbar button[title="Start the tutorial"]').click();
+  // Start without saving closes Options and launches it.
+  await page.locator('.restart-tutorial').click();
   await page.locator('button.just-start').click();
+  await expect(page.locator('.options-dialog')).toHaveCount(0);
   await expect(page.locator('.tutorial')).toBeVisible();
 });
 

@@ -9,6 +9,7 @@ import {
   saveSettings,
   type AiSettings,
 } from './aiprovider';
+import { resetSettingsCache } from './settings';
 
 // Minimal in-memory localStorage (vitest runs under node, no DOM).
 const store = new Map<string, string>();
@@ -50,10 +51,16 @@ function claudeReply(text: string) {
 afterEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
+  resetSettingsCache();
 });
 
 describe('AI provider settings', () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    // AI settings live in the unified store now — drop its cache so each test
+    // sees the localStorage it just prepared.
+    resetSettingsCache();
+  });
 
   it('round-trips settings through localStorage', () => {
     saveSettings(claudeSettings);

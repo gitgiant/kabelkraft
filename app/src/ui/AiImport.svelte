@@ -15,7 +15,7 @@ import { extractJson } from '../core/aiimport';
     type AiSettings,
   } from '../core/aiprovider';
   import { appState } from '../state';
-  import AiSettingsPanel from './AiSettingsPanel.svelte';
+  import { onSettingsChange } from '../core/settings';
 
   // PRD §10.2: copy the spec pack for an external chatbot, paste its JSON
   // reply (or drop a .kkgroup file), validate readably, insert as a group.
@@ -36,7 +36,6 @@ import { extractJson } from '../core/aiimport';
   let imported = $state(false);
 
   let settings = $state<AiSettings>(loadSettings());
-  let showSettings = $state(false);
   let generating = $state(false);
   let genStatus = $state('');
 
@@ -66,6 +65,8 @@ import { extractJson } from '../core/aiimport';
     window.addEventListener('kk-ai-import', onToggle);
     window.addEventListener('kk-ai-project', onToggleProject);
     window.addEventListener('kk-ai-group', onToggleGroup);
+    // Backend is configured in Options → AI now; pick changes up live.
+    const offSettings = onSettingsChange(() => (settings = loadSettings()));
     // Drag the ready-patch chip anywhere over the canvas to place it there.
     window.addEventListener('dragover', onWindowDragOver);
     window.addEventListener('drop', onWindowDrop);
@@ -75,6 +76,7 @@ import { extractJson } from '../core/aiimport';
       window.removeEventListener('kk-ai-group', onToggleGroup);
       window.removeEventListener('dragover', onWindowDragOver);
       window.removeEventListener('drop', onWindowDrop);
+      offSettings();
     };
   });
 
@@ -265,15 +267,15 @@ import { extractJson } from '../core/aiimport';
         </span>
         <span class="provider-tag" title="Active AI backend (configure with Setup)">{providerLabel(settings)}</span>
         <span class="spacer"></span>
-        <button class="setup-btn" class:active={showSettings} onclick={() => (showSettings = !showSettings)} title="Configure an AI backend">
+        <button
+          class="setup-btn"
+          onclick={() => window.dispatchEvent(new CustomEvent('kk-options', { detail: { tab: 'ai' } }))}
+          title="Configure an AI backend in Options"
+        >
           ⚙ Setup
         </button>
         <button onclick={() => (open = false)} title="Close (Esc)">✕</button>
       </div>
-
-      {#if showSettings}
-        <AiSettingsPanel bind:settings />
-      {/if}
 
       <p class="ai-help">
         {#if readyPatch}
@@ -436,9 +438,6 @@ import { extractJson } from '../core/aiimport';
     border-radius: 5px;
     padding: 1px 6px;
     margin-left: 8px;
-  }
-  .setup-btn.active {
-    outline: 1px solid var(--accent);
   }
   .generate {
     background: var(--accent);

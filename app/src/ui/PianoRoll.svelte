@@ -30,7 +30,7 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
   import { parseSmf, writeSmf, type SmfFile } from '../core/smf';
   import { patchCanvas } from '../canvas/PatchCanvas';
   import { appState } from '../state';
-  import AiSettingsPanel from './AiSettingsPanel.svelte';
+  import { onSettingsChange } from '../core/settings';
 
   // PRD §8.3 reworked: full piano-roll editor for the Composer module.
   // Keys on the left, zoomable free-time note grid, per-note parameter lane,
@@ -132,6 +132,8 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
     };
     const offAi = appState.on('composerAiRequest', consumeAiRequest);
     consumeAiRequest();
+    // Backend is configured in Options → AI; pick changes up live.
+    const offSettings = onSettingsChange(() => (aiSettings = loadSettings()));
     const tick = () => {
       drawAll();
       reposition();
@@ -142,6 +144,7 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
       offActive();
       offGraph();
       offAi();
+      offSettings();
       cancelAnimationFrame(raf);
     };
   });
@@ -736,7 +739,6 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
   let aiErrors = $state<string[]>([]);
   let aiWarnings = $state<string[]>([]);
   let aiSettings = $state<AiSettings>(loadSettings());
-  let aiShowSettings = $state(false);
   let aiGenerating = $state(false);
   let aiGenStatus = $state('');
   let aiCopied = $state(false);
@@ -976,13 +978,12 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
             <span>AI MIDI — {title}</span>
             <span class="provider-tag" title="Active AI backend (configure with Setup)">{providerLabel(aiSettings)}</span>
             <span class="ai-spacer"></span>
-            <button class:active={aiShowSettings} onclick={() => (aiShowSettings = !aiShowSettings)} title="Configure an AI backend">⚙ Setup</button>
+            <button
+              onclick={() => window.dispatchEvent(new CustomEvent('kk-options', { detail: { tab: 'ai' } }))}
+              title="Configure an AI backend in Options"
+            >⚙ Setup</button>
             <button onclick={() => (aiOpen = false)} title="Close (Esc)">✕</button>
           </div>
-
-          {#if aiShowSettings}
-            <AiSettingsPanel bind:settings={aiSettings} />
-          {/if}
 
           <p class="ai-help">
             {#if providerReady(aiSettings)}
@@ -1240,9 +1241,6 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
   }
   .ai-spacer {
     flex: 1;
-  }
-  .ai-title-row button.active {
-    outline: 1px solid var(--accent);
   }
   .ai-help {
     font-size: 12px;

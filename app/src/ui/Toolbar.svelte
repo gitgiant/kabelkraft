@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
   import { appState } from '../state';
-  import { setTheme, theme } from '../theme';
+  import { downloadProject } from './project-io';
 
   let projectName = $state(appState.projectName);
   let tempo = $state(appState.transport.tempo);
@@ -44,6 +44,9 @@
     const offP = appState.on('projectLoaded', () => {
       projectName = appState.projectName;
     });
+    const offN = appState.on('projectMetaChanged', () => {
+      projectName = appState.projectName;
+    });
     const offG = appState.on('graphChanged', refreshEditState);
     const offS = appState.on('selectionChanged', refreshEditState);
     const poll = setInterval(() => (audioOn = appState.engine.running), 500);
@@ -52,6 +55,7 @@
       window.removeEventListener('keydown', onLearnKey);
       offT();
       offP();
+      offN();
       offG();
       offS();
       clearInterval(poll);
@@ -65,12 +69,7 @@
 
   function saveProject() {
     appState.projectName = projectName || 'Untitled';
-    const blob = new Blob([appState.serializeWithSamples()], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `${appState.projectName}.kkproj`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    downloadProject();
   }
 
   async function loadProject(e: Event) {
@@ -79,26 +78,6 @@
     const warnings = appState.loadProject(await file.text());
     if (warnings.length) alert(`Project loaded with warnings:\n${warnings.join('\n')}`);
     fileInput.value = '';
-  }
-
-  let themeName = $state(theme.name);
-
-  function toggleTheme() {
-    themeName = themeName === 'dark' ? 'light' : 'dark';
-    setTheme(themeName);
-  }
-
-  // Tutorial may rearrange the patch — offer to save first.
-  let tutorialPrompt = $state(false);
-
-  function startTutorial() {
-    tutorialPrompt = true;
-  }
-
-  function launchTutorial(saveFirst: boolean) {
-    if (saveFirst) saveProject();
-    tutorialPrompt = false;
-    window.dispatchEvent(new CustomEvent('kk-start-tutorial'));
   }
 
   // -- Module faces (design framework over groups) --------------------------
@@ -292,10 +271,13 @@
     >
       🗂 Samples
     </button>
-    <button class="theme-toggle" onclick={toggleTheme} title="Toggle dark/light theme">
-      {themeName === 'dark' ? '☀' : '🌙'}
+    <button
+      class="options-toggle"
+      onclick={() => window.dispatchEvent(new CustomEvent('kk-options'))}
+      title="Options: project, audio, MIDI, display, AI, autosave… (Cmd/Ctrl+,)"
+    >
+      ⚙
     </button>
-    <button onclick={startTutorial} title="Start the tutorial">?</button>
 
     {#if !audioOn}
       <button class="enable-audio" onclick={enableAudio}>🔊 Enable Audio</button>
@@ -316,19 +298,6 @@
 >
   {toolbarHeight === 0 ? '▾' : '▴'}
 </button>
-
-{#if tutorialPrompt}
-  <div class="tutorial-backdrop">
-    <div class="tutorial-dialog" role="dialog" aria-label="Start tutorial">
-      <p>Start the tutorial? You can save your project first.</p>
-      <div class="tutorial-actions">
-        <button class="save-start" onclick={() => launchTutorial(true)}>💾 Save & start</button>
-        <button class="just-start" onclick={() => launchTutorial(false)}>Start without saving</button>
-        <button class="cancel-tutorial" onclick={() => (tutorialPrompt = false)}>Cancel</button>
-      </div>
-    </div>
-  </div>
-{/if}
 
 <style>
   .toolbar-clip {
@@ -440,36 +409,5 @@
   }
   .audio-on {
     padding: 0 6px;
-  }
-  .tutorial-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 70;
-  }
-  .tutorial-dialog {
-    background: var(--panel);
-    border: 1px solid var(--panel-border);
-    border-radius: 10px;
-    padding: 18px 22px;
-    max-width: 360px;
-  }
-  .tutorial-dialog p {
-    margin: 0 0 14px;
-    font-size: 13px;
-    color: var(--text);
-  }
-  .tutorial-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .save-start {
-    background: var(--accent);
-    color: #1a1a20;
-    font-weight: 600;
   }
 </style>

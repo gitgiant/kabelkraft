@@ -22,70 +22,30 @@ import { MIDI_SPEC, parseKkMidi } from './aimidi';
 import { generateFaceSpecPack, parseKkFace } from './aiface';
 import { generateProjectSpecPack, parseKkProject } from './aiproject';
 import { generateVisualSpecPack, parseKkVis } from './aivisual';
+import { appSettings, updateSettings } from './settings';
 import type { Graph } from './graph';
+import { CUSTOM_PRESETS, type AiSettings } from './aisettings';
 
-export type ProviderKind = 'none' | 'claude' | 'openrouter' | 'custom';
-
-export interface AiSettings {
-  provider: ProviderKind;
-  claude: { apiKey: string; model: string };
-  openrouter: { apiKey: string; model: string };
-  custom: { baseUrl: string; apiKey: string; model: string };
-}
-
-/** Claude models worth offering for patch generation (best JSON adherence first). */
-export const CLAUDE_MODELS = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'];
-
-/** Fill-in presets for the custom OpenAI-compatible backend. */
-export const CUSTOM_PRESETS = [
-  { name: 'Ollama', baseUrl: 'http://localhost:11434/v1', model: 'llama3.1', needsKey: false },
-  { name: 'LM Studio', baseUrl: 'http://localhost:1234/v1', model: '', needsKey: false },
-  { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.4-mini', needsKey: true },
-  { name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', needsKey: true },
-  { name: 'Mistral', baseUrl: 'https://api.mistral.ai/v1', model: 'mistral-large-latest', needsKey: true },
-] as const;
+export {
+  CLAUDE_MODELS,
+  CUSTOM_PRESETS,
+  DEFAULT_SETTINGS,
+  sanitizeAiSettings,
+  type AiSettings,
+  type ProviderKind,
+} from './aisettings';
 
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
-const STORAGE_KEY = 'kk-ai-settings';
-
-export const DEFAULT_SETTINGS: AiSettings = {
-  provider: 'none',
-  claude: { apiKey: '', model: 'claude-opus-4-8' },
-  openrouter: { apiKey: '', model: 'anthropic/claude-sonnet-4.6' },
-  custom: { baseUrl: 'http://localhost:11434/v1', apiKey: '', model: 'llama3.1' },
-};
-
-const PROVIDER_KINDS: ProviderKind[] = ['none', 'claude', 'openrouter', 'custom'];
-
+/** AI settings live in the unified store (core/settings); callers get a copy. */
 export function loadSettings(): AiSettings {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return structuredClone(DEFAULT_SETTINGS);
-    // v1 settings had provider "local" with a { local: { baseUrl, model } }
-    // block — that backend is now "custom" (same endpoint, optional key).
-    const saved = JSON.parse(raw) as Partial<AiSettings> & {
-      local?: { baseUrl?: string; model?: string };
-    };
-    const provider =
-      (saved.provider as string) === 'local'
-        ? 'custom'
-        : PROVIDER_KINDS.includes(saved.provider as ProviderKind)
-          ? (saved.provider as ProviderKind)
-          : DEFAULT_SETTINGS.provider;
-    return {
-      provider,
-      claude: { ...DEFAULT_SETTINGS.claude, ...saved.claude },
-      openrouter: { ...DEFAULT_SETTINGS.openrouter, ...saved.openrouter },
-      custom: { ...DEFAULT_SETTINGS.custom, ...saved.local, ...saved.custom },
-    };
-  } catch {
-    return structuredClone(DEFAULT_SETTINGS);
-  }
+  return structuredClone(appSettings().ai);
 }
 
 export function saveSettings(s: AiSettings): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+  updateSettings((all) => {
+    all.ai = structuredClone(s);
+  });
 }
 
 /*

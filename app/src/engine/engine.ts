@@ -71,9 +71,21 @@ export type StatusListener = (status: StatusMessage) => void;
 export type RecordDataListener = (data: RecordDataMessage) => void;
 export type MidiEventsListener = (msg: MidiEventsMessage) => void;
 
+/** Construction-time audio options (Options → Audio); changes need a restart. */
+export interface EngineAudioOptions {
+  latencyHint: 'interactive' | 'balanced' | 'playback';
+  /** Requested context rate; 0 = browser default. */
+  sampleRate: number;
+  /** Output device id; '' = system default. Chrome/Edge only. */
+  sinkId: string;
+}
+
+type SinkContext = AudioContext & { setSinkId?: (id: string) => Promise<void> };
+
 export class Engine {
   private ctx: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  private master: GainNode | null = null;
   private statusListeners = new Set<StatusListener>();
   private recordListeners = new Set<RecordDataListener>();
   private midiListeners = new Set<MidiEventsListener>();
@@ -83,18 +95,27 @@ export class Engine {
     return this.ctx?.state === 'running';
   }
 
+  /** Context exists (it may be suspended) — restart only makes sense then. */
+  get started(): boolean {
+    return this.ctx !== null;
+  }
+
   /** Must be called from a user gesture (browser autoplay policy). */
-  async start(): Promise<void> {
+  async start(opts?: EngineAudioOptions): Promise<void> {
     if (this.ctx) {
       if (this.ctx.state === 'suspended') await this.ctx.resume();
       return;
     }
-    this.ctx = new AudioContext({ latencyHint: 'interactive' });
+    this.ctx = new AudioContext({
+      latencyHint: opts?.latencyHint ?? 'interactive',
+      ...(opts?.sampleRate ? { sampleRate: opts.sampleRate } : {}),
+    });
     if (!this.ctx.audioWorklet) {
       throw new Error(
         'AudioWorklet unavailable — page must be served over HTTPS or localhost (secure context).',
       );
     }
+    if (opts?.sinkId) await this.setSinkId(opts.sinkId);
     await this.ctx.audioWorklet.addModule(`${import.meta.env.BASE_URL}engine-worklet.js`);
     this.node = new AudioWorkletNode(this.ctx, 'kabelkraft-engine', {
       numberOfInputs: 0,
@@ -109,7 +130,48 @@ export class Engine {
         for (const l of this.midiListeners) l(e.data);
       }
     };
-    this.node.connect(this.ctx.destination);
+    this.master = this.ctx.createGain();
+    this.node.connect(this.master);
+    this.master.connect(this.ctx.destination);
+  }
+
+  /** Tear the context down so the next start() rebuilds with fresh options. */
+  async stop(): Promise<void> {
+    this.stopPreview();
+    this.node?.disconnect();
+    this.node = null;
+    this.master = null;
+    const ctx = this.ctx;
+    this.ctx = null;
+    if (ctx && ctx.state !== 'closed') await ctx.close().catch(() => undefined);
+  }
+
+  /** Master output level (Options → Audio); 0 while muted. */
+  setMasterGain(gain: number): void {
+    if (this.master && this.ctx) {
+      this.master.gain.setTargetAtTime(gain, this.ctx.currentTime, 0.02);
+    }
+  }
+
+  /** Route output to a specific device; no-op where setSinkId is unsupported. */
+  async setSinkId(id: string): Promise<void> {
+    const ctx = this.ctx as SinkContext | null;
+    if (ctx?.setSinkId) await ctx.setSinkId(id).catch(() => undefined);
+  }
+
+  /** Whether this browser supports output device selection. */
+  static get sinkSelectable(): boolean {
+    return typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
+  }
+
+  /** Measured latencies for the Options/Debug read-outs. */
+  latencyInfo(): { base: number; output: number } | null {
+    if (!this.ctx) return null;
+    return { base: this.ctx.baseLatency ?? 0, output: this.ctx.outputLatency ?? 0 };
+  }
+
+  get contextState(): string {
+    return this.ctx?.state ?? 'none';
   }
 
   onStatus(listener: StatusListener): () => void {
@@ -247,7 +309,7 @@ export class Engine {
     channels.forEach((c, i) => buf.copyToChannel(new Float32Array(c), i));
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
-    src.connect(this.ctx.destination);
+    src.connect(this.master ?? this.ctx.destination);
     src.onended = () => {
       if (this.previewSource === src) this.previewSource = null;
     };

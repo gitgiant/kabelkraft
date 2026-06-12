@@ -2410,6 +2410,14 @@ class EngineProcessor extends AudioWorkletProcessor {
     this.lastStatusTime = 0;
     this.meterAcc = new Map();
     this.noteActivity = new Set();
+    // DSP health (Options → Debug): process() time vs quantum budget, plus an
+    // underrun approximation — the browser exposes no underrun event, so we
+    // count status windows where wall time outran the audio clock.
+    this.procTimeMs = 0;
+    this.procBlocks = 0;
+    this.underruns = 0;
+    this.lastWallMs = 0;
+    this.lastAudioTime = 0;
     this.visRings = new Map(); // moduleId → SAB, survives graph rebuilds
     this.port.onmessage = (e) => this.handleMessage(e.data);
   }
@@ -2851,6 +2859,7 @@ class EngineProcessor extends AudioWorkletProcessor {
   }
 
   process(_inputs, outputs) {
+    const procStart = Date.now();
     const out = outputs[0];
     const blockSize = out[0].length;
     out[0].fill(0);
@@ -2971,6 +2980,8 @@ class EngineProcessor extends AudioWorkletProcessor {
       }
     }
 
+    this.procTimeMs += Date.now() - procStart;
+    this.procBlocks++;
     this.postStatus(blockSize);
     return true;
   }
@@ -3023,6 +3034,22 @@ class EngineProcessor extends AudioWorkletProcessor {
     if (now - this.lastStatusTime < STATUS_INTERVAL_S) return;
     this.lastStatusTime = now;
 
+    // DSP load + underrun approximation over the elapsed status window: if
+    // wall time advanced well past the audio clock, output stalled somewhere.
+    const wallMs = Date.now();
+    const budgetMs = (this.procBlocks * blockSize * 1000) / sampleRate;
+    const load = budgetMs > 0 ? this.procTimeMs / budgetMs : 0;
+    if (this.lastWallMs > 0) {
+      const wallDelta = wallMs - this.lastWallMs;
+      const audioDelta = (now - this.lastAudioTime) * 1000;
+      if (wallDelta - audioDelta > 30) this.underruns++;
+    }
+    this.lastWallMs = wallMs;
+    this.lastAudioTime = now;
+    const perf = { load, underruns: this.underruns };
+    this.procTimeMs = 0;
+    this.procBlocks = 0;
+
     const meters = {};
     for (const [id, acc] of this.meterAcc) {
       meters[id] = {
@@ -3062,6 +3089,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       textNotes,
       noteActivity: [...this.noteActivity],
       songPosition: this.transport.posBeats,
+      perf,
     });
     this.noteActivity.clear();
   }

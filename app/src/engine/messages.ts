@@ -205,6 +205,13 @@ export interface StatusMessage {
   noteActivity: string[];
   /** Transport position in beats (worklet is the clock while playing). */
   songPosition: number;
+  /** DSP health since the last post (Options → Debug). */
+  perf?: {
+    /** Mean process() time over the render-quantum budget, 0–1+ . */
+    load: number;
+    /** Cumulative count of windows where the audio clock fell behind wall time. */
+    underruns: number;
+  };
 }
 
 /** Worklet → main: a chunk of captured audio from a recorder module. */

@@ -31,6 +31,12 @@ export class MidiManager {
   private initStarted = false;
   /** Test hook: messages sent to outputs (also fed when no device exists). */
   readonly sentLog: Array<{ deviceId: string; data: number[] }> = [];
+  /** Incoming messages, newest last (Options → Debug MIDI monitor). */
+  readonly recvLog: Array<{ deviceId: string; data: number[]; t: number }> = [];
+  /** Last receive time (ms epoch) per input device — activity blink. */
+  readonly lastActivity = new Map<string, number>();
+  /** Input ids whose messages are dropped (Options → MIDI, settings-backed). */
+  disabledInputs = new Set<string>();
 
   get supported(): boolean {
     return typeof navigator !== 'undefined' && 'requestMIDIAccess' in navigator;
@@ -73,6 +79,12 @@ export class MidiManager {
   }
 
   private dispatch(deviceId: string, data: Uint8Array): void {
+    // Activity + monitor record even for disabled devices ("is it seen?"),
+    // only the listener fan-out is gated.
+    this.lastActivity.set(deviceId, Date.now());
+    this.recvLog.push({ deviceId, data: [...data], t: Date.now() });
+    if (this.recvLog.length > 256) this.recvLog.shift();
+    if (this.disabledInputs.has(deviceId)) return;
     for (const l of this.listeners) l(deviceId, data);
   }
 

@@ -2,7 +2,8 @@
   import { onMount, tick } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
   import { appState } from '../state';
-  import { FrameGate, VIS_RATES, VIS_RES_SCALES, visDisplayOf } from '../visual/display';
+  import { FrameGate, VIS_RATES, VIS_RES_SCALES, clampVisDisplay, visDisplayOf } from '../visual/display';
+  import { appSettings } from '../core/settings';
   import { binFrac } from '../visual/features';
   import { approximateScenes, visGraphOf } from '../visual/migrate';
   import { ContainerRenderer, graphSupported, webgpuAvailable } from '../visual/runtime';
@@ -136,8 +137,13 @@
       return;
     }
     popup.win.requestAnimationFrame(popupLoop);
-    // The container's rate cap and resolution scale apply here too.
-    const d = visDisplayOf(appState.graph.modules.get(popup.moduleId)?.data);
+    // The container's rate cap and resolution scale apply here too,
+    // clamped by the machine-wide ceiling (Options → Display).
+    const cap = appSettings().display;
+    const d = clampVisDisplay(
+      visDisplayOf(appState.graph.modules.get(popup.moduleId)?.data),
+      { fps: cap.visMaxFps, res: cap.visMaxRes },
+    );
     if (!popup.gate.due(performance.now(), d.fps)) return;
     const frame = appState.visFrame(popup.moduleId);
     if (popup.renderer && frame && graphSupported(frame.graph)) {
@@ -163,7 +169,11 @@
     // Re-read per frame — the visual editor mutates the graph live.
     const mod = appState.graph.modules.get(moduleId);
     graph = mod ? visGraphOf(mod.data) : null;
-    const d = visDisplayOf(mod?.data);
+    const cap = appSettings().display;
+    const d = clampVisDisplay(visDisplayOf(mod?.data), {
+      fps: cap.visMaxFps,
+      res: cap.visMaxRes,
+    });
     if (d.fps !== display.fps || d.res !== display.res) display = d;
     const fullscreenNow = document.fullscreenElement === containerEl;
     // Culled while the tracked tile is off screen (reposition keeps watching).
