@@ -135,3 +135,66 @@ test('off-screen visualizer tiles are culled (GPU frame counter stalls)', async 
   expect(errors).toEqual([]);
   expect(await page.evaluate(() => window.__kk.visGpuErrors())).toBe(0);
 });
+
+test('input-pole rail: drag a container input onto a node port', async ({ page }) => {
+  const errors = captureErrors(page);
+  await bootWithAudio(page);
+  const visId = await page.evaluate(() => window.__kk.addModule('visualizer', 600, 500).id);
+  await page.evaluate((id) => {
+    const c = window.__kkCanvas;
+    const p = c.clientPointFor(id);
+    if (p) c.panBy(500 - p.x, 350 - p.y);
+    window.__kk.openVisEditor(id);
+  }, visId);
+  await expect(page.locator('.vised')).toBeVisible();
+  await expect(page.locator('.vised .pole-port')).toHaveCount(7);
+
+  // Drag the Bass pole onto the init spectrum node's Gain in-port. The drop
+  // must auto-create a Features presenter node and wire it.
+  const bass = await page.locator('.vised [data-pole="bass"]').boundingBox();
+  const gain = await page.locator('.vised [data-node="v1"][data-port="gain"]').boundingBox();
+  expect(bass && gain).toBeTruthy();
+  await page.mouse.move(bass!.x + bass!.width / 2, bass!.y + bass!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(gain!.x + gain!.width / 2, gain!.y + gain!.height / 2, { steps: 5 });
+  await page.mouse.up();
+
+  await expect
+    .poll(() =>
+      page.evaluate((id) => {
+        const g = window.__kk.graph.modules.get(id)!.data!.graph as {
+          nodes: { id: string; type: string }[];
+          wires: { from: { nodeId: string; portId: string }; to: { nodeId: string; portId: string } }[];
+        };
+        const feat = g.nodes.find((n) => n.type === 'features');
+        return !!feat && g.wires.some(
+          (w) => w.from.nodeId === feat.id && w.from.portId === 'bass'
+            && w.to.nodeId === 'v1' && w.to.portId === 'gain',
+        );
+      }, visId),
+    )
+    .toBe(true);
+
+  // Second rail drag reuses the same Features node (Mod pole → gain replaces fan-in).
+  const mod = await page.locator('.vised [data-pole="ctrl"]').boundingBox();
+  const gain2 = await page.locator('.vised [data-node="v1"][data-port="gain"]').boundingBox();
+  await page.mouse.move(mod!.x + 3, mod!.y + 3);
+  await page.mouse.down();
+  await page.mouse.move(gain2!.x + 3, gain2!.y + 3, { steps: 5 });
+  await page.mouse.up();
+  await expect
+    .poll(() =>
+      page.evaluate((id) => {
+        const g = window.__kk.graph.modules.get(id)!.data!.graph as {
+          nodes: { type: string }[];
+          wires: { from: { portId: string }; to: { nodeId: string; portId: string } }[];
+        };
+        return {
+          featureNodes: g.nodes.filter((n) => n.type === 'features').length,
+          gainWires: g.wires.filter((w) => w.to.nodeId === 'v1' && w.to.portId === 'gain').map((w) => w.from.portId),
+        };
+      }, visId),
+    )
+    .toEqual({ featureNodes: 1, gainWires: ['ctrl'] });
+  expect(errors).toEqual([]);
+});

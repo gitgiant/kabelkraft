@@ -74,6 +74,28 @@
     { id: 'util', label: 'Util' },
   ];
 
+  // Input-pole rail: the container's inputs as draggable wire sources.
+  // Dropping on a node in-port creates/reuses the backing presenter node
+  // (Features, Visual In) and wires it — "drag the container input inside".
+  interface PoleRailItem {
+    label: string;
+    type: VisPortType;
+    presenter: string;
+    portId: string;
+    description: string;
+  }
+  const POLE_RAIL: PoleRailItem[] = [
+    { label: 'Level', type: 'control', presenter: 'features', portId: 'level', description: 'Audio pole — RMS level (0–1).' },
+    { label: 'Bass', type: 'control', presenter: 'features', portId: 'bass', description: 'Audio pole — low-band energy.' },
+    { label: 'Mid', type: 'control', presenter: 'features', portId: 'mid', description: 'Audio pole — mid-band energy.' },
+    { label: 'High', type: 'control', presenter: 'features', portId: 'high', description: 'Audio pole — high-band energy.' },
+    { label: 'Onset', type: 'control', presenter: 'features', portId: 'onset', description: 'Audio pole — beat strength.' },
+    { label: 'Mod', type: 'control', presenter: 'features', portId: 'ctrl', description: 'Mod pole — the container Mod input (1 when unwired).' },
+    { label: 'Vis In', type: 'visual', presenter: 'visualin', portId: 'out', description: 'Vis In pole — frame from an upstream visualizer.' },
+  ];
+  const RAIL_X = 16;
+  const railY = (i: number) => 36 + i * 26;
+
   function defsIn(cat: VisNodeDef['category']): VisNodeDef[] {
     return [...VIS_NODE_DEFS.values()].filter((d) => d.category === cat);
   }
@@ -261,7 +283,17 @@
   // -- pointer interactions -------------------------------------------------------
 
   let dragNode: { id: string; offX: number; offY: number } | null = null;
-  let dragWire = $state<{ nodeId: string; portId: string; type: VisPortType; x: number; y: number } | null>(null);
+  let dragWire = $state<{
+    nodeId: string;
+    portId: string;
+    type: VisPortType;
+    x: number;
+    y: number;
+    /** Set when dragging from the input-pole rail; ox/oy anchor the pending wire. */
+    pole?: PoleRailItem;
+    ox?: number;
+    oy?: number;
+  } | null>(null);
   let gestureSnapshotTaken = false;
 
   function svgPoint(e: PointerEvent): { x: number; y: number } {
@@ -304,16 +336,36 @@
     dragWire = { nodeId: node.id, portId, type, x: p.x, y: p.y };
   }
 
+  /** Find (or create) the pole presenter node backing an input-rail drag. */
+  function ensurePresenter(type: string): VisNodeInstance {
+    let node = graph.nodes.find((n) => n.type === type);
+    if (!node) {
+      const d = VIS_NODE_DEFS.get(type)!;
+      const params: Record<string, number> = {};
+      for (const p of d.params) params[p.id] = p.default;
+      node = { id: nextNodeId(), type, x: 60, y: 60 + graph.nodes.length * 110, params };
+      graph.nodes.push(node);
+    }
+    return node;
+  }
+
+  function onPoleDown(e: PointerEvent, item: PoleRailItem, oy: number): void {
+    e.stopPropagation();
+    const p = svgPoint(e);
+    dragWire = { nodeId: '', portId: item.portId, type: item.type, x: p.x, y: p.y, pole: item, ox: RAIL_X, oy };
+  }
+
   function onPortUp(node: VisNodeInstance, portId: string, dir: 'in' | 'out', type: VisPortType): void {
     if (!dragWire || dir !== 'in') return;
     if (type !== dragWire.type) return;
-    if (node.id === dragWire.nodeId) return;
-    if (wouldCycle(dragWire.nodeId, node.id)) return;
+    const fromId = dragWire.pole ? ensurePresenter(dragWire.pole.presenter).id : dragWire.nodeId;
+    if (node.id === fromId) return;
+    if (wouldCycle(fromId, node.id)) return;
     // Inputs are single fan-in: replace any existing wire.
     graph.wires = graph.wires.filter((w) => !(w.to.nodeId === node.id && w.to.portId === portId));
     graph.wires.push({
       id: nextWireId(),
-      from: { nodeId: dragWire.nodeId, portId: dragWire.portId },
+      from: { nodeId: fromId, portId: dragWire.portId },
       to: { nodeId: node.id, portId },
     });
     dragWire = null;
@@ -519,14 +571,22 @@
             />
           {/each}
           {#if dragWire}
-            {@const from = graph.nodes.find((n) => n.id === dragWire!.nodeId)}
-            {#if from}
-              {@const a = portPos(from, dragWire.portId)}
+            {#if dragWire.pole}
               <path
                 class="wire pending"
-                d={`M ${a.x} ${a.y} L ${dragWire.x} ${dragWire.y}`}
+                d={`M ${dragWire.ox} ${dragWire.oy} L ${dragWire.x} ${dragWire.y}`}
                 stroke={PORT_COLORS[dragWire.type]}
               />
+            {:else}
+              {@const from = graph.nodes.find((n) => n.id === dragWire!.nodeId)}
+              {#if from}
+                {@const a = portPos(from, dragWire.portId)}
+                <path
+                  class="wire pending"
+                  d={`M ${a.x} ${a.y} L ${dragWire.x} ${dragWire.y}`}
+                  stroke={PORT_COLORS[dragWire.type]}
+                />
+              {/if}
             {/if}
           {/if}
           {#each graph.nodes as node (node.id)}
@@ -542,6 +602,8 @@
               {#each inPorts(node) as port, i (port.id)}
                 <circle
                   class="port"
+                  data-node={node.id}
+                  data-port={port.id}
                   cx="0"
                   cy={HEAD_H + i * PORT_GAP + 10}
                   r="6"
@@ -556,6 +618,8 @@
               {#each outPorts(node) as port, i (port.id)}
                 <circle
                   class="port"
+                  data-node={node.id}
+                  data-port={port.id}
                   cx={NODE_W}
                   cy={HEAD_H + i * PORT_GAP + 10}
                   r="6"
@@ -568,6 +632,23 @@
               {/each}
             </g>
           {/each}
+          <g class="pole-rail">
+            <text class="rail-head" x="8" y="18">INPUTS</text>
+            {#each POLE_RAIL as item, i (item.presenter + item.portId)}
+              <circle
+                class="port pole-port"
+                data-pole={item.portId}
+                cx={RAIL_X}
+                cy={railY(i)}
+                r="6"
+                fill={PORT_COLORS[item.type]}
+                onpointerdown={(e) => onPoleDown(e, item, railY(i))}
+              >
+                <title>{item.label} — {item.description} Drag onto a node input.</title>
+              </circle>
+              <text class="rail-label" x={RAIL_X + 10} y={railY(i) + 3}>{item.label}</text>
+            {/each}
+          </g>
         </svg>
       </div>
       <div class="inspector">
@@ -783,6 +864,20 @@
     cursor: crosshair;
     stroke: #0c0c12;
     stroke-width: 1.5;
+  }
+  .rail-head {
+    fill: #8a8a96;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+  .rail-label {
+    fill: #8a8a96;
+    font-size: 9px;
+    pointer-events: none;
+  }
+  .pole-port {
+    stroke: #34343f;
   }
   .wire {
     fill: none;

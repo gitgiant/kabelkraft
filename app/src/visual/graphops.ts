@@ -44,6 +44,9 @@ export function featureValue(features: VisFeatures | null, portId: string): numb
       return features.bands.high;
     case 'onset':
       return features.onset;
+    case 'ctrl':
+      // Container Mod pole; neutral (1) while nothing is wired to the pole.
+      return features.ctrl >= 0 ? features.ctrl : 1;
     default:
       return 0;
   }

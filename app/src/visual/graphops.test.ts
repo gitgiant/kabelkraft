@@ -78,6 +78,11 @@ describe('resolveParams', () => {
     expect(featureValue(FEATURES, 'level')).toBeCloseTo(0.55, 5);
     expect(featureValue(null, 'bass')).toBe(0);
   });
+
+  it('ctrl (Mod pole) passes through, neutral 1 when the pole is unwired', () => {
+    expect(featureValue({ ...FEATURES, ctrl: 0.4 }, 'ctrl')).toBe(0.4);
+    expect(featureValue({ ...FEATURES, ctrl: -1 }, 'ctrl')).toBe(1);
+  });
 });
 
 describe('node def sanity', () => {

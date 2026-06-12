@@ -48,6 +48,7 @@ const features: VisNodeDef = {
     { id: 'mid', label: 'Mid', type: 'control', direction: 'out', description: 'Mid-band energy (250 Hz–2 kHz), 0–1.' },
     { id: 'high', label: 'High', type: 'control', direction: 'out', description: 'High-band energy (2–8 kHz), 0–1.' },
     { id: 'onset', label: 'Onset', type: 'control', direction: 'out', description: 'Beat/onset strength, decays each frame.' },
+    { id: 'ctrl', label: 'Mod', type: 'control', direction: 'out', description: 'The container Mod pole value (neutral 1 while the pole is unwired).' },
   ],
   params: [],
 };
