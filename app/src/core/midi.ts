@@ -28,7 +28,7 @@ interface MidiAccessLike {
 export class MidiManager {
   private access: MidiAccessLike | null = null;
   private listeners = new Set<MidiListener>();
-  private initStarted = false;
+  private initPending = false;
   /** Test hook: messages sent to outputs (also fed when no device exists). */
   readonly sentLog: Array<{ deviceId: string; data: number[] }> = [];
   /** Incoming messages, newest last (Options → Debug MIDI monitor). */
@@ -42,10 +42,20 @@ export class MidiManager {
     return typeof navigator !== 'undefined' && 'requestMIDIAccess' in navigator;
   }
 
-  /** Lazy init; safe to call repeatedly. */
+  /** Access granted and live — device lists are meaningful. */
+  get ready(): boolean {
+    return this.access !== null;
+  }
+
+  /**
+   * Lazy init; safe to call repeatedly. A failed attempt (e.g. the permission
+   * prompt needs a user gesture, or it was dismissed) does NOT latch — the
+   * next call retries, so the Options MIDI tab can recover after a boot-time
+   * init was blocked.
+   */
   async init(): Promise<void> {
-    if (this.initStarted || !this.supported) return;
-    this.initStarted = true;
+    if (this.access || this.initPending || !this.supported) return;
+    this.initPending = true;
     try {
       const access = (await (navigator as Navigator & {
         requestMIDIAccess(opts?: { sysex?: boolean }): Promise<unknown>;
@@ -60,6 +70,8 @@ export class MidiManager {
       attach();
     } catch {
       // Permission denied or unavailable — modules just see no devices.
+    } finally {
+      this.initPending = false;
     }
   }
 

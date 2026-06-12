@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { boot, bootWithAudio, captureErrors, settleFrames } from './util';
+import { boot, bootWithAudio, captureErrors, classicRig, pollPeak, pollPeakBelow, settleFrames } from './util';
 
 /* Options dialog (OPTIONS_MENU_PLAN.md): unified settings + per-project tab. */
 
@@ -196,6 +196,52 @@ test('autosave writes a session record and offers restore on reload', async ({ p
       ),
     )
     .toBeGreaterThan(0);
+});
+
+test('QWERTY piano setting gates computer-keyboard notes', async ({ page }) => {
+  await bootWithAudio(page);
+  const rig = await classicRig(page);
+
+  // Default on: holding 'a' plays C4 through the rig.
+  await page.locator('body').click(); // focus away from inputs
+  await page.keyboard.down('a');
+  await pollPeak(page, rig.vca, 0.01);
+  await page.keyboard.up('a');
+  await pollPeakBelow(page, rig.vca, 0.005, 8000);
+
+  // Toggle off in Options → General; the same key now stays silent.
+  await page.locator('.options-toggle').click();
+  await page.locator('.options-tabs .tab[data-tab="general"]').click();
+  await page.locator('.opt-qwerty').uncheck();
+  await page.keyboard.press('Escape');
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem('kk-settings')!).general.qwertyPiano),
+  ).toBe(false);
+
+  await page.keyboard.down('a');
+  await page.waitForTimeout(600);
+  const peak = await page.evaluate((id) => window.__kk.meters[id]?.peak ?? 0, rig.vca);
+  await page.keyboard.up('a');
+  expect(peak).toBeLessThan(0.005);
+  await page.evaluate(() => localStorage.removeItem('kk-settings'));
+});
+
+test('MIDI tab shows per-module routing and a retryable connect button', async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => void window.__kk.addModule('midiIn', 0, 0));
+
+  await page.locator('.options-toggle').click();
+  await page.locator('.options-tabs .tab[data-tab="midi"]').click();
+
+  // Per-module routing renders regardless of device access.
+  await expect(page.locator('.midi-route')).toBeVisible();
+  await expect(page.locator('.midi-route select')).toHaveValue('');
+
+  // Headless Chrome has no MIDI backend, so access stays unavailable — the
+  // connect button must remain clickable (init no longer latches on failure).
+  await expect(page.locator('.connect-midi')).toBeVisible();
+  await page.locator('.connect-midi').click();
+  await expect(page.locator('.connect-midi')).toBeVisible();
 });
 
 test('storage tab reports the autosave record and clears it', async ({ page }) => {

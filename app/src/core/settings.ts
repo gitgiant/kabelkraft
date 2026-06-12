@@ -29,6 +29,8 @@ export interface GeneralSettings {
   autosave: boolean;
   /** Seconds between autosave writes. */
   autosaveInterval: number;
+  /** QWERTY-as-piano (PRD §8.6): A-row plays notes on keyboard modules. */
+  qwertyPiano: boolean;
 }
 
 export interface AudioSettings {
@@ -66,7 +68,7 @@ export function defaultSettings(): AppSettings {
   return {
     version: 1,
     display: { theme: 'dark', uiScale: 1, visMaxFps: 240, visMaxRes: 1 },
-    general: { defaultTempo: 120, confirmLeave: false, autosave: true, autosaveInterval: 30 },
+    general: { defaultTempo: 120, confirmLeave: false, autosave: true, autosaveInterval: 30, qwertyPiano: true },
     audio: { latencyHint: 'interactive', sampleRate: 0, sinkId: '', masterGain: 1, muted: false },
     midi: { disabledInputs: [] },
     ai: structuredClone(DEFAULT_AI_SETTINGS),
@@ -96,6 +98,7 @@ export function sanitizeSettings(raw: unknown): AppSettings {
       confirmLeave: s.general?.confirmLeave === true,
       autosave: s.general?.autosave !== false,
       autosaveInterval: clamp(s.general?.autosaveInterval, 5, 600, d.general.autosaveInterval),
+      qwertyPiano: s.general?.qwertyPiano !== false,
     },
     audio: {
       latencyHint: ['interactive', 'balanced', 'playback'].includes(s.audio?.latencyHint as string)

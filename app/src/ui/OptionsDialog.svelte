@@ -120,9 +120,21 @@
   let midiOutputs = $state<Array<{ id: string; name: string }>>([]);
   let mappings = $state<Array<{ key: string; label: string }>>([]);
   let midiSupported = $state(true);
+  let midiReady = $state(false);
+  /** MIDI In/Out modules in the patch, for per-module device routing. */
+  let midiModules = $state<Array<{ id: string; type: string; label: string; deviceId: string }>>([]);
 
   function refreshMidi(): void {
     midiSupported = appState.midi.supported;
+    midiReady = appState.midi.ready;
+    midiModules = [...appState.graph.modules.values()]
+      .filter((m) => m.type === 'midiIn' || m.type === 'midiOut')
+      .map((m) => ({
+        id: m.id,
+        type: m.type,
+        label: m.label || (m.type === 'midiIn' ? 'MIDI In' : 'MIDI Out'),
+        deviceId: (m.data?.deviceId as string) || '',
+      }));
     const now = Date.now();
     midiInputs = appState.midi.inputs().map((d) => ({
       id: d.id,
@@ -139,6 +151,21 @@
         label: `ch ${ch} · CC ${cc} → ${mod?.type ?? 'missing'} (${t.moduleId}) · ${t.paramId}`,
       };
     });
+  }
+
+  /** Route a MIDI In/Out module to one device ('' = all inputs / first output). */
+  function setModuleDevice(moduleId: string, type: string, deviceId: string): void {
+    const devices = type === 'midiIn' ? appState.midi.inputs() : appState.midi.outputs();
+    const name =
+      devices.find((d) => d.id === deviceId)?.name ??
+      (type === 'midiIn' ? 'all inputs' : 'first output');
+    appState.setModuleData(moduleId, 'deviceId', deviceId);
+    appState.setModuleData(moduleId, 'deviceName', name);
+    refreshMidi();
+  }
+
+  function connectMidi(): void {
+    void appState.midi.init().then(refreshMidi);
   }
 
   function setInputEnabled(id: string, enabled: boolean): void {
@@ -455,9 +482,19 @@
             {#if !midiSupported}
               <p class="pane-note">WebMIDI isn't available in this browser — Chrome/Edge support it; Firefox/Safari don't.</p>
             {:else}
+              {#if !midiReady}
+                <div class="row">
+                  <button class="connect-midi" onclick={connectMidi}>🔌 Connect MIDI</button>
+                  <span class="dim">asks the browser for MIDI access — allow the permission prompt</span>
+                </div>
+              {/if}
               <h3>Inputs</h3>
               {#if midiInputs.length === 0}
-                <p class="pane-note dim">No MIDI inputs detected. Connect a device — the list refreshes live.</p>
+                <p class="pane-note dim">
+                  {midiReady
+                    ? 'MIDI access granted, but no input devices detected — check the connection; the list refreshes live.'
+                    : 'No MIDI inputs yet — click Connect MIDI above.'}
+                </p>
               {/if}
               {#each midiInputs as d (d.id)}
                 <div class="row midi-device">
@@ -477,6 +514,26 @@
               {#each midiOutputs as d (d.id)}
                 <div class="row midi-device"><span class="grow">{d.name}</span></div>
               {/each}
+              <h3>Module routing</h3>
+              {#if midiModules.length === 0}
+                <p class="pane-note dim">No MIDI In / MIDI Out modules in the patch. Add a MIDI In module and wire its notes into a Voice to play hardware.</p>
+              {:else}
+                {#each midiModules as m (m.id)}
+                  <div class="row midi-route">
+                    <span>{m.label}</span>
+                    <select
+                      value={m.deviceId}
+                      onchange={(e) => setModuleDevice(m.id, m.type, e.currentTarget.value)}
+                    >
+                      <option value="">{m.type === 'midiIn' ? 'All inputs' : 'First output'}</option>
+                      {#each m.type === 'midiIn' ? midiInputs : midiOutputs as d (d.id)}
+                        <option value={d.id}>{d.name}</option>
+                      {/each}
+                    </select>
+                    <span class="dim mono">{m.id}</span>
+                  </div>
+                {/each}
+              {/if}
               <h3>Learned mappings</h3>
               {#if mappings.length === 0}
                 <p class="pane-note dim">None yet — right-click a knob and choose MIDI learn, then move a controller.</p>
@@ -540,6 +597,12 @@
                 bind:value={cfg.general.defaultTempo}
                 onchange={() => save((s) => { s.general.defaultTempo = cfg.general.defaultTempo; })} />
               <span class="dim">BPM a fresh session starts with</span>
+            </label>
+            <label class="row">
+              <input class="opt-qwerty" type="checkbox" bind:checked={cfg.general.qwertyPiano}
+                onchange={() => save((s) => { s.general.qwertyPiano = cfg.general.qwertyPiano; })} />
+              <span>Play notes with the computer keyboard</span>
+              <span class="dim">A-row = piano (A W S E D …), relative to each keyboard module's octave</span>
             </label>
             <label class="row">
               <input class="opt-confirm-leave" type="checkbox" bind:checked={cfg.general.confirmLeave}

@@ -93,6 +93,7 @@ describe('unified settings store', () => {
     expect(s.general.defaultTempo).toBe(300);
     expect(s.general.confirmLeave).toBe(false);
     expect(s.general.autosaveInterval).toBe(5);
+    expect(s.general.qwertyPiano).toBe(true); // absent → default on
     expect(s.audio.latencyHint).toBe('interactive');
     expect(s.audio.sampleRate).toBe(0);
     expect(s.audio.masterGain).toBe(1.5);

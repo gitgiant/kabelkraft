@@ -35,6 +35,7 @@
   }
 
   function onKeyDown(e: KeyboardEvent) {
+    if (!appSettings().general.qwertyPiano) return;
     const tag = (document.activeElement?.tagName ?? '').toLowerCase();
     if (tag === 'input' || tag === 'textarea' || e.repeat || e.metaKey || e.ctrlKey) return;
     const semi = QWERTY_SEMITONES[e.key.toLowerCase()];
