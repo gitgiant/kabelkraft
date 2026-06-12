@@ -237,6 +237,56 @@ test('members list offers child groups; clicking embeds a pre-bound sub-panel', 
   expect(errors).toEqual([]);
 });
 
+test('Init Poly Synth starter: nested sub-panels, views and XY live on the boot tile', async ({ page }) => {
+  const errors = captureErrors(page);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await boot(page);
+
+  const info = await page.evaluate(() => {
+    const s = window.__kk;
+    const parent = [...s.graph.groups.values()].find((g) => g.name === 'Poly Synth')!;
+    const els = parent.face!.elements;
+    return {
+      parentId: parent.id,
+      children: parent.groupIds.length,
+      groupViews: els.filter((e) => e.kind === 'view' && e.groupId).length,
+      moduleViews: els.filter((e) => e.kind === 'view' && e.moduleId).length,
+      hasXy: els.some((e) => e.kind === 'xy'),
+      reverbId: [...s.graph.modules.values()].find((m) => m.type === 'reverb')!.id,
+    };
+  });
+  expect(info.children).toBe(3); // Oscillators / Envelopes / FX
+  expect(info.groupViews).toBe(3);
+  expect(info.moduleViews).toBe(2); // composer clip + filter curve
+  expect(info.hasXy).toBe(true);
+
+  // Drag the FX sub-panel's reverb Mix knob THROUGH the parent face:
+  // fx view at (510,210,140×99) embedding the 340×240 FX face → s≈0.4118;
+  // child knob fr1 at (10,148,70×86) → rotary center (45,183) child-local.
+  const s = 140 / 340;
+  const before = await page.evaluate((i) => window.__kk.graph.modules.get(i)!.params.mix, info.reverbId);
+  await settleFrames(page);
+  let pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), info.parentId);
+  const knobAt = (p: { x: number; y: number }) => ({
+    x: p.x + 510 + s * 45,
+    y: p.y + TILE_TITLE_H + 210 + (99 - 240 * s) / 2 + s * 183,
+  });
+  // Keep the FX panel inside the viewport before mouse work.
+  const k0 = knobAt(pt!);
+  const panX = k0.x < 20 ? 200 : k0.x > 1420 ? -200 : 0;
+  const panY = k0.y < 20 ? 200 : k0.y > 980 ? -200 : 0;
+  if (panX || panY) {
+    await page.evaluate(([dx, dy]) => window.__kkCanvas.panBy(dx, dy), [panX, panY] as const);
+    await settleFrames(page);
+    pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), info.parentId);
+  }
+  await dragVertical(page, knobAt(pt!), -50);
+  await expect
+    .poll(() => page.evaluate((i) => window.__kk.graph.modules.get(i)!.params.mix, info.reverbId))
+    .toBeGreaterThan(before);
+  expect(errors).toEqual([]);
+});
+
 test('view bindings prune when the target leaves the group; unbound view renders placeholder', async ({ page }) => {
   const errors = captureErrors(page);
   const ids = await startWithComposer(page);

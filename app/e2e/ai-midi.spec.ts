@@ -7,6 +7,9 @@ async function setupComposerRig(page: Page): Promise<{ comp: string; synth: stri
   await bootWithAudio(page);
   return page.evaluate(() => {
     const s = window.__kk;
+    // Clear groups too — the starter's faced group tiles would otherwise stay
+    // behind as empty ghosts and swallow the wire double-clicks below.
+    for (const g of [...s.graph.groups.keys()]) s.ungroup(g);
     for (const m of [...s.graph.modules.values()]) s.removeModule(m.id);
     s.addModule('transport', -200, -400);
     const comp = s.addModule('composer', -500, 0);

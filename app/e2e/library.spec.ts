@@ -69,7 +69,8 @@ test('drag a library row onto a Sample Voice loads the sample', async ({ page })
 
   const samplerId = await page.evaluate(() => {
     const s = window.__kk;
-    for (const m of [...s.graph.modules.values()]) s.removeModule(m.id); // clean slate
+    for (const g of [...s.graph.groups.keys()]) s.ungroup(g); // clean slate (starter groups too)
+    for (const m of [...s.graph.modules.values()]) s.removeModule(m.id);
     return s.addModule('smpl', 0, 0).id;
   });
 
