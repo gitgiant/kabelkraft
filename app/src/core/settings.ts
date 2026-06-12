@@ -39,6 +39,8 @@ export interface AudioSettings {
   sampleRate: number;
   /** Output device id (AudioContext.setSinkId); '' = system default. */
   sinkId: string;
+  /** Default capture device for Audio In modules; '' = system default. */
+  inputId: string;
   /** Master output gain 0–1.5 (post-worklet GainNode). */
   masterGain: number;
   muted: boolean;
@@ -69,7 +71,7 @@ export function defaultSettings(): AppSettings {
     version: 1,
     display: { theme: 'dark', uiScale: 1, visMaxFps: 240, visMaxRes: 1 },
     general: { defaultTempo: 120, confirmLeave: false, autosave: true, autosaveInterval: 30, qwertyPiano: true },
-    audio: { latencyHint: 'interactive', sampleRate: 0, sinkId: '', masterGain: 1, muted: false },
+    audio: { latencyHint: 'interactive', sampleRate: 0, sinkId: '', inputId: '', masterGain: 1, muted: false },
     midi: { disabledInputs: [] },
     ai: structuredClone(DEFAULT_AI_SETTINGS),
   };
@@ -108,6 +110,7 @@ export function sanitizeSettings(raw: unknown): AppSettings {
         ? Number(s.audio!.sampleRate)
         : d.audio.sampleRate,
       sinkId: typeof s.audio?.sinkId === 'string' ? s.audio.sinkId : '',
+      inputId: typeof s.audio?.inputId === 'string' ? s.audio.inputId : '',
       masterGain: clamp(s.audio?.masterGain, 0, 1.5, d.audio.masterGain),
       muted: s.audio?.muted === true,
     },

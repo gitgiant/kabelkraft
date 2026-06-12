@@ -21,6 +21,7 @@ import {
 import { clipFromData } from '../core/composer';
 import { bandCoefs, biquadResponseDb, chainResponseDb, vcfCoefs } from '../core/eqmath';
 import { appState } from '../state';
+import { ensureAudioPermission, listAudioDevices } from '../engine/devices';
 import { theme } from '../theme';
 import { binFrac } from '../visual/features';
 import { approximateScene, visGraphOf } from '../visual/migrate';
@@ -1056,6 +1057,10 @@ export class ModuleView extends Container {
       this.buildVMeter(this.w - 30, top + 12, 14, this.h - top - 26);
       right = this.w - 44;
     }
+    if (type === 'audioIn') {
+      this.buildVMeter(this.w - 30, top + 12, 14, this.h - top - 40);
+      right = this.w - 44;
+    }
     if (type === 'compressor' || type === 'limiter' || type === 'mbcomp') {
       this.buildGrMeter(this.w - 28, top + 12, 12, this.h - top - 26);
       right = this.w - 42;
@@ -1069,6 +1074,10 @@ export class ModuleView extends Container {
     }
     if (type === 'midiIn' || type === 'midiOut') {
       this.buildMidiDeviceRow(x, this.h - 24, w);
+      bottom -= 26;
+    }
+    if (type === 'audioIn') {
+      this.buildAudioDeviceRow(x, this.h - 24, w);
       bottom -= 26;
     }
 
@@ -2070,6 +2079,50 @@ export class ModuleView extends Container {
     if (!this.midiDeviceText) return;
     const name = (this.instance.data?.deviceName as string) || 'default';
     this.midiDeviceText.text = `dev: ${name}`;
+  }
+
+  // -- Audio capture device row (audioIn) ---------------------------------------
+
+  private audioDeviceText: Text | null = null;
+
+  private buildAudioDeviceRow(x: number, y: number, w: number): void {
+    this.audioDeviceText = new Text({ text: '', style: { fontSize: 10, fill: theme.textDim } });
+    this.audioDeviceText.position.set(x, y);
+    this.addChild(this.audioDeviceText);
+    this.updateAudioDeviceText();
+
+    const hit = new Graphics().rect(x - 4, y - 4, w + 8, 18).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      void (async () => {
+        await ensureAudioPermission();
+        const { inputs } = await listAudioDevices();
+        const devices = [{ deviceId: '', label: 'default input' }, ...inputs];
+        const current = (this.instance.data?.deviceId as string) || '';
+        const idx = devices.findIndex((d) => d.deviceId === current);
+        const next = devices[(idx + 1) % devices.length];
+        appState.setModuleData(this.instance.id, 'deviceId', next.deviceId);
+        appState.setModuleData(this.instance.id, 'deviceName', next.label);
+        this.updateAudioDeviceText();
+      })();
+    });
+    hit.on('pointerover', (e) =>
+      this.tooltip.show(
+        ['Capture device', 'Click to cycle through available inputs (asks for microphone permission first).'],
+        e.clientX,
+        e.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  private updateAudioDeviceText(): void {
+    if (!this.audioDeviceText) return;
+    const name = (this.instance.data?.deviceName as string) || 'default input';
+    this.audioDeviceText.text = `dev: ${name}`;
   }
 
   // -- parametric EQ face (PRD §8.4: curve + dots + live spectrum) -------------

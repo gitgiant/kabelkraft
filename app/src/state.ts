@@ -519,6 +519,7 @@ export class AppState {
   async ensureEngine(): Promise<void> {
     const wasRunning = this.engine.running;
     const audio = appSettings().audio;
+    this.engine.defaultInputId = audio.inputId;
     await this.engine.start(audio);
     this.engine.setMasterGain(audio.muted ? 0 : audio.masterGain);
     if (!wasRunning) {
@@ -1170,6 +1171,8 @@ export class AppState {
     if (!mod) return;
     mod.data = { ...mod.data, [key]: value };
     this.engine.setData(moduleId, key, value);
+    // Audio In device switch: (re)open the capture stream for the new device.
+    if (mod.type === 'audioIn' && key === 'deviceId') this.engine.syncInputs(this.graph);
   }
 
   // -- AI patch import (PRD §10.2) -------------------------------------------

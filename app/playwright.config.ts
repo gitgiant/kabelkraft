@@ -22,7 +22,16 @@ export default defineConfig({
     launchOptions: {
       // Keep the audio render clock running in headless test runs even when
       // no real output device is available (frozen AudioContext otherwise).
-      args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required'],
+      // Fake media device: getUserMedia auto-grants and captures a looping
+      // 440 Hz tone fixture (the built-in fake device only beeps every ~10 s,
+      // too sparse to poll against), so Audio In is testable without hardware.
+      args: [
+        '--mute-audio',
+        '--autoplay-policy=no-user-gesture-required',
+        '--use-fake-device-for-media-stream',
+        '--use-fake-ui-for-media-stream',
+        `--use-file-for-fake-audio-capture=${path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'e2e/fixtures/tone.wav')}`,
+      ],
     },
   },
   webServer: {

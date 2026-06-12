@@ -206,6 +206,29 @@ const keyboard: ModuleDef = {
   height: 200,
 };
 
+export const AUDIO_IN_CHANNELS = ['stereo', 'left', 'right', 'mono sum'] as const;
+
+const audioInDef: ModuleDef = {
+  type: 'audioIn',
+  name: 'Audio In',
+  category: 'io',
+  description:
+    'Live audio from a capture device (microphone / audio interface). Click the device row to ' +
+    'pick an input; the browser asks for microphone permission on first use. Channels selects ' +
+    'which capture channels feed the stereo output.',
+  ports: [
+    { id: 'out', label: 'Audio', type: 'audio', direction: 'out', description: 'Live input as a stereo stream.' },
+  ],
+  params: [
+    { id: 'gain', label: 'Gain', min: 0, max: 4, default: 1, randomizable: false },
+    { id: 'channels', label: 'Channels', min: 0, max: AUDIO_IN_CHANNELS.length - 1, default: 0, options: [...AUDIO_IN_CHANNELS], randomizable: false },
+    { id: 'mute', label: 'Mute', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
+  ],
+  width: 240,
+  height: 190,
+  defaultData: () => ({ deviceId: '', deviceName: 'default input' }),
+};
+
 const audioOut: ModuleDef = {
   type: 'audioOut',
   name: 'Audio Out',
@@ -1128,7 +1151,7 @@ export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
     transport, sequencer, arp, composer, notethru, lfo, adsr, random, keyboard, midiIn, midiOut,
     voice, osc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
-    mixer, recorder, audioOut, levels, visualizer,
+    mixer, recorder, audioInDef, audioOut, levels, visualizer,
     stt, transporttext, textinput, notenames, intelligence,
   ].map((d) => [d.type, d]),
 );

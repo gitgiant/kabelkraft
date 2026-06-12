@@ -8,6 +8,7 @@ export type EngineModuleType =
   | 'synth'
   | 'sampler'
   | 'drum'
+  | 'audioIn'
   | 'audioOut'
   | 'levels'
   | 'sequencer'

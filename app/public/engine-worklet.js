@@ -1368,6 +1368,54 @@ class LevelsModule {
   }
 }
 
+/**
+ * Live capture input. The main thread connects each open capture device to
+ * one worklet input slot (engine.ts syncInputs) and writes the slot index
+ * into this module's data blob; render() reads the slot's channels with a
+ * channel-select (stereo / left / right / mono sum) and a smoothed gain.
+ */
+class AudioInModule {
+  constructor(id, params, data) {
+    this.id = id;
+    this.type = 'audioIn';
+    this.params = params;
+    this.data = data || {};
+    this.bus = null; // inputs[slot], set by the host every block
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.curGain = 0; // ramp from silence so connect/unmute doesn't click
+  }
+
+  render(blockSize) {
+    const target = (this.params.mute ?? 0) >= 0.5 ? 0 : (this.params.gain ?? 1);
+    const coef = Math.exp(-1 / (0.01 * sampleRate)); // ~10 ms gain smoothing
+    const mode = Math.round(this.params.channels ?? 0);
+    const bus = this.bus;
+    const chL = bus && bus.length > 0 ? bus[0] : null;
+    const chR = bus && bus.length > 1 ? bus[1] : chL;
+    if (!chL) {
+      this.outL.fill(0);
+      this.outR.fill(0);
+      this.curGain = 0;
+      return;
+    }
+    for (let i = 0; i < blockSize; i++) {
+      this.curGain = target + (this.curGain - target) * coef;
+      let l;
+      let r;
+      if (mode === 1) l = r = chL[i];
+      else if (mode === 2) l = r = chR[i];
+      else if (mode === 3) l = r = (chL[i] + chR[i]) * 0.5;
+      else {
+        l = chL[i];
+        r = chR[i];
+      }
+      this.outL[i] = l * this.curGain;
+      this.outR[i] = r * this.curGain;
+    }
+  }
+}
+
 class AudioOutModule {
   constructor(id, params) {
     this.id = id;
@@ -2444,6 +2492,8 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new VisualizerModule(m.id, m.params));
           } else if (m.type === 'notenames') {
             next.set(m.id, new NotenamesModule(m.id, m.params));
+          } else if (m.type === 'audioIn') {
+            next.set(m.id, new AudioInModule(m.id, m.params, m.data));
           } else if (m.type === 'audioOut') {
             next.set(m.id, new AudioOutModule(m.id, m.params));
           } else if (m.type === 'lfo') {
@@ -2858,7 +2908,7 @@ class EngineProcessor extends AudioWorkletProcessor {
     }
   }
 
-  process(_inputs, outputs) {
+  process(inputs, outputs) {
     const procStart = Date.now();
     const out = outputs[0];
     const blockSize = out[0].length;
@@ -2870,6 +2920,12 @@ class EngineProcessor extends AudioWorkletProcessor {
     for (const id of this.order) {
       const mod = this.modules.get(id);
       if (!mod) continue;
+
+      // Live capture: hand each Audio In its device's input bus for this block.
+      if (mod.type === 'audioIn') {
+        const slot = Math.round(Number(mod.data.slot ?? 0));
+        mod.bus = inputs[Math.max(0, Math.min(slot, inputs.length - 1))] || null;
+      }
 
       this.pullControls(mod);
 

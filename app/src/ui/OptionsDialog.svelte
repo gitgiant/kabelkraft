@@ -9,6 +9,7 @@
   import { loadSettings, type AiSettings } from '../core/aiprovider';
   import { setTheme } from '../theme';
   import { Engine } from '../engine/engine';
+  import { audioPermissionGranted, ensureAudioPermission, listAudioDevices, onDeviceChange } from '../engine/devices';
   import { VIS_RATES, VIS_RES_SCALES } from '../visual/display';
   import type { StateEvent } from '../state';
   import AiSettingsPanel from './AiSettingsPanel.svelte';
@@ -87,17 +88,33 @@
 
   const sinkSelectable = Engine.sinkSelectable;
   let outputs = $state<Array<{ deviceId: string; label: string }>>([]);
+  let inputs = $state<Array<{ deviceId: string; label: string }>>([]);
+  let deviceAccess = $state(audioPermissionGranted());
+  let accessDenied = $state(false);
+  let inputErrors = $state<Array<{ device: string; error: string }>>([]);
 
-  async function refreshOutputs(): Promise<void> {
-    if (!sinkSelectable || !navigator.mediaDevices?.enumerateDevices) return;
-    try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      outputs = devices
-        .filter((d) => d.kind === 'audiooutput')
-        .map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Output ${i + 1}` }));
-    } catch {
-      outputs = [];
-    }
+  async function refreshDevices(): Promise<void> {
+    const lists = await listAudioDevices();
+    inputs = lists.inputs;
+    outputs = lists.outputs;
+    deviceAccess = audioPermissionGranted();
+    inputErrors = [...appState.engine.inputErrors.entries()].map(([device, error]) => ({
+      device: device || 'default input',
+      error,
+    }));
+  }
+
+  /** Ask for capture permission so the full device list (with labels) appears. */
+  async function requestDeviceAccess(): Promise<void> {
+    accessDenied = !(await ensureAudioPermission());
+    await refreshDevices();
+  }
+
+  function applyInputDevice(): void {
+    save((s) => { s.audio.inputId = cfg.audio.inputId; });
+    appState.engine.defaultInputId = cfg.audio.inputId;
+    appState.engine.inputErrors.clear();
+    appState.engine.syncInputs(appState.graph);
   }
 
   /** Construction-time options changed — rebuild the context (brief dropout). */
@@ -324,6 +341,11 @@
       if (tab === 'debug') refreshDebug();
     }, 400);
 
+    // Hot-plugging an interface refreshes the Audio tab's device lists live.
+    const offDevices = onDeviceChange(() => {
+      if (open && tab === 'audio') void refreshDevices();
+    });
+
     // FPS loop only while the Debug tab is showing.
     const watch = setInterval(() => {
       const want = open && tab === 'debug';
@@ -341,6 +363,7 @@
       window.removeEventListener('kk-options', onOpenEvent);
       window.removeEventListener('keydown', onKey);
       offLoad();
+      offDevices();
       clearInterval(poll);
       clearInterval(watch);
       if (raf) cancelAnimationFrame(raf);
@@ -354,7 +377,7 @@
       void appState.midi.init().then(refreshMidi);
       refreshMidi();
     }
-    if (t === 'audio') void refreshOutputs();
+    if (t === 'audio') void refreshDevices();
     if (t === 'storage') void refreshStorage();
     if (t === 'debug') refreshDebug();
   }
@@ -462,6 +485,16 @@
                 <option value={96000}>96 kHz</option>
               </select>
             </label>
+            {#if !deviceAccess}
+              <div class="row">
+                <button class="opt-device-access" onclick={() => void requestDeviceAccess()}>🎙 Allow device access</button>
+                <span class="dim">
+                  {accessDenied
+                    ? 'Permission denied — allow microphone access in the browser\'s site settings, then retry.'
+                    : 'Browsers hide audio interfaces and device names until a microphone permission is granted.'}
+                </span>
+              </div>
+            {/if}
             {#if sinkSelectable}
               <label class="row">
                 <span>Output device</span>
@@ -471,12 +504,20 @@
                   {#each outputs as o (o.deviceId)}<option value={o.deviceId}>{o.label}</option>{/each}
                 </select>
               </label>
-              {#if outputs.length === 0}
-                <p class="pane-note dim">No device labels yet — browsers reveal them only after a media permission is granted.</p>
-              {/if}
             {:else}
               <p class="pane-note dim">Output device selection isn't supported by this browser (Chrome/Edge only).</p>
             {/if}
+            <label class="row">
+              <span>Input device</span>
+              <select class="opt-input grow" bind:value={cfg.audio.inputId} onchange={applyInputDevice}>
+                <option value="">System default</option>
+                {#each inputs as d (d.deviceId)}<option value={d.deviceId}>{d.label}</option>{/each}
+              </select>
+            </label>
+            <p class="pane-note dim">Default capture device for Audio In modules; each module can also pick its own input on its device row. Lists refresh automatically when devices are plugged in.</p>
+            {#each inputErrors as e (e.device)}
+              <p class="pane-note opt-input-error">⚠ {e.device}: capture failed — {e.error}</p>
+            {/each}
 
           {:else if tab === 'midi'}
             {#if !midiSupported}

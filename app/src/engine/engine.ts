@@ -23,6 +23,7 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'synth',
   'sampler',
   'drum',
+  'audioIn',
   'audioOut',
   'levels',
   'sequencer',
@@ -82,6 +83,19 @@ export interface EngineAudioOptions {
 
 type SinkContext = AudioContext & { setSinkId?: (id: string) => Promise<void> };
 
+/**
+ * Live-input capacity: the worklet node is built with this many stereo
+ * inputs, each fed by one capture device. Distinct Audio In devices beyond
+ * this share the last slot.
+ */
+export const INPUT_SLOTS = 4;
+
+interface InputStream {
+  stream: MediaStream;
+  source: MediaStreamAudioSourceNode;
+  slot: number;
+}
+
 export class Engine {
   private ctx: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
@@ -118,7 +132,7 @@ export class Engine {
     if (opts?.sinkId) await this.setSinkId(opts.sinkId);
     await this.ctx.audioWorklet.addModule(`${import.meta.env.BASE_URL}engine-worklet.js`);
     this.node = new AudioWorkletNode(this.ctx, 'kabelkraft-engine', {
-      numberOfInputs: 0,
+      numberOfInputs: INPUT_SLOTS,
       outputChannelCount: [2],
     });
     this.node.port.onmessage = (e: MessageEvent<WorkletMessage>) => {
@@ -138,6 +152,7 @@ export class Engine {
   /** Tear the context down so the next start() rebuilds with fresh options. */
   async stop(): Promise<void> {
     this.stopPreview();
+    this.closeAllInputs();
     this.node?.disconnect();
     this.node = null;
     this.master = null;
@@ -162,6 +177,90 @@ export class Engine {
   /** Whether this browser supports output device selection. */
   static get sinkSelectable(): boolean {
     return typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
+  }
+
+  // -- Live inputs (Audio In modules) ----------------------------------------
+
+  /** Options → Audio default capture device, used by Audio In modules set to ''. */
+  defaultInputId = '';
+  /** Open capture streams keyed by deviceId; each owns one worklet input slot. */
+  private inputStreams = new Map<string, InputStream>();
+  private inputSync = Promise.resolve();
+  /** Last capture failure per deviceId ('' = default), for UI surfacing. */
+  inputErrors = new Map<string, string>();
+
+  /**
+   * Reconcile capture streams with the Audio In modules in the graph: open a
+   * stream per distinct device, connect each to its own worklet input slot,
+   * close streams no module wants anymore, and tell each module (via its
+   * data blob) which slot to read. Serialised so rapid graph edits cannot
+   * interleave getUserMedia calls.
+   */
+  syncInputs(graph: Graph): void {
+    const wanted = new Map<string, string[]>(); // deviceId → moduleIds
+    for (const m of graph.modules.values()) {
+      if (m.type !== 'audioIn') continue;
+      const dev = (m.data?.deviceId as string) || this.defaultInputId;
+      const list = wanted.get(dev);
+      if (list) list.push(m.id);
+      else wanted.set(dev, [m.id]);
+    }
+    this.inputSync = this.inputSync.then(() => this.applyInputs(wanted)).catch(() => undefined);
+  }
+
+  private async applyInputs(wanted: Map<string, string[]>): Promise<void> {
+    if (!this.ctx || !this.node) {
+      if (wanted.size === 0) this.closeAllInputs();
+      return;
+    }
+    // Close streams nothing references (frees the device + its slot).
+    for (const [dev, s] of this.inputStreams) {
+      if (!wanted.has(dev)) {
+        s.source.disconnect();
+        for (const t of s.stream.getTracks()) t.stop();
+        this.inputStreams.delete(dev);
+      }
+    }
+    for (const [dev, moduleIds] of wanted) {
+      let entry = this.inputStreams.get(dev);
+      if (!entry) {
+        const slots = new Set([...this.inputStreams.values()].map((s) => s.slot));
+        let slot = 0;
+        while (slots.has(slot) && slot < INPUT_SLOTS - 1) slot++;
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              ...(dev ? { deviceId: { exact: dev } } : {}),
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              channelCount: { ideal: 2 },
+            },
+          });
+          if (!this.ctx || !this.node) {
+            for (const t of stream.getTracks()) t.stop();
+            return;
+          }
+          const source = this.ctx.createMediaStreamSource(stream);
+          source.connect(this.node, 0, slot);
+          entry = { stream, source, slot };
+          this.inputStreams.set(dev, entry);
+          this.inputErrors.delete(dev);
+        } catch (err) {
+          this.inputErrors.set(dev, err instanceof Error ? err.message : 'capture failed');
+          continue;
+        }
+      }
+      for (const id of moduleIds) this.setData(id, 'slot', entry.slot);
+    }
+  }
+
+  private closeAllInputs(): void {
+    for (const s of this.inputStreams.values()) {
+      s.source.disconnect();
+      for (const t of s.stream.getTracks()) t.stop();
+    }
+    this.inputStreams.clear();
   }
 
   /** Measured latencies for the Options/Debug read-outs. */
@@ -255,6 +354,7 @@ export class Engine {
       });
     }
     this.send({ type: 'graph', modules, wires });
+    this.syncInputs(graph);
     for (const [moduleId, sab] of this.visRings) {
       if (engineIds.has(moduleId)) this.send({ type: 'visRing', moduleId, sab });
       else this.visRings.delete(moduleId);
