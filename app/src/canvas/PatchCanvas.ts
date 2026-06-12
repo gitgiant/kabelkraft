@@ -7,6 +7,7 @@
 
 import { Application, Container, FederatedPointerEvent, Graphics, Text } from 'pixi.js';
 import type { ModuleGroup, PortRef, Wire } from '../core/graph';
+import { isTouchMode } from '../core/mobile';
 import { PORT_TYPE_COLORS } from '../core/types';
 import { appState } from '../state';
 import { nextGroupColor, onThemeChange, theme } from '../theme';
@@ -75,6 +76,25 @@ export class PatchCanvas {
   // when no object drag is in flight, so it never hijacks a module/wire grab.
   private pinch: { dist: number; mid: { x: number; y: number } } | null = null;
 
+  // -- touch-mode gesture state (see core/mobile.ts) --------------------------
+  /** Long-press: toggles multi-select (module) or starts a rubber-band (canvas). */
+  private longPress: {
+    timer: number;
+    global: { x: number; y: number };
+    target: { kind: 'module'; view: ModuleView } | { kind: 'canvas' };
+  } | null = null;
+  /** Touch defers selection changes to pointerup so gestures can cancel them. */
+  private pendingSelect: ModuleView | null = null;
+  private pendingDeselect = false;
+  /** Multi-finger tap tracking: two fingers = undo, three = redo. */
+  private multiTap: { count: number; at: number; moved: boolean } | null = null;
+  /** Pinch metrics at gesture start, to tell a multi-finger tap from a pinch. */
+  private pinchStart: { dist: number; mid: { x: number; y: number } } | null = null;
+  /** Swipe in from the canvas edge: left opens the palette, right the library. */
+  private edgeSwipe: { side: 'left' | 'right'; startX: number } | null = null;
+  /** Double-tap empty canvas = zoom-to-fit. */
+  private lastCanvasTap = { at: 0, x: 0, y: 0 };
+
   // Drag-to-delete trash zone (screen-space overlay, shown during drags).
   private trash = new Container();
   private trashRect = { x: 0, y: 0, w: 132, h: 64 };
@@ -114,7 +134,11 @@ export class PatchCanvas {
     this.app.canvas.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
     this.app.canvas.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
     this.app.canvas.addEventListener('touchend', (e) => this.onTouchEnd(e), { passive: false });
+    this.app.canvas.addEventListener('touchcancel', () => this.onTouchCancel());
     this.app.renderer.on('resize', () => this.layoutTrash());
+    // Pixi's resizeTo only reacts to *window* resizes; hiding the toolbar or
+    // palette resizes the container without one, so observe it directly.
+    new ResizeObserver(() => this.app.resize()).observe(container);
 
     window.addEventListener('keydown', (e) => this.onKeyDown(e));
 
@@ -692,11 +716,16 @@ export class PatchCanvas {
     appState.beginUndoable(); // whole drag = one undo step
     const p = this.world.toLocal(e.global);
     this.moduleDrag = { view, offsetX: p.x - view.position.x, offsetY: p.y - view.position.y };
+    const touch = e.pointerType === 'touch' && isTouchMode();
     if (e.shiftKey) {
       appState.addToSelection({ moduleId: view.instance.id }, true);
     } else if (!appState.selectedModuleIds.has(view.instance.id)) {
-      appState.select({ moduleId: view.instance.id });
+      // Touch defers the replace to movement/release: a long-press must be
+      // able to *add* to the selection instead (shift-click stand-in).
+      if (touch) this.pendingSelect = view;
+      else appState.select({ moduleId: view.instance.id });
     }
+    if (touch) this.armLongPress(e, { kind: 'module', view });
     this.moduleLayer.setChildIndex(view, this.moduleLayer.children.length - 1);
     this.showTrash();
   }
@@ -799,7 +828,24 @@ export class PatchCanvas {
       this.bandStart = this.world.toLocal(e.global);
       return;
     }
-    appState.select(null);
+    if (e.pointerType === 'touch' && isTouchMode()) {
+      // Double-tap empty canvas: zoom-to-fit (tap again for 100%).
+      const now = performance.now();
+      const { x, y } = e.global;
+      const last = this.lastCanvasTap;
+      this.lastCanvasTap = { at: now, x, y };
+      if (now - last.at < 350 && Math.hypot(x - last.x, y - last.y) < 40) {
+        this.lastCanvasTap = { at: 0, x: 0, y: 0 };
+        this.fitView();
+        return;
+      }
+      // Defer the deselect to pointerup — a second finger (pinch / undo tap)
+      // or an edge swipe must not clear the selection.
+      this.pendingDeselect = true;
+      this.armLongPress(e, { kind: 'canvas' });
+    } else {
+      appState.select(null);
+    }
     this.panning = {
       startX: e.global.x,
       startY: e.global.y,
@@ -808,8 +854,57 @@ export class PatchCanvas {
     };
   }
 
+  // -- touch long-press (multi-select without a shift key) --------------------
+
+  private armLongPress(
+    e: FederatedPointerEvent,
+    target: { kind: 'module'; view: ModuleView } | { kind: 'canvas' },
+  ): void {
+    this.clearLongPress();
+    this.longPress = {
+      global: { x: e.global.x, y: e.global.y },
+      target,
+      timer: window.setTimeout(() => this.fireLongPress(), 450),
+    };
+  }
+
+  private clearLongPress(): void {
+    if (this.longPress) window.clearTimeout(this.longPress.timer);
+    this.longPress = null;
+  }
+
+  private fireLongPress(): void {
+    const lp = this.longPress;
+    this.longPress = null;
+    if (!lp) return;
+    navigator.vibrate?.(15);
+    if (lp.target.kind === 'module') {
+      // Toggle into/out of the multi-selection; the hold can keep dragging —
+      // the whole selection travels, exactly like a shift-click drag.
+      this.pendingSelect = null;
+      appState.addToSelection({ moduleId: lp.target.view.instance.id }, true);
+    } else {
+      // Empty canvas: the hold flips from panning to a rubber-band select.
+      this.panning = null;
+      this.pendingDeselect = false;
+      this.bandStart = this.world.toLocal(lp.global);
+    }
+  }
+
   private onStageMove(e: FederatedPointerEvent): void {
     if (this.pinch) return; // pinch owns the gesture; skip pan/drag updates
+    // Movement past the slop radius means a drag, not a hold: cancel the
+    // long-press and resolve a deferred touch-select so the drag persists.
+    if (
+      this.longPress &&
+      Math.hypot(e.global.x - this.longPress.global.x, e.global.y - this.longPress.global.y) > 10
+    ) {
+      this.clearLongPress();
+      if (this.pendingSelect) {
+        appState.select({ moduleId: this.pendingSelect.instance.id });
+        this.pendingSelect = null;
+      }
+    }
     this.updateTrashHover(e.global);
     if (this.wireDrag) {
       this.wireDrag.cursor = this.world.toLocal(e.global);
@@ -866,6 +961,16 @@ export class PatchCanvas {
   }
 
   private cancelDrags(): void {
+    // Resolve deferred touch taps: a plain tap selects / deselects on release.
+    this.clearLongPress();
+    if (this.pendingSelect) {
+      appState.select({ moduleId: this.pendingSelect.instance.id });
+      this.pendingSelect = null;
+    }
+    if (this.pendingDeselect) {
+      appState.select(null);
+      this.pendingDeselect = false;
+    }
     // Dropped over the trash zone: delete instead of place (Q7, undoable).
     const dropDelete = this.overTrash;
     this.hideTrash();
@@ -992,19 +1097,66 @@ export class PatchCanvas {
   }
 
   private onTouchStart(e: TouchEvent): void {
+    if (isTouchMode() && e.touches.length === 1) {
+      // Arm an edge swipe-in: left edge opens the palette, right the library.
+      const rect = this.app.canvas.getBoundingClientRect();
+      const x = e.touches[0].clientX;
+      if (x - rect.left < 24) this.edgeSwipe = { side: 'left', startX: x };
+      else if (rect.right - x < 24) this.edgeSwipe = { side: 'right', startX: x };
+      else this.edgeSwipe = null;
+    }
     if (e.touches.length < 2) return;
+    this.edgeSwipe = null;
     // Never hijack an in-flight object grab (no mobile undo to recover from).
     if (this.moduleDrag || this.groupDrag || this.wireDrag || this.wireMoveDrag) return;
+    // Two/three-finger tap = undo/redo, decided on release if nothing moved.
+    this.multiTap = {
+      count: Math.max(e.touches.length, this.multiTap?.count ?? 0),
+      at: this.multiTap?.at ?? performance.now(),
+      moved: this.multiTap?.moved ?? false,
+    };
     e.preventDefault();
     this.panning = null; // drop any one-finger pan; pinch takes over
     this.bandStart = null;
+    this.pendingDeselect = false; // a second finger means gesture, not tap
+    this.pendingSelect = null;
+    this.clearLongPress();
     this.pinch = this.touchMetrics(e);
+    this.pinchStart = this.pinch;
   }
 
   private onTouchMove(e: TouchEvent): void {
+    // Edge swipe: enough inward travel opens the panel and swallows the pan.
+    if (this.edgeSwipe && e.touches.length === 1 && isTouchMode()) {
+      const dx = e.touches[0].clientX - this.edgeSwipe.startX;
+      const { side } = this.edgeSwipe;
+      if ((side === 'left' && dx > 48) || (side === 'right' && dx < -48)) {
+        this.edgeSwipe = null;
+        this.clearLongPress();
+        this.pendingDeselect = false;
+        if (this.panning) {
+          // Roll back the few pixels of pan the swipe dragged in.
+          this.world.position.set(this.panning.worldX, this.panning.worldY);
+          this.panning = null;
+        }
+        window.dispatchEvent(
+          new CustomEvent(side === 'left' ? 'kk-open-palette' : 'kk-open-library'),
+        );
+        return;
+      }
+    }
     if (!this.pinch || e.touches.length < 2) return;
     e.preventDefault();
     const { dist, mid } = this.touchMetrics(e);
+    // Fingers travelling past the slop means a real pinch, not a tap.
+    if (this.pinchStart && this.multiTap && !this.multiTap.moved) {
+      if (
+        Math.abs(dist - this.pinchStart.dist) > 12 ||
+        Math.hypot(mid.x - this.pinchStart.mid.x, mid.y - this.pinchStart.mid.y) > 12
+      ) {
+        this.multiTap.moved = true;
+      }
+    }
     const prev = this.pinch;
     // Zoom: scale by the distance ratio, clamped to the wheel-zoom range,
     // anchored at the current midpoint (world point under the mid stays put).
@@ -1023,7 +1175,68 @@ export class PatchCanvas {
   }
 
   private onTouchEnd(e: TouchEvent): void {
-    if (e.touches.length < 2) this.pinch = null;
+    if (e.touches.length < 2) {
+      this.pinch = null;
+      this.pinchStart = null;
+    }
+    if (e.touches.length === 0) {
+      this.edgeSwipe = null;
+      const tap = this.multiTap;
+      this.multiTap = null;
+      // Quick multi-finger tap that never travelled: undo (2) / redo (3).
+      if (tap && !tap.moved && performance.now() - tap.at < 350) {
+        navigator.vibrate?.(10);
+        if (tap.count === 2) appState.undo();
+        else if (tap.count >= 3) appState.redo();
+      }
+    }
+  }
+
+  /** System interrupted the gesture (notification shade, app switch): reset. */
+  private onTouchCancel(): void {
+    this.pinch = null;
+    this.pinchStart = null;
+    this.multiTap = null;
+    this.edgeSwipe = null;
+    this.pendingSelect = null;
+    this.pendingDeselect = false;
+    this.clearLongPress();
+  }
+
+  /** Fit the whole patch in view; if already fitted, return to 100%. */
+  fitView(): void {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const include = (x: number, y: number, w: number, h: number) => {
+      minX = Math.min(minX, x); minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + w); maxY = Math.max(maxY, y + h);
+    };
+    for (const v of this.views.values()) {
+      if (v.visible) include(v.position.x, v.position.y, v.w, v.h);
+    }
+    for (const gv of this.groupViews.values()) {
+      include(gv.position.x, gv.position.y, gv.tileWidth, gv.tileHeight);
+    }
+    if (!Number.isFinite(minX)) return;
+    const sw = this.app.screen.width;
+    const sh = this.app.screen.height;
+    const pad = 60;
+    const w = Math.max(1, maxX - minX);
+    const h = Math.max(1, maxY - minY);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    let scale = Math.min(2.5, Math.max(0.2, Math.min((sw - pad) / w, (sh - pad) / h)));
+    let px = sw / 2 - cx * scale;
+    let py = sh / 2 - cy * scale;
+    if (
+      Math.abs(this.world.scale.x - scale) < 0.01 &&
+      Math.hypot(this.world.position.x - px, this.world.position.y - py) < 2
+    ) {
+      scale = 1; // already fitted → toggle back to 100%
+      px = sw / 2 - cx;
+      py = sh / 2 - cy;
+    }
+    this.world.scale.set(scale);
+    this.world.position.set(px, py);
   }
 
   // -- wire rendering --------------------------------------------------------
@@ -1089,7 +1302,7 @@ export class PatchCanvas {
 
   private hitTestWire(e: FederatedPointerEvent): Wire | null {
     const p = this.world.toLocal(e.global);
-    const threshold = 8 / this.world.scale.x;
+    const threshold = (isTouchMode() ? 14 : 8) / this.world.scale.x;
     for (const wire of appState.graph.wires.values()) {
       const points = this.wirePath(wire);
       if (!points) continue;

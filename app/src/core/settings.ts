@@ -11,6 +11,9 @@ import { DEFAULT_SETTINGS as DEFAULT_AI_SETTINGS, sanitizeAiSettings, type AiSet
 
 export type ThemeName = 'dark' | 'light';
 
+/** Touch controls: auto-detect a coarse pointer, or force on/off. */
+export type TouchModePref = 'auto' | 'on' | 'off';
+
 export interface DisplaySettings {
   theme: ThemeName;
   /** Chrome zoom factor (canvas included), 0.75–1.5. */
@@ -18,6 +21,8 @@ export interface DisplaySettings {
   /** Machine-wide visualizer ceilings, clamping each container's own settings. */
   visMaxFps: number;
   visMaxRes: number;
+  /** Touch controls mode (drawers, fat hit targets, gestures). */
+  touchMode: TouchModePref;
 }
 
 export interface GeneralSettings {
@@ -69,7 +74,7 @@ export const UI_SCALES = [0.75, 0.9, 1, 1.1, 1.25, 1.5] as const;
 export function defaultSettings(): AppSettings {
   return {
     version: 1,
-    display: { theme: 'dark', uiScale: 1, visMaxFps: 240, visMaxRes: 1 },
+    display: { theme: 'dark', uiScale: 1, visMaxFps: 240, visMaxRes: 1, touchMode: 'auto' },
     general: { defaultTempo: 120, confirmLeave: false, autosave: true, autosaveInterval: 30, qwertyPiano: true },
     audio: { latencyHint: 'interactive', sampleRate: 0, sinkId: '', inputId: '', masterGain: 1, muted: false },
     midi: { disabledInputs: [] },
@@ -94,6 +99,9 @@ export function sanitizeSettings(raw: unknown): AppSettings {
       uiScale: clamp(s.display?.uiScale, 0.75, 1.5, d.display.uiScale),
       visMaxFps: clamp(s.display?.visMaxFps, 1, 240, d.display.visMaxFps),
       visMaxRes: clamp(s.display?.visMaxRes, 0.25, 1, d.display.visMaxRes),
+      touchMode: ['auto', 'on', 'off'].includes(s.display?.touchMode as string)
+        ? (s.display!.touchMode as TouchModePref)
+        : 'auto',
     },
     general: {
       defaultTempo: clamp(s.general?.defaultTempo, 20, 300, d.general.defaultTempo),
