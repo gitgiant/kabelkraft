@@ -145,6 +145,22 @@ export class Engine {
     this.send({ type: 'panic' });
   }
 
+  /** SAB audio rings per visualizer module (visual engine feeds). */
+  private visRings = new Map<string, SharedArrayBuffer>();
+
+  /**
+   * Register a visualizer's SAB ring. Re-sent with every graph sync so rings
+   * survive worklet (re)starts and arrive after the module exists.
+   */
+  attachVisRing(moduleId: string, sab: SharedArrayBuffer): void {
+    this.visRings.set(moduleId, sab);
+    this.send({ type: 'visRing', moduleId, sab });
+  }
+
+  detachVisRing(moduleId: string): void {
+    this.visRings.delete(moduleId);
+  }
+
   private send(msg: EngineMessage): void {
     this.node?.port.postMessage(msg);
   }
@@ -177,6 +193,10 @@ export class Engine {
       });
     }
     this.send({ type: 'graph', modules, wires });
+    for (const [moduleId, sab] of this.visRings) {
+      if (engineIds.has(moduleId)) this.send({ type: 'visRing', moduleId, sab });
+      else this.visRings.delete(moduleId);
+    }
   }
 
   setParam(moduleId: string, paramId: string, value: number): void {

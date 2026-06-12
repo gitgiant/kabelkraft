@@ -11,6 +11,7 @@
   import SampleLibrary from './ui/SampleLibrary.svelte';
   import Toolbar from './ui/Toolbar.svelte';
   import Tutorial from './ui/Tutorial.svelte';
+  import VisEditor from './ui/VisEditor.svelte';
   import VisualizerOverlay from './ui/VisualizerOverlay.svelte';
   import { addPolySynth } from './ui/starters';
 
@@ -90,6 +91,7 @@
     <PianoRoll moduleId={id} />
   {/each}
   <RangeConfig />
+  <VisEditor />
   <VisualizerOverlay />
   <AiImport />
   <FaceEditor />

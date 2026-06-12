@@ -6,6 +6,8 @@
 import { clipFromData } from './composer';
 import { Graph, bumpGroupId, bumpWireId, type ModuleGroup, type Wire } from './graph';
 import { bumpModuleId, type ModuleDef, type ModuleInstance } from './module';
+import { isVisGraph, sanitizeVisGraph, sceneToGraph } from '../visual/migrate';
+import type { VisGraphData } from '../visual/types';
 import type { SerializedSample } from './samples';
 import { DEFAULT_TRANSPORT, type TransportState } from './types';
 
@@ -81,6 +83,20 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
       const clip = clipFromData(data);
       data = { notes: clip.notes, length: clip.length };
       warnings.push(`Composer ${mod.id}: legacy patterns converted to a piano-roll clip`);
+    }
+    // Legacy visualizers (scene/gain params, no graph) become node graphs.
+    if (mod.type === 'visualizer') {
+      if (!isVisGraph(data?.graph)) {
+        // Raw saved params — the def-based fill below no longer knows scene/gain.
+        data = { ...data, graph: sceneToGraph(mod.params?.scene, mod.params?.gain) };
+        warnings.push(`Visualizer ${mod.id}: legacy scene converted to a visual graph`);
+      } else {
+        const cleaned = sanitizeVisGraph(data!.graph as VisGraphData);
+        if (cleaned.dropped > 0) {
+          data = { ...data, graph: cleaned.graph };
+          warnings.push(`Visualizer ${mod.id}: ${cleaned.dropped} unknown visual node(s)/wire(s) dropped`);
+        }
+      }
     }
     graph.addModule({ ...mod, params, data });
     bumpModuleId(mod.id);

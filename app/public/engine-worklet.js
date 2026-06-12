@@ -1230,7 +1230,16 @@ function makeStereoBuf() {
   return { L: new Float32Array(128), R: new Float32Array(128) };
 }
 
-/** Audio/note sink feeding the main-thread visualizer (PRD §8.5). */
+/**
+ * Audio/note sink feeding the main-thread visual engine (VISUALIZER_ENGINE_PLAN.md).
+ * Ships raw audio only — analysis (FFT/bands) runs UI-side. With a SAB ring
+ * attached, audio streams gaplessly through shared memory and status posts
+ * carry just notes/ctrl/onset; without one, status falls back to raw
+ * 1024-sample windows. Layout must mirror src/visual/ring.ts exactly.
+ */
+const VIS_RING_CAP = 16384;
+const VIS_RING_HEADER = 16;
+
 class VisualizerModule {
   constructor(id, params) {
     this.id = id;
@@ -1238,9 +1247,22 @@ class VisualizerModule {
     this.params = params;
     this.inputs = { in: makeStereoBuf() };
     this.controlIn = {};
-    this.capture = new Float32Array(FFT_N);
+    this.capL = new Float32Array(FFT_N);
+    this.capR = new Float32Array(FFT_N);
     this.capIdx = 0;
     this.recentNotes = [];
+    this.ring = null;
+    this.prevRms = 0;
+    this.onsetAcc = 0;
+  }
+
+  attachRing(sab) {
+    this.ring = {
+      head: new Int32Array(sab, 0, 1),
+      chL: new Float32Array(sab, VIS_RING_HEADER, VIS_RING_CAP),
+      chR: new Float32Array(sab, VIS_RING_HEADER + VIS_RING_CAP * 4, VIS_RING_CAP),
+      written: 0,
+    };
   }
 
   noteOn(voiceId, pitch) {
@@ -1250,27 +1272,57 @@ class VisualizerModule {
   noteOff() {}
 
   render(blockSize) {
+    const L = this.inputs.in.L;
+    const R = this.inputs.in.R;
+    let sumSq = 0;
     for (let i = 0; i < blockSize; i++) {
-      this.capture[this.capIdx] = (this.inputs.in.L[i] + this.inputs.in.R[i]) * 0.5;
+      this.capL[this.capIdx] = L[i];
+      this.capR[this.capIdx] = R[i];
       this.capIdx = (this.capIdx + 1) % FFT_N;
+      const m = (L[i] + R[i]) * 0.5;
+      sumSq += m * m;
     }
+    if (this.ring) {
+      const r = this.ring;
+      let w = r.written % VIS_RING_CAP;
+      for (let i = 0; i < blockSize; i++) {
+        r.chL[w] = L[i];
+        r.chR[w] = R[i];
+        w = (w + 1) % VIS_RING_CAP;
+      }
+      r.written += blockSize;
+      // Keep the counter far from Int32 overflow; multiples of the capacity
+      // preserve the ring position readers derive from it.
+      if (r.written >= 1 << 30) r.written -= 1 << 30;
+      Atomics.store(r.head, 0, r.written);
+    }
+    // Onset = positive block-energy flux; gapless here, unlike UI-side frames.
+    const rms = Math.sqrt(sumSq / blockSize);
+    const flux = rms - this.prevRms;
+    if (flux > 0.03 && rms > 0.02) this.onsetAcc = Math.max(this.onsetAcc, Math.min(1, flux * 8));
+    this.prevRms = rms;
   }
 
-  /** Posted with each status message; drains the note queue. */
+  /** Posted with each status message; drains the note + onset accumulators. */
   visData() {
-    const wave = new Array(256);
-    // Last 1024 captured samples, decimated ×4.
-    for (let i = 0; i < 256; i++) {
-      wave[i] = this.capture[(this.capIdx + FFT_N - 1024 + i * 4) % FFT_N];
-    }
     const notes = this.recentNotes;
     this.recentNotes = [];
-    return {
-      wave,
-      spectrum: computeSpectrum(this.capture, this.capIdx),
+    const onset = this.onsetAcc;
+    this.onsetAcc = 0;
+    const base = {
       notes,
       ctrl: this.controlIn.mod !== undefined ? this.controlIn.mod : -1,
+      onset,
     };
+    if (this.ring) return base;
+    const waveL = new Array(FFT_N);
+    const waveR = new Array(FFT_N);
+    for (let i = 0; i < FFT_N; i++) {
+      const idx = (this.capIdx + i) % FFT_N;
+      waveL[i] = this.capL[idx];
+      waveR[i] = this.capR[idx];
+    }
+    return { ...base, waveL, waveR };
   }
 }
 
@@ -2383,6 +2435,7 @@ class EngineProcessor extends AudioWorkletProcessor {
     this.lastStatusTime = 0;
     this.meterAcc = new Map();
     this.noteActivity = new Set();
+    this.visRings = new Map(); // moduleId → SAB, survives graph rebuilds
     this.port.onmessage = (e) => this.handleMessage(e.data);
   }
 
@@ -2483,6 +2536,14 @@ class EngineProcessor extends AudioWorkletProcessor {
           }
         }
         this.modules = next;
+        // (Re)attach visual rings — new VisualizerModule instances start bare.
+        // The main thread re-sends rings after every graph message, so entries
+        // for deleted modules can be dropped here without losing in-flight ones.
+        for (const [id, sab] of this.visRings) {
+          const mod = this.modules.get(id);
+          if (!mod) this.visRings.delete(id);
+          else if (mod.type === 'visualizer' && !mod.ring) mod.attachRing(sab);
+        }
         const valid = (w) => this.modules.has(w.fromModuleId) && this.modules.has(w.toModuleId);
         this.audioWires = msg.wires.filter((w) => w.type === 'audio' && valid(w));
         this.noteWires = msg.wires.filter((w) => w.type === 'note' && valid(w));
@@ -2508,6 +2569,13 @@ class EngineProcessor extends AudioWorkletProcessor {
       case 'param': {
         const mod = this.modules.get(msg.moduleId);
         if (mod) mod.params[msg.paramId] = msg.value;
+        break;
+      }
+      case 'visRing': {
+        // SAB audio ring for one visualizer; may arrive before its module.
+        this.visRings.set(msg.moduleId, msg.sab);
+        const mod = this.modules.get(msg.moduleId);
+        if (mod && mod.type === 'visualizer') mod.attachRing(msg.sab);
         break;
       }
       case 'data': {

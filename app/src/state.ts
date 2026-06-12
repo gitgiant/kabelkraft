@@ -21,8 +21,12 @@ import {
 import { MidiManager } from './core/midi';
 import { DEFAULT_TRANSPORT, type TransportState } from './core/types';
 import { Engine } from './engine/engine';
-import type { MeterReading } from './engine/messages';
+import type { MeterReading, StatusMessage } from './engine/messages';
 import { encodeWav } from './engine/wav';
+import { VisFeatureHub } from './visual/features';
+import { createVisRingBuffer } from './visual/ring';
+import { visFramesRendered } from './visual/runtime';
+import type { VisFeatures, VisGraphData } from './visual/types';
 
 export type StateEvent =
   | 'graphChanged' // modules/wires added or removed — structural
@@ -34,6 +38,8 @@ export type StateEvent =
   | 'editorChanged' // sample editor opened/closed
   | 'midiChanged' // MIDI-learn armed/disarmed or mapping changed
   | 'visualizerChanged' // big visualizer overlay opened/closed
+  | 'visEditorChanged' // visual graph editor opened/closed
+  | 'visGraphChanged' // a container's nested visual graph was edited
   | 'faceEditorChanged' // face editor opened/closed
   | 'faceLearnChanged' // face learn armed/canceled/completed
   | 'composerChanged' // piano-roll editor opened/closed
@@ -57,21 +63,112 @@ export class AppState {
   gainReduction: Record<string, number> = {};
   /** Live input spectra (64 log bins, dB) per parametric EQ. */
   spectra: Record<string, number[]> = {};
-  /** Live visualizer feeds: waveform, spectrum, recent note pitches, control. */
-  visData: Record<string, { wave: number[]; spectrum: number[]; notes: number[]; ctrl: number }> = {};
+  /** Live visualizer feeds (notes/ctrl/onset; raw windows only without SAB). */
+  visData: StatusMessage['visData'] = {};
+  /** Per-frame audio analysis for visual containers (FFT etc. run UI-side). */
+  private readonly visHub = new VisFeatureHub();
+
+  /** Current audio features for one visualizer container; null until audio arrives. */
+  visFeatures(moduleId: string): VisFeatures | null {
+    return this.visHub.features(moduleId, performance.now());
+  }
+
+  /** Total frames the WebGPU visual runtime rendered (e2e progress probe). */
+  visFramesRendered(): number {
+    return visFramesRendered();
+  }
   /** Live Color Gen outputs (packed 24-bit RGB) per module, for UI tints. */
   colorValues: Record<string, number> = {};
-  /** Module id shown in the big visualizer overlay; null = closed. */
+  /** Module id showing the big in-tile visualizer view; null = closed. */
   visualizerOpen: string | null = null;
+  /** Compact tile size remembered across big-view open ↔ close. */
+  private visualizerShrunkSize: { w?: number; h?: number } | null = null;
 
+  /** Tile size while the big view is open (world px). */
+  static readonly VIS_OPEN_W = 960;
+  static readonly VIS_OPEN_H = 640;
+
+  /** Opens the big view in place — the tile grows (no full-screen takeover). */
   openVisualizer(moduleId: string): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (mod?.type !== 'visualizer') return;
+    this.closeVisEditor(); // one in-tile panel at a time
+    if (this.visualizerOpen !== moduleId) {
+      this.closeVisualizer();
+      this.visualizerShrunkSize = { w: mod.w, h: mod.h };
+      mod.w = Math.max(mod.w ?? 0, AppState.VIS_OPEN_W);
+      mod.h = Math.max(mod.h ?? 0, AppState.VIS_OPEN_H);
+      this.emit('graphChanged');
+    }
     this.visualizerOpen = moduleId;
     this.emit('visualizerChanged');
   }
 
   closeVisualizer(): void {
+    const mod = this.visualizerOpen ? this.graph.modules.get(this.visualizerOpen) : null;
+    if (mod && this.visualizerShrunkSize) {
+      const prev = this.visualizerShrunkSize;
+      if (prev.w === undefined) delete mod.w;
+      else mod.w = prev.w;
+      if (prev.h === undefined) delete mod.h;
+      else mod.h = prev.h;
+      this.emit('graphChanged');
+    }
+    this.visualizerShrunkSize = null;
     this.visualizerOpen = null;
     this.emit('visualizerChanged');
+  }
+
+  /** Module id whose visual graph editor is open; null = closed. */
+  visEditorOpen: string | null = null;
+  /** Compact tile size remembered across editor open ↔ close. */
+  private visEditorShrunkSize: { w?: number; h?: number } | null = null;
+
+  /** Tile size while the visual graph editor is open (world px). */
+  static readonly VISED_OPEN_W = 900;
+  static readonly VISED_OPEN_H = 600;
+
+  /** Opens the graph editor in place — the tile grows like the composer's. */
+  openVisEditor(moduleId: string): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (mod?.type !== 'visualizer') return;
+    this.closeVisualizer(); // one in-tile panel at a time
+    if (this.visEditorOpen !== moduleId) {
+      this.closeVisEditor();
+      this.visEditorShrunkSize = { w: mod.w, h: mod.h };
+      mod.w = Math.max(mod.w ?? 0, AppState.VISED_OPEN_W);
+      mod.h = Math.max(mod.h ?? 0, AppState.VISED_OPEN_H);
+      this.emit('graphChanged'); // tile resize is canvas-structural
+    }
+    this.visEditorOpen = moduleId;
+    this.emit('visEditorChanged');
+  }
+
+  closeVisEditor(): void {
+    const mod = this.visEditorOpen ? this.graph.modules.get(this.visEditorOpen) : null;
+    if (mod && this.visEditorShrunkSize) {
+      const prev = this.visEditorShrunkSize;
+      if (prev.w === undefined) delete mod.w;
+      else mod.w = prev.w;
+      if (prev.h === undefined) delete mod.h;
+      else mod.h = prev.h;
+      this.emit('graphChanged');
+    }
+    this.visEditorShrunkSize = null;
+    this.visEditorOpen = null;
+    this.emit('visEditorChanged');
+  }
+
+  /**
+   * Replace a container's nested visual graph. Undoable by default; pass
+   * false during drag/slide gestures (snapshot once at gesture start).
+   */
+  setVisGraph(moduleId: string, graph: VisGraphData, undoable = true): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (mod?.type !== 'visualizer') return;
+    if (undoable) this.beginUndoable();
+    mod.data = { ...mod.data, graph };
+    this.emit('visGraphChanged');
   }
 
   /** Composer modules with the piano-roll editor open (module grown in place). */
@@ -188,6 +285,7 @@ export class AppState {
       this.gainReduction = status.gainReduction ?? {};
       this.spectra = status.spectra ?? {};
       this.visData = status.visData ?? {};
+      for (const [id, feed] of Object.entries(this.visData)) this.visHub.pushStatus(id, feed);
       this.colorValues = status.colorValues ?? {};
       const now = performance.now();
       for (const id of status.noteActivity) this.noteFlash.set(id, now);
@@ -200,10 +298,31 @@ export class AppState {
     const wasRunning = this.engine.running;
     await this.engine.start();
     if (!wasRunning) {
-      this.engine.syncGraph(this.graph);
+      this.visHub.setSampleRate(this.engine.sampleRate);
+      this.syncEngine();
       this.engine.sendTransport(this.transport, this.transport.songPosition);
       this.resendSamples();
     }
+  }
+
+  /**
+   * Push the graph into the worklet and keep visual audio rings in step:
+   * every visualizer gets a SAB ring (when the page is crossOriginIsolated;
+   * otherwise the worklet falls back to status-message windows).
+   */
+  private syncEngine(): void {
+    this.engine.syncGraph(this.graph);
+    const live = new Set<string>();
+    for (const mod of this.graph.modules.values()) {
+      if (mod.type !== 'visualizer') continue;
+      live.add(mod.id);
+      if (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated && !this.visHub.hasRing(mod.id)) {
+        const sab = createVisRingBuffer();
+        this.visHub.attachRing(mod.id, sab);
+        this.engine.attachVisRing(mod.id, sab);
+      }
+    }
+    this.visHub.prune(live);
   }
 
   // -- Samples ------------------------------------------------------------
@@ -422,7 +541,7 @@ export class AppState {
     this.clearSelection();
     this.heldVoices.clear();
     this.restoreMidiMap(result.midiMap);
-    this.engine.syncGraph(this.graph);
+    this.syncEngine();
     // A module deleted then restored by undo gets a fresh worklet instance
     // with no PCM — push stored samples back in.
     if (this.engine.running) this.resendSamples();
@@ -437,7 +556,7 @@ export class AppState {
     this.beginUndoable();
     const inst = createInstance(this.graph.def(type), x, y);
     this.graph.addModule(inst);
-    this.engine.syncGraph(this.graph);
+    this.syncEngine();
     if (type === 'midiIn' || type === 'midiOut') void this.midi.init();
     this.emit('graphChanged');
     return inst;
@@ -448,7 +567,7 @@ export class AppState {
     this.graph.removeModule(moduleId);
     if (this.selectedModuleId === moduleId) this.selectedModuleId = null;
     this.selectedModuleIds.delete(moduleId);
-    this.engine.syncGraph(this.graph);
+    this.syncEngine();
     this.emit('graphChanged');
   }
 
@@ -458,7 +577,7 @@ export class AppState {
     this.beginUndoable();
     const result = this.graph.connect(from, to);
     if (!result.ok) return { ok: false, reason: result.reason };
-    this.engine.syncGraph(this.graph);
+    this.syncEngine();
     this.emit('graphChanged');
     return { ok: true, wire: result.wire };
   }
@@ -467,7 +586,7 @@ export class AppState {
     this.beginUndoable();
     this.graph.disconnect(wireId);
     if (this.selectedWireId === wireId) this.selectedWireId = null;
-    this.engine.syncGraph(this.graph);
+    this.syncEngine();
     this.emit('graphChanged');
   }
 
@@ -726,7 +845,7 @@ export class AppState {
       this.graph.groups.set(g.id, g);
     }
 
-    this.engine.syncGraph(this.graph);
+    this.syncEngine();
     this.clearSelection();
     this.selectedGroupIds.add(imported.rootGroupId);
     this.emit('graphChanged');
@@ -849,7 +968,7 @@ export class AppState {
       group.collapsed = true;
     }
 
-    this.engine.syncGraph(this.graph);
+    this.syncEngine();
     this.clearSelection();
     this.selectedGroupIds.add(group.id);
     this.emit('graphChanged');
@@ -930,7 +1049,7 @@ export class AppState {
     this.transport.songPosition = 0;
     this.clearSelection();
     this.heldVoices.clear();
-    this.engine.syncGraph(this.graph);
+    this.syncEngine();
     this.engine.sendTransport(this.transport, 0);
     this.emit('projectLoaded');
     this.emit('graphChanged');
@@ -1011,7 +1130,7 @@ export class AppState {
     }
     for (const id of doomed) this.graph.removeModule(id);
     this.clearSelection();
-    this.engine.syncGraph(this.graph);
+    this.syncEngine();
     this.emit('graphChanged');
     this.emit('selectionChanged');
   }
@@ -1178,7 +1297,7 @@ export class AppState {
     if ([...this.graph.modules.values()].some((m) => m.type === 'midiIn' || m.type === 'midiOut')) {
       void this.midi.init();
     }
-    this.engine.syncGraph(this.graph);
+    this.syncEngine();
     this.engine.sendTransport(this.transport, 0);
     for (const raw of result.samples) {
       const sample = decodeSample(raw);

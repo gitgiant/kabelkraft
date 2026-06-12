@@ -6,6 +6,7 @@
 import type { ModuleDef } from './module';
 import { defaultNote } from './composer';
 import { ROOT_NAMES, SCALE_NAMES } from './scales';
+import { initVisGraph } from '../visual/migrate';
 
 export {
   DRUM_BASE_NOTE,
@@ -221,24 +222,22 @@ const audioOut: ModuleDef = {
   height: 170,
 };
 
-export const VIS_SCENES = ['scope', 'spectrum', 'particles'] as const;
-
 const visualizer: ModuleDef = {
   type: 'visualizer',
   name: 'Visualizer',
   category: 'visual',
   description:
-    'Audio-reactive graphics (PRD §8.5): oscilloscope, spectrum or particles. Notes spawn ' +
-    'particle bursts; the Mod input modulates intensity. ⛶ opens the big view (fullscreen-able).',
+    'Visual engine container (VISUALIZER_ENGINE_PLAN.md): holds a nested graph of visual ' +
+    'nodes (spectrum, scope, particles…) fed by the audio/note/mod inputs. Starts as ' +
+    'audio → Spectrum. ⛶ opens the big view (fullscreen-able).',
   ports: [
     { id: 'in', label: 'Audio', type: 'audio', direction: 'in', description: 'Audio to visualize; multiple wires are summed.' },
     { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note events spawn particles / flashes.' },
     { id: 'mod', label: 'Mod', type: 'control', direction: 'in', description: 'Modulates scene intensity (0–1).' },
   ],
-  params: [
-    { id: 'scene', label: 'Scene', min: 0, max: VIS_SCENES.length - 1, default: 0, options: [...VIS_SCENES], randomizable: true },
-    { id: 'gain', label: 'Gain', min: 0.5, max: 4, default: 1.5, randomizable: true },
-  ],
+  params: [],
+  customFace: true,
+  defaultData: () => ({ graph: initVisGraph() }),
   width: 280,
   height: 280,
 };

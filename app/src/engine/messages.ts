@@ -147,6 +147,18 @@ export interface PanicMessage {
   type: 'panic';
 }
 
+/**
+ * Attach a SharedArrayBuffer audio ring to one visualizer module — the
+ * worklet streams raw stereo audio through it so the visual engine reads
+ * windows at its own frame rate (layout: src/visual/ring.ts). Only sent when
+ * the page is crossOriginIsolated.
+ */
+export interface VisRingMessage {
+  type: 'visRing';
+  moduleId: string;
+  sab: SharedArrayBuffer;
+}
+
 export type EngineMessage =
   | GraphMessage
   | ParamMessage
@@ -157,7 +169,8 @@ export type EngineMessage =
   | SampleMessage
   | RecordControlMessage
   | ControlMessage
-  | PanicMessage;
+  | PanicMessage
+  | VisRingMessage;
 
 /** Worklet → main thread, ~30 Hz. */
 export interface MeterReading {
@@ -177,8 +190,15 @@ export interface StatusMessage {
   gainReduction: Record<string, number>;
   /** Live input spectrum per parametric EQ: 64 log-spaced bins, dB. */
   spectra: Record<string, number[]>;
-  /** Visualizer feeds: waveform (256 pts), spectrum (64 bins dB), note pitches, control. */
-  visData: Record<string, { wave: number[]; spectrum: number[]; notes: number[]; ctrl: number }>;
+  /**
+   * Visualizer feeds: note pitches, control and onset strength; raw stereo
+   * windows (1024 samples) ride along only when no SAB ring is attached.
+   * Analysis (FFT/bands) happens UI-side — src/visual/features.ts.
+   */
+  visData: Record<
+    string,
+    { notes: number[]; ctrl: number; onset: number; waveL?: number[]; waveR?: number[] }
+  >;
   /** Live Color Gen outputs as packed 24-bit RGB per module. */
   colorValues?: Record<string, number>;
   /** Module ids that emitted notes since the last post (for wire flashes). */
