@@ -24,9 +24,63 @@ function sourceGraph(sourceType: LegacyScene, gain: number): VisGraphData {
   };
 }
 
-/** Fresh visualizer content: audio input → Spectrum → Output. */
+/**
+ * Fresh visualizer content: a four-scene showcase rotating through every
+ * effect via the Scenes switcher, with Features wires demoing param
+ * modulation (multiply on bloom/warp, add-wrap on colorgrade hue).
+ */
 export function initVisGraph(): VisGraphData {
-  return sourceGraph('spectrum', 1.5);
+  const n = (id: string, type: string, x: number, y: number, params: Record<string, number> = {}): VisNodeInstance =>
+    ({ id, type, x, y, params });
+  const w = (id: string, from: [string, string], to: [string, string]) =>
+    ({ id, from: { nodeId: from[0], portId: from[1] }, to: { nodeId: to[0], portId: to[1] } });
+  return {
+    nodes: [
+      n('feat', 'features', 40, 20),
+      // Scene A — pulse grid: gradient + shapes, bloom riding the bass.
+      n('bg', 'gradient', 40, 150, { mode: 3, hue: 0.7, hue2: 0.85, lum: 0.15, drift: 0.05 }),
+      n('shp', 'shapes', 40, 280, { shape: 3, count: 5, size: 0.5, spin: 0.3, pulse: 0.8, hue: 0.55 }),
+      n('mixa', 'blend', 230, 215, { mode: 2 }),
+      n('glow', 'bloom', 420, 215, { threshold: 0.4, amount: 1.2 }),
+      n('mir', 'mirror', 610, 215, { mode: 0 }),
+      // Scene B — note tunnel: particles through feedback, kaleido-folded.
+      n('parts', 'particles', 40, 410, { rate: 0.7, size: 1.3 }),
+      n('trail', 'feedback', 230, 410, { zoom: 0.3, spin: 0.15, fade: 0.93 }),
+      n('kal', 'kaleido', 420, 410, { segments: 6, spin: 0.1 }),
+      // Scene C — liquid scope: chroma fringe + warp driven by the mids.
+      n('scp', 'scope', 40, 540, { gain: 2, glow: 0.6 }),
+      n('chr', 'chromashift', 230, 540, { amount: 0.35 }),
+      n('wrp', 'warp', 420, 540, { amount: 0.35, freq: 8, speed: 1 }),
+      n('blr', 'blur', 610, 540, { amount: 0.15 }),
+      // Scene D — mosaic bars: pixelated spectrum, hue cycling with level.
+      n('spc', 'spectrum', 40, 670, { gain: 2 }),
+      n('pix', 'pixelate', 230, 670, { amount: 0.25 }),
+      n('cg', 'colorgrade', 420, 670, { sat: 1.2 }),
+      n('show', 'scenes', 800, 410),
+      n('out', 'output', 990, 410),
+    ],
+    wires: [
+      w('vw1', ['bg', 'out'], ['mixa', 'a']),
+      w('vw2', ['shp', 'out'], ['mixa', 'b']),
+      w('vw3', ['mixa', 'out'], ['glow', 'in']),
+      w('vw4', ['glow', 'out'], ['mir', 'in']),
+      w('vw5', ['mir', 'out'], ['show', 'a']),
+      w('vw6', ['parts', 'out'], ['trail', 'in']),
+      w('vw7', ['trail', 'out'], ['kal', 'in']),
+      w('vw8', ['kal', 'out'], ['show', 'b']),
+      w('vw9', ['scp', 'out'], ['chr', 'in']),
+      w('vw10', ['chr', 'out'], ['wrp', 'in']),
+      w('vw11', ['wrp', 'out'], ['blr', 'in']),
+      w('vw12', ['blr', 'out'], ['show', 'c']),
+      w('vw13', ['spc', 'out'], ['pix', 'in']),
+      w('vw14', ['pix', 'out'], ['cg', 'in']),
+      w('vw15', ['cg', 'out'], ['show', 'd']),
+      w('vw16', ['show', 'out'], ['out', 'in']),
+      w('vw17', ['feat', 'bass'], ['glow', 'amount']),
+      w('vw18', ['feat', 'mid'], ['wrp', 'amount']),
+      w('vw19', ['feat', 'level'], ['cg', 'hueShift']),
+    ],
+  };
 }
 
 /** Old scene/gain params → equivalent graph (clamped, NaN-safe). */

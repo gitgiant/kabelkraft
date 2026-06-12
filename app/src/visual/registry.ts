@@ -317,6 +317,26 @@ const blend: VisNodeDef = {
   ],
 };
 
+const scenes: VisNodeDef = {
+  type: 'scenes',
+  name: 'Scenes',
+  category: 'combine',
+  description:
+    'Cycles through its wired inputs on a clock, crossfading between them — ' +
+    'wire whole chains into a–d for an auto-rotating show.',
+  ports: [
+    { id: 'a', label: 'A', type: 'visual', direction: 'in', description: 'Scene A.' },
+    { id: 'b', label: 'B', type: 'visual', direction: 'in', description: 'Scene B.' },
+    { id: 'c', label: 'C', type: 'visual', direction: 'in', description: 'Scene C.' },
+    { id: 'd', label: 'D', type: 'visual', direction: 'in', description: 'Scene D.' },
+    visOut,
+  ],
+  params: [
+    { id: 'hold', label: 'Hold', min: 2, max: 60, default: 10, unit: 's' },
+    { id: 'fade', label: 'Fade', min: 0.1, max: 5, default: 1.5, unit: 's' },
+  ],
+};
+
 const visualin: VisNodeDef = {
   type: 'visualin',
   name: 'Visual In',
@@ -359,6 +379,7 @@ export const VIS_NODE_DEFS: Map<string, VisNodeDef> = new Map(
     bloom,
     mirror,
     blend,
+    scenes,
     visualin,
     output,
   ].map((d) => [d.type, withModPorts(d)]),

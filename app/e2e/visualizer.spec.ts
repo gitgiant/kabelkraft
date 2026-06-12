@@ -14,13 +14,17 @@ test('visualizer container computes features and big view opens', async ({ page 
     return vis.id;
   }, { synth: rig.synth, sequencer: rig.sequencer });
 
-  // Fresh containers carry the init visual graph (audio → Spectrum → Output).
+  // Fresh containers carry the init showcase graph (scene chains → Scenes → Output).
   const graph = await page.evaluate(
     (id) => window.__kk.graph.modules.get(id)!.data!.graph as { nodes: { type: string }[]; wires: unknown[] },
     visId,
   );
-  expect(graph.nodes.map((n) => n.type)).toEqual(['spectrum', 'output']);
-  expect(graph.wires.length).toBe(1);
+  const types = graph.nodes.map((n) => n.type);
+  expect(types).toContain('scenes');
+  expect(types).toContain('features');
+  expect(types.filter((t) => t === 'output')).toHaveLength(1);
+  expect(graph.nodes.length).toBe(18);
+  expect(graph.wires.length).toBe(19);
 
   // Dev server sends COOP/COEP, so the SAB audio ring path must be active.
   expect(await page.evaluate(() => crossOriginIsolated)).toBe(true);
@@ -124,7 +128,7 @@ test('visual graph editing: effect chain renders and editor opens', async ({ pag
     return { after, undone, redone: count() };
   }, visId);
   expect(nodeCounts.after).toBe(5);
-  expect(nodeCounts.undone).toBe(2);
+  expect(nodeCounts.undone).toBe(18); // back to the init showcase graph
   expect(nodeCounts.redone).toBe(5);
 
   // Editor panel opens in place (anchored over the tile), shows the graph, closes.
@@ -155,7 +159,7 @@ test('text wire: producer → container → Text Layer renders', async ({ page }
       { moduleId: input.id, portId: 'out' },
       { moduleId: vis.id, portId: 'text' },
     );
-    // Text Layer in stack mode replaces the init spectrum graph.
+    // Text Layer in stack mode replaces the init showcase graph.
     s.setVisGraph(vis.id, {
       nodes: [
         { id: 'v1', type: 'textlayer', x: 40, y: 60, params: { mode: 3, size: 0.12 } },
@@ -206,7 +210,7 @@ test('visual wire chains containers: A renders into B via Visual In', async ({ p
 
   const ids = await page.evaluate(({ synth }) => {
     const s = window.__kk;
-    const a = s.addModule('visualizer', 300, 500); // keeps init spectrum graph
+    const a = s.addModule('visualizer', 300, 500); // keeps init showcase graph
     const b = s.addModule('visualizer', 700, 500);
     s.connect({ moduleId: synth, portId: 'out' }, { moduleId: a.id, portId: 'in' });
     const chainWire = s.connect(
@@ -282,8 +286,8 @@ test('double-clicking the tile scene opens the visual graph editor', async ({ pa
   const r = await page.evaluate((mid) => window.__kkCanvas.clientRectFor(mid), id);
   await page.mouse.dblclick(r!.left + r!.width / 2, r!.top + r!.height / 2);
   await expect(page.locator('.vised')).toBeVisible();
-  // Init graph shows its two nodes in the editor; the AI row is present.
-  await expect(page.locator('.vised .node')).toHaveCount(2);
+  // Init showcase graph shows all its nodes in the editor; the AI row is present.
+  await expect(page.locator('.vised .node')).toHaveCount(18);
   await expect(page.locator('.vised .ai-row input')).toBeVisible();
   await page.locator('.vised button[title="Close (Esc)"]').click();
   await expect(page.locator('.vised')).toBeHidden();

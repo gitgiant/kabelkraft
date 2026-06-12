@@ -14,15 +14,43 @@ import { VIS_NODE_DEFS } from './registry';
 import type { VisGraphData } from './types';
 
 describe('visual graph synthesis', () => {
-  it('init graph is spectrum → output with valid node types and wire ends', () => {
+  it('init graph is a valid scene showcase: known types, resolved ports, one fed output', () => {
     const g = initVisGraph();
-    expect(g.nodes.map((n) => n.type)).toEqual(['spectrum', 'output']);
-    const ids = new Set(g.nodes.map((n) => n.id));
-    for (const w of g.wires) {
-      expect(ids.has(w.from.nodeId)).toBe(true);
-      expect(ids.has(w.to.nodeId)).toBe(true);
+    const types = new Set(g.nodes.map((n) => n.type));
+    expect(types.has('scenes')).toBe(true);
+    expect(g.nodes.filter((n) => n.type === 'output')).toHaveLength(1);
+    // Every effect from the catalog appears in the showcase.
+    for (const def of VIS_NODE_DEFS.values()) {
+      if (def.category === 'effect') expect(types.has(def.type)).toBe(true);
     }
-    expect(VIS_NODE_DEFS.has(g.nodes[0].type)).toBe(true);
+    // Unique node ids; every wire end resolves to a real node + port.
+    const byId = new Map(g.nodes.map((n) => [n.id, n]));
+    expect(byId.size).toBe(g.nodes.length);
+    for (const w of g.wires) {
+      const from = byId.get(w.from.nodeId);
+      const to = byId.get(w.to.nodeId);
+      expect(from && to).toBeTruthy();
+      const fromDef = VIS_NODE_DEFS.get(from!.type)!;
+      const toDef = VIS_NODE_DEFS.get(to!.type)!;
+      const src = fromDef.ports.find((p) => p.id === w.from.portId && p.direction === 'out');
+      const dst = toDef.ports.find((p) => p.id === w.to.portId && p.direction === 'in');
+      expect(src, `${w.id} from ${from!.type}.${w.from.portId}`).toBeTruthy();
+      expect(dst, `${w.id} to ${to!.type}.${w.to.portId}`).toBeTruthy();
+      expect(src!.type).toBe(dst!.type);
+    }
+    // Params reference real specs within range.
+    for (const node of g.nodes) {
+      const def = VIS_NODE_DEFS.get(node.type)!;
+      for (const [id, v] of Object.entries(node.params)) {
+        const spec = def.params.find((p) => p.id === id);
+        expect(spec, `${node.type}.${id}`).toBeTruthy();
+        expect(v).toBeGreaterThanOrEqual(spec!.min);
+        expect(v).toBeLessThanOrEqual(spec!.max);
+      }
+    }
+    // Output is fed.
+    const out = g.nodes.find((n) => n.type === 'output')!;
+    expect(g.wires.some((w) => w.to.nodeId === out.id)).toBe(true);
   });
 
   it('maps legacy scenes to source nodes and carries gain', () => {
@@ -151,6 +179,7 @@ describe('project-load migration', () => {
     expect(def.params).toEqual([]);
     const data = def.defaultData!();
     expect(isVisGraph(data.graph)).toBe(true);
-    expect((data.graph as VisGraphData).nodes[0].type).toBe('spectrum');
+    // The init graph is the four-scene showcase (driven by a features node).
+    expect((data.graph as VisGraphData).nodes[0].type).toBe('features');
   });
 });

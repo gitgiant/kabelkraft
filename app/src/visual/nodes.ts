@@ -957,6 +957,46 @@ const blend: NodeImpl = {
   },
 };
 
+// -- scenes ----------------------------------------------------------------------
+
+const SCENES_FS = /* wgsl */ `
+@group(0) @binding(0) var<uniform> u: vec4f; // k, 0, 0, 0
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var texA: texture_2d<f32>;
+@group(0) @binding(3) var texB: texture_2d<f32>;
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4f {
+  let a = textureSample(texA, samp, in.uv);
+  let b = textureSample(texB, samp, in.uv);
+  return mix(a, b, u.x); // premultiplied crossfade
+}
+`;
+
+const scenes: NodeImpl = {
+  render(env, node, inputs, params) {
+    const active = inputs.filter((t): t is GPUTexture => t !== null);
+    if (active.length === 0) return null;
+    const hold = Math.max(0.1, params.hold);
+    const fade = Math.max(0.05, params.fade);
+    const cycle = hold + fade;
+    const pos = env.time % (active.length * cycle);
+    const idx = Math.floor(pos / cycle);
+    const phase = pos - idx * cycle;
+    const x = clamp01((phase - hold) / fade);
+    const k = active.length > 1 ? x * x * (3 - 2 * x) : 0; // smoothstep
+    const a = active[idx];
+    const b = active[(idx + 1) % active.length];
+    const pipeline = fullscreenPipeline(env.device, 'scenes', SCENES_FS);
+    return runPass(env, pipeline, [
+      uni(env, node.id, new Float32Array([k, 0, 0, 0])),
+      sharedSampler(env.device),
+      a.createView(),
+      b.createView(),
+    ]);
+  },
+};
+
 // -- registry -------------------------------------------------------------------
 
 export const NODE_IMPLS: Record<string, NodeImpl> = {
@@ -980,4 +1020,5 @@ export const NODE_IMPLS: Record<string, NodeImpl> = {
   bloom,
   mirror,
   blend,
+  scenes,
 };
