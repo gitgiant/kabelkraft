@@ -54,8 +54,10 @@ export function featureValue(features: VisFeatures | null, portId: string): numb
 
 /**
  * Resolve a node's effective params: def defaults ← stored values ← control
- * in-port modulation (a wired control port whose id matches a param id
- * multiplies that param by the 0–1 control value).
+ * in-port modulation. A wired control port whose id matches a param id
+ * modulates that param by the 0–1 control value per the param's modMode —
+ * multiply by default, add-and-wrap for circular params — then clamps the
+ * result to the param's [min, max].
  */
 export function resolveParams(
   graph: VisGraphData,
@@ -67,10 +69,15 @@ export function resolveParams(
   if (!def) return out;
   for (const p of def.params) out[p.id] = node.params[p.id] ?? p.default;
   for (const port of def.ports) {
-    if (port.type !== 'control' || port.direction !== 'in' || !(port.id in out)) continue;
+    if (port.type !== 'control' || port.direction !== 'in') continue;
+    const spec = def.params.find((p) => p.id === port.id);
+    if (!spec) continue;
     const wire = graph.wires.find((w) => w.to.nodeId === node.id && w.to.portId === port.id);
     if (!wire) continue;
-    out[port.id] *= Math.min(1, Math.max(0, featureValue(features, wire.from.portId)));
+    const ctrl = Math.min(1, Math.max(0, featureValue(features, wire.from.portId)));
+    const v =
+      spec.modMode === 'add-wrap' ? (out[port.id] + ctrl) % 1 : out[port.id] * ctrl;
+    out[port.id] = Math.min(spec.max, Math.max(spec.min, v));
   }
   return out;
 }

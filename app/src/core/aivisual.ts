@@ -42,9 +42,13 @@ Rules:
 - Exactly ONE \`output\` node; the frame wired into it is what the user sees.
 - \`visual\` inputs accept ONE wire each. Layer multiple sources with \`blend\`
   (a = bottom, b = top); stack blends for more layers.
-- A \`control\` in-port whose id matches a param (e.g. \`amount\` on \`blur\`)
-  MULTIPLIES that param by a 0–1 signal — wire it from a \`features\` output
-  (level/bass/mid/high/onset) to make the visual move with the music.
+- Every continuous param has a \`control\` in-port of the same id (e.g.
+  \`amount\` on \`blur\`). Wiring it from a \`features\` output
+  (level/bass/mid/high/onset) makes the visual move with the music:
+  the 0–1 signal MULTIPLIES the param's set value, except circular params
+  (\`hue\`, \`hue2\`, \`hueShift\`, \`angle\`) where it ADDS and wraps within
+  0–1. The result is clamped to the param's range. Option params have no
+  control port.
 - Sources read the container's audio implicitly; you never wire audio inside.
 - The container's text input (lyrics, readouts) renders via \`textlayer\`;
   an upstream visualizer chained on the main canvas arrives via \`visualin\`.

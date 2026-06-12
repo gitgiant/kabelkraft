@@ -27,6 +27,13 @@ export interface VisParamSpec {
   /** Discrete value labels; param holds an index. */
   options?: string[];
   unit?: string;
+  /**
+   * How a wired same-id control in-port modulates the param. `multiply`
+   * (default) scales the knob value by the 0–1 control; `add-wrap` adds the
+   * control and wraps into 0–1 — for circular params (hue, angle). Either way
+   * the result clamps to [min, max].
+   */
+  modMode?: 'multiply' | 'add-wrap';
 }
 
 export type VisNodeCategory = 'source' | 'effect' | 'combine' | 'util';

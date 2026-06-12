@@ -83,6 +83,23 @@ describe('resolveParams', () => {
     expect(featureValue({ ...FEATURES, ctrl: 0.4 }, 'ctrl')).toBe(0.4);
     expect(featureValue({ ...FEATURES, ctrl: -1 }, 'ctrl')).toBe(1);
   });
+
+  it('add-wrap params shift by the control value and wrap within 0–1', () => {
+    const g: VisGraphData = {
+      nodes: [node('f', 'features'), node('bg', 'gradient', { hue: 0.65 })],
+      wires: [wire('w1', ['f', 'bass'], ['bg', 'hue'])],
+    };
+    expect(resolveParams(g, g.nodes[1], FEATURES).hue).toBeCloseTo((0.65 + 0.8) % 1, 5);
+  });
+
+  it('clamps the modulated value to the param range', () => {
+    const g: VisGraphData = {
+      nodes: [node('f', 'features'), node('s', 'scope', { gain: 2 })],
+      wires: [wire('w1', ['f', 'high'], ['s', 'gain'])],
+    };
+    // 2 × 0.1 = 0.2 → clamped to gain min 0.5.
+    expect(resolveParams(g, g.nodes[1], FEATURES).gain).toBe(0.5);
+  });
 });
 
 describe('node def sanity', () => {
@@ -95,12 +112,13 @@ describe('node def sanity', () => {
         expect(p.default).toBeLessThanOrEqual(p.max);
         if (p.options) expect(p.options.length - 1).toBe(p.max);
       }
-      for (const port of def.ports) {
-        if (port.type === 'control' && port.direction === 'in') {
-          // Mod-port convention: id matches the param it scales.
-          expect(paramIds.has(port.id)).toBe(true);
-        }
-      }
+      const ctrlIns = new Set(
+        def.ports.filter((p) => p.type === 'control' && p.direction === 'in').map((p) => p.id),
+      );
+      // Mod-port convention: every continuous param has a same-id control
+      // in-port; option params have none.
+      for (const id of ctrlIns) expect(paramIds.has(id)).toBe(true);
+      for (const p of def.params) expect(ctrlIns.has(p.id)).toBe(!p.options);
       if (def.type !== 'features' && def.type !== 'output') {
         expect(def.ports.some((p) => p.type === 'visual' && p.direction === 'out')).toBe(true);
       }
