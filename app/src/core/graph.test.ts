@@ -341,4 +341,35 @@ describe('auto-wire planner', () => {
     for (const m of [kb1, kb2]) graph.addModule(m);
     expect(planAutoWire(graph, [kb1.id, kb2.id])).toEqual([]);
   });
+
+  it('wires groups through their poles', () => {
+    const graph = new Graph(MODULE_DEFS);
+    const keyboard = createInstance(MODULE_DEFS.get('keyboard')!, 0, 0);
+    const smpl = createInstance(MODULE_DEFS.get('smpl')!, 310, 0);
+    const audioOut = createInstance(MODULE_DEFS.get('audioOut')!, 320, 10);
+    for (const m of [keyboard, smpl, audioOut]) graph.addModule(m);
+    // Internally wired voice group: smpl.out → audioOut.in stays inside; the
+    // group's free poles include smpl.notes (its input side).
+    graph.connect({ moduleId: smpl.id, portId: 'out' }, { moduleId: audioOut.id, portId: 'in' });
+    const group = graph.createGroup('Voice', [smpl.id, audioOut.id], [], 300, 0);
+    const plan = planAutoWire(graph, [keyboard.id], [group.id]);
+    expect(plan).toContainEqual({
+      from: { moduleId: keyboard.id, portId: 'notes' },
+      to: { moduleId: smpl.id, portId: 'notes' },
+    });
+    for (const p of plan) expect(graph.connect(p.from, p.to).ok).toBe(true);
+  });
+
+  it('group-to-group wiring matches free poles by type', () => {
+    const graph = new Graph(MODULE_DEFS);
+    const lfo = createInstance(MODULE_DEFS.get('lfo')!, 0, 0);
+    const vcf = createInstance(MODULE_DEFS.get('vcf')!, 300, 0);
+    for (const m of [lfo, vcf]) graph.addModule(m);
+    const src = graph.createGroup('Mod', [lfo.id], [], 0, 0);
+    const dst = graph.createGroup('Filter', [vcf.id], [], 300, 0);
+    const plan = planAutoWire(graph, [], [src.id, dst.id]);
+    expect(plan.length).toBeGreaterThan(0);
+    expect(plan[0].from).toEqual({ moduleId: lfo.id, portId: 'out' });
+    expect(plan[0].to.moduleId).toBe(vcf.id);
+  });
 });

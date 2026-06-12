@@ -28,7 +28,8 @@
     canUndo = appState.canUndo;
     canRedo = appState.canRedo;
     canGroup = appState.selectedModuleIds.size + appState.selectedGroupIds.size >= 2;
-    canAutoWire = appState.selectedModuleIds.size >= 2;
+    const wireTargets = appState.autoWireTargets();
+    canAutoWire = wireTargets.moduleIds.length + wireTargets.groupIds.length >= 2;
     selectedGroup = [...appState.selectedGroupIds][0] ?? null;
     canShrink = appState.shrinkableGroupId() !== null;
   }
@@ -198,7 +199,7 @@
       class="auto-wire"
       disabled={!canAutoWire}
       onclick={() => appState.autoWireSelection()}
-      title="Auto-wire selection: connect free outputs to matching free inputs, left to right"
+      title="Auto-wire: connect free outputs to matching free inputs, left to right. Wires the selection — or the whole patch when nothing is selected. Groups join in through their poles."
     >
       ⚡ Wire
     </button>

@@ -225,7 +225,7 @@ test('auto-wire button chains the selected modules left-to-right', async ({ page
   await clearPatch(page);
 
   const wireBtn = page.locator('.toolbar button.auto-wire');
-  await expect(wireBtn).toBeDisabled();
+  await expect(wireBtn).toBeDisabled(); // empty canvas — nothing to wire
 
   await page.evaluate(() => {
     const s = window.__kk;
@@ -251,4 +251,35 @@ test('auto-wire button chains the selected modules left-to-right', async ({ page
   // One undo step removes the whole auto-wire batch.
   await page.evaluate(() => window.__kk.undo());
   expect(await page.evaluate(() => window.__kk.graph.wires.size)).toBe(0);
+});
+
+test('auto-wire with no selection wires the whole patch, groups via poles', async ({ page }) => {
+  await boot(page);
+  await clearPatch(page);
+
+  const wireBtn = page.locator('.toolbar button.auto-wire');
+
+  // keyboard + a grouped voice (smpl→audioOut wired internally): nothing
+  // selected — auto-wire still chains keyboard.notes into the group's pole.
+  await page.evaluate(() => {
+    const s = window.__kk;
+    const kb = s.addModule('keyboard', 300, 400);
+    const smpl = s.addModule('smpl', 700, 400);
+    const out = s.addModule('audioOut', 1100, 400);
+    s.connect({ moduleId: smpl.id, portId: 'out' }, { moduleId: out.id, portId: 'in' });
+    s.select({ moduleId: smpl.id });
+    s.addToSelection({ moduleId: out.id });
+    s.groupSelection();
+    s.clearSelection();
+    void kb;
+  });
+  await expect(wireBtn).toBeEnabled(); // no selection needed anymore
+
+  await wireBtn.click();
+  const noteWire = await page.evaluate(() =>
+    [...window.__kk.graph.wires.values()].some(
+      (w) => w.type === 'note' && w.to.portId === 'notes',
+    ),
+  );
+  expect(noteWire).toBe(true);
 });

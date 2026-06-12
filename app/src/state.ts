@@ -846,13 +846,33 @@ export class AppState {
   }
 
   /**
-   * Auto-wire the selected modules (toolbar): chain left-to-right, matching
-   * free outputs to free inputs by type. Returns the number of wires added.
+   * The modules + groups auto-wire would chain: the multi-selection when it
+   * holds 2+ entities, otherwise every top-level entity on the canvas (so the
+   * button works with nothing selected — "just wire it up").
+   */
+  autoWireTargets(): { moduleIds: string[]; groupIds: string[] } {
+    let moduleIds = [...this.selectedModuleIds].filter((id) => this.graph.modules.has(id));
+    let groupIds = [...this.selectedGroupIds].filter((id) => this.graph.groups.has(id));
+    if (moduleIds.length + groupIds.length < 2) {
+      moduleIds = [...this.graph.modules.values()]
+        .filter((m) => !this.graph.groupOfModule(m.id))
+        .map((m) => m.id);
+      groupIds = [...this.graph.groups.values()]
+        .filter((g) => !this.graph.parentGroup(g.id))
+        .map((g) => g.id);
+    }
+    return { moduleIds, groupIds };
+  }
+
+  /**
+   * Auto-wire (toolbar): chain the targets left-to-right, matching free
+   * outputs to free inputs by type. Groups/containers take part through
+   * their poles. Returns the number of wires added.
    */
   autoWireSelection(): number {
-    const ids = [...this.selectedModuleIds].filter((id) => this.graph.modules.has(id));
-    if (ids.length < 2) return 0;
-    const plan = planAutoWire(this.graph, ids);
+    const { moduleIds, groupIds } = this.autoWireTargets();
+    if (moduleIds.length + groupIds.length < 2) return 0;
+    const plan = planAutoWire(this.graph, moduleIds, groupIds);
     if (plan.length === 0) return 0;
     this.beginUndoable();
     let added = 0;
