@@ -49,18 +49,26 @@ export function visGraphOf(data: Record<string, unknown> | undefined): VisGraphD
 
 /**
  * Best-effort builtin look for a graph — drives the Canvas2D approximation
- * tier (tile face, no-WebGPU overlay). Effects are ignored; the first source
- * node wins, spectrum when none found.
+ * tier (tile face, no-WebGPU overlay). Effects are ignored; every recognized
+ * source type contributes one layer (first instance of each type wins),
+ * spectrum when none found.
  */
-export function approximateScene(graph: VisGraphData | null): { scene: LegacyScene; gain: number } {
-  if (graph) {
-    for (const node of graph.nodes) {
-      if ((LEGACY_SCENES as readonly string[]).includes(node.type)) {
-        return { scene: node.type as LegacyScene, gain: node.params.gain ?? 1.5 };
-      }
+export function approximateScenes(graph: VisGraphData | null): { scene: LegacyScene; gain: number }[] {
+  const layers: { scene: LegacyScene; gain: number }[] = [];
+  for (const node of graph?.nodes ?? []) {
+    if (
+      (LEGACY_SCENES as readonly string[]).includes(node.type) &&
+      !layers.some((l) => l.scene === node.type)
+    ) {
+      layers.push({ scene: node.type as LegacyScene, gain: node.params.gain ?? 1.5 });
     }
   }
-  return { scene: 'spectrum', gain: 1.5 };
+  return layers.length > 0 ? layers : [{ scene: 'spectrum', gain: 1.5 }];
+}
+
+/** Single-scene variant for the thrifty tile fallback. */
+export function approximateScene(graph: VisGraphData | null): { scene: LegacyScene; gain: number } {
+  return approximateScenes(graph)[0];
 }
 
 /**

@@ -4,6 +4,7 @@ import { deserializeProject } from '../core/serialize';
 import { DEFAULT_TRANSPORT } from '../core/types';
 import {
   approximateScene,
+  approximateScenes,
   initVisGraph,
   isVisGraph,
   sanitizeVisGraph,
@@ -41,6 +42,24 @@ describe('visual graph synthesis', () => {
     expect(approximateScene(null)).toEqual({ scene: 'spectrum', gain: 1.5 });
     expect(approximateScene({ nodes: [{ id: 'v1', type: 'output', x: 0, y: 0, params: {} }], wires: [] }))
       .toEqual({ scene: 'spectrum', gain: 1.5 });
+  });
+
+  it('approximateScenes layers every recognized source type once, ignoring effects', () => {
+    const g: VisGraphData = {
+      nodes: [
+        { id: 'v1', type: 'scope', x: 0, y: 0, params: { gain: 2 } },
+        { id: 'v2', type: 'bloom', x: 0, y: 0, params: {} },
+        { id: 'v3', type: 'particles', x: 0, y: 0, params: {} },
+        { id: 'v4', type: 'scope', x: 0, y: 0, params: { gain: 9 } }, // dup type — first wins
+        { id: 'v5', type: 'output', x: 0, y: 0, params: {} },
+      ],
+      wires: [],
+    };
+    expect(approximateScenes(g)).toEqual([
+      { scene: 'scope', gain: 2 },
+      { scene: 'particles', gain: 1.5 },
+    ]);
+    expect(approximateScenes(null)).toEqual([{ scene: 'spectrum', gain: 1.5 }]);
   });
 
   it('sanitize drops unknown nodes and orphaned wires', () => {

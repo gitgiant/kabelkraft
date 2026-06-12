@@ -160,13 +160,18 @@ draws the thumbnail texture.
 - `buildAiContext()` shared context builder; retrofit into patch/MIDI/
   project AI flows. Spec export/copy button.
 
-## Phase 6 — Polish
+## Phase 6 — Polish ✅ done 2026-06-12
 
-- Per-container rate (60/120/144/240) + resolution-scale controls.
-- Canvas2D fallback tier finalized (graph-approximation rendering).
-- E2e per conventions (poll-based, `__kkMeta` counts, no pixel asserts;
-  skip-with-reason where WebGPU unavailable in CI). Perf pass: texture
-  pool reuse, culling verification.
+- Per-container rate (60/120/144/240) + resolution-scale controls
+  (overlay bar selects → `data.fps`/`data.res`, applied to overlay +
+  pop-out via `FrameGate` vsync divider; `src/visual/display.ts`).
+- Canvas2D fallback tier finalized: layered graph approximation
+  (`approximateScenes`, one layer per recognized source type) + "full
+  visuals need WebGPU" notice.
+- E2e per conventions (poll-based, no pixel asserts; WebGPU-skip with
+  reason; deterministic no-GPU test via `navigator.gpu` stub) —
+  `e2e/vis-polish.spec.ts`. Perf pass: texture-pool reuse unit-tested,
+  overlay now culled off-screen, tile-culling verified end-to-end.
 
 ---
 

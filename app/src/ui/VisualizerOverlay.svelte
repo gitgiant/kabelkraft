@@ -2,10 +2,11 @@
   import { onMount, tick } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
   import { appState } from '../state';
+  import { FrameGate, VIS_RATES, VIS_RES_SCALES, visDisplayOf } from '../visual/display';
   import { binFrac } from '../visual/features';
-  import { approximateScene, visGraphOf } from '../visual/migrate';
+  import { approximateScenes, visGraphOf } from '../visual/migrate';
   import { ContainerRenderer, graphSupported, webgpuAvailable } from '../visual/runtime';
-  import type { VisGraphData } from '../visual/types';
+  import type { VisFeatures, VisGraphData } from '../visual/types';
 
   // Big visualizer view — opens IN PLACE: the tile grows and this panel pins
   // itself over the module, tracking canvas pan/zoom (no full-screen
@@ -22,6 +23,10 @@
   let raf = 0;
   let renderer: ContainerRenderer | null = null;
   let particles: Array<{ x: number; y: number; vx: number; vy: number; life: number; hue: number }> = [];
+  // Per-container display settings (Phase 6) — synced from module data each
+  // frame so undo/redo and external edits reflect in the selects.
+  let display = $state({ fps: 60, res: 1 });
+  let gate = new FrameGate();
 
   // Panel anchoring over the module tile (PianoRoll pattern).
   const INSET_X = 14;
@@ -57,6 +62,7 @@
       open = moduleId !== null;
       particles = [];
       renderer = null;
+      gate = new FrameGate();
       cancelAnimationFrame(raf);
       // GPU vs 2D is decided per open: a canvas can hold only one context type.
       gpuMode = open && webgpuAvailable() && graphSupported(graph);
@@ -95,7 +101,12 @@
   // Independent of the panel: keeps rendering after it closes, driven by the
   // pop-out's own rAF so it runs at that display's refresh rate.
 
-  let popup: { win: Window; renderer: ContainerRenderer | null; moduleId: string } | null = null;
+  let popup: {
+    win: Window;
+    renderer: ContainerRenderer | null;
+    moduleId: string;
+    gate: FrameGate;
+  } | null = null;
 
   async function popOut(): Promise<void> {
     if (!moduleId) return;
@@ -107,7 +118,7 @@
     const canvas = win.document.createElement('canvas');
     canvas.style.cssText = 'width:100vw;height:100vh;display:block';
     win.document.body.appendChild(canvas);
-    const entry = { win, renderer: null as ContainerRenderer | null, moduleId };
+    const entry = { win, renderer: null as ContainerRenderer | null, moduleId, gate: new FrameGate() };
     popup = entry;
     entry.renderer = await ContainerRenderer.create(canvas);
     if (popup !== entry) return;
@@ -125,8 +136,12 @@
       return;
     }
     popup.win.requestAnimationFrame(popupLoop);
+    // The container's rate cap and resolution scale apply here too.
+    const d = visDisplayOf(appState.graph.modules.get(popup.moduleId)?.data);
+    if (!popup.gate.due(performance.now(), d.fps)) return;
     const frame = appState.visFrame(popup.moduleId);
     if (popup.renderer && frame && graphSupported(frame.graph)) {
+      popup.renderer.resolutionScale = d.res;
       popup.renderer.render(frame);
     }
   }
@@ -145,12 +160,18 @@
     if (!open || !canvasEl || !moduleId) return;
     raf = requestAnimationFrame(draw);
     reposition();
-    const features = appState.visFeatures(moduleId);
     // Re-read per frame — the visual editor mutates the graph live.
     const mod = appState.graph.modules.get(moduleId);
     graph = mod ? visGraphOf(mod.data) : null;
+    const d = visDisplayOf(mod?.data);
+    if (d.fps !== display.fps || d.res !== display.res) display = d;
     const fullscreenNow = document.fullscreenElement === containerEl;
-    const res = fullscreenNow ? 1 : scale;
+    // Culled while the tracked tile is off screen (reposition keeps watching).
+    if (!onScreen && !fullscreenNow) return;
+    // Per-container rate cap (vsync divider over the display's rAF rate).
+    if (!gate.due(performance.now(), d.fps)) return;
+    const features = appState.visFeatures(moduleId);
+    const res = (fullscreenNow ? 1 : scale) * d.res;
 
     if (gpuMode) {
       if (renderer && graph && graphSupported(graph)) {
@@ -173,10 +194,21 @@
     ctx.fillRect(0, 0, W, H);
     if (!features) return;
 
-    const { scene, gain: baseGain } = approximateScene(graph);
+    // Approximation tier: each recognized source type draws one layer.
     const ctrl = features.ctrl >= 0 ? features.ctrl : 1;
-    const gain = baseGain * (0.3 + 0.7 * ctrl);
+    for (const { scene, gain: baseGain } of approximateScenes(graph)) {
+      drawLayer(ctx, scene, baseGain * (0.3 + 0.7 * ctrl), features, W, H);
+    }
+  }
 
+  function drawLayer(
+    ctx: CanvasRenderingContext2D,
+    scene: string,
+    gain: number,
+    features: VisFeatures,
+    W: number,
+    H: number,
+  ) {
     if (scene === 'scope') {
       ctx.strokeStyle = '#3dd9ff';
       ctx.lineWidth = 2;
@@ -243,6 +275,28 @@
     <div class="vis-bar">
       <span class="vis-title">Visualizer</span>
       <span class="spacer"></span>
+      <select
+        class="vis-ctl"
+        title="Frame rate cap"
+        value={String(display.fps)}
+        onchange={(e) =>
+          moduleId && appState.setVisDisplay(moduleId, { fps: Number((e.currentTarget as HTMLSelectElement).value) })}
+      >
+        {#each VIS_RATES as r (r)}
+          <option value={String(r)}>{r} fps</option>
+        {/each}
+      </select>
+      <select
+        class="vis-ctl"
+        title="Resolution scale"
+        value={String(display.res)}
+        onchange={(e) =>
+          moduleId && appState.setVisDisplay(moduleId, { res: Number((e.currentTarget as HTMLSelectElement).value) })}
+      >
+        {#each VIS_RES_SCALES as s (s)}
+          <option value={String(s)}>{Math.round(s * 100)}%</option>
+        {/each}
+      </select>
       <button onclick={popOut} title="Pop out to a separate window (projector)">⧉</button>
       <button onclick={fullscreen} title="Toggle fullscreen">⛶</button>
       <button onclick={close} title="Close (Esc)">✕</button>
@@ -250,6 +304,9 @@
     {#key gpuMode}
       <canvas bind:this={canvasEl}></canvas>
     {/key}
+    {#if !gpuMode}
+      <div class="vis-note">Full visuals need WebGPU — showing a simplified approximation.</div>
+    {/if}
   </div>
 {/if}
 
@@ -286,6 +343,24 @@
   }
   .spacer {
     flex: 1;
+  }
+  .vis-ctl {
+    font-size: 11px;
+    background: #1c1c26;
+    color: var(--text, #cfcfda);
+    border: 1px solid #34343f;
+    border-radius: 5px;
+    padding: 2px 4px;
+  }
+  .vis-note {
+    position: absolute;
+    bottom: 8px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-dim, #8a8a96);
+    pointer-events: none;
   }
   canvas {
     flex: 1;

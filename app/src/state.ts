@@ -25,6 +25,7 @@ import { DEFAULT_TRANSPORT, type TextEvent, type TransportState } from './core/t
 import { Engine } from './engine/engine';
 import type { MeterReading, StatusMessage } from './engine/messages';
 import { encodeWav } from './engine/wav';
+import type { VisDisplay } from './visual/display';
 import { VisFeatureHub } from './visual/features';
 import { visGraphOf } from './visual/migrate';
 import { createVisRingBuffer } from './visual/ring';
@@ -251,6 +252,15 @@ export class AppState {
     if (mod?.type !== 'visualizer') return;
     if (undoable) this.beginUndoable();
     mod.data = { ...mod.data, graph };
+    this.emit('visGraphChanged');
+  }
+
+  /** Per-container display settings (frame-rate cap, resolution scale) — undoable. */
+  setVisDisplay(moduleId: string, display: Partial<VisDisplay>): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (mod?.type !== 'visualizer') return;
+    this.beginUndoable();
+    mod.data = { ...mod.data, ...display };
     this.emit('visGraphChanged');
   }
 
