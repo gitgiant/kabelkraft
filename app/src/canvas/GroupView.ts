@@ -245,7 +245,7 @@ export class GroupView extends Container {
     title.eventMode = 'none';
     this.addChild(title);
 
-    // Title-bar buttons: expand (⛶), edit face (🎛), rename (✎), recolor (⬤).
+    // Title-bar buttons: AI edit (🤖), expand (⛶), edit face (🎛), rename (✎), recolor (⬤).
     const titleButton = (
       glyph: string,
       x: number,
@@ -270,6 +270,9 @@ export class GroupView extends Container {
       this.addChild(hit);
     };
 
+    titleButton('🤖', w - 84, ['AI edit', 'Describe a change — the AI rebuilds this group in place.'], () =>
+      window.dispatchEvent(new CustomEvent('kk-ai-group', { detail: { groupId: this.group.id } })),
+    );
     titleButton('⛶', w - 66, ['Expand', 'Open the group: all modules inside, wired up.'], () =>
       this.handlers.onToggleCollapse(this.group.id),
     );
@@ -349,14 +352,48 @@ export class GroupView extends Container {
     let raf = 0;
     // Groups are containers — minimum only, stretch to any size.
     const MIN_W = 120, MIN_H = 80;
+
+    // Faced tiles scale their elements with the face (positions per-axis, so
+    // layouts spread/condense; sizes ride along). Snapshot drag-start geometry
+    // and always scale from it — per-move ratios would drift.
+    const startEls = (face?.elements ?? []).map((el) => ({
+      el,
+      x: el.x,
+      y: el.y,
+      w: el.w,
+      h: el.h,
+      size: el.size,
+    }));
+    // Stop shrinking where the smallest element would drop below usable size.
+    // An element already below the floor pins that axis at its current size.
+    const MIN_EL = 10;
+    let minFW = MIN_W;
+    let minFH = MIN_H;
+    if (face) {
+      for (const s of startEls) {
+        minFW = Math.max(minFW, face.width * Math.min(1, MIN_EL / s.w));
+        minFH = Math.max(minFH, face.height * Math.min(1, MIN_EL / s.h));
+      }
+    }
+
     const apply = (ev: PointerEvent) => {
       const { w, h } = resizeSize(dir, (ev.clientX - sx) / scale, (ev.clientY - sy) / scale, startW, startH);
-      const cw = Math.max(MIN_W, w);
+      const cw = Math.max(face ? minFW : MIN_W, w);
       // Faced tile height = TITLE_H + face.height; clamp the face area itself.
-      const ch = Math.max(MIN_H + (face ? TITLE_H : 0), h);
+      const ch = Math.max(face ? minFH + TITLE_H : MIN_H, h);
       if (face) {
+        const rx = cw / (startW || 1);
+        const ry = (ch - TITLE_H) / (startH - TITLE_H || 1);
         face.width = cw;
         face.height = ch - TITLE_H;
+        const rs = Math.min(rx, ry);
+        for (const s of startEls) {
+          s.el.x = s.x * rx;
+          s.el.y = s.y * ry;
+          s.el.w = s.w * rx;
+          s.el.h = s.h * ry;
+          if (s.size !== undefined) s.el.size = Math.max(7, s.size * rs);
+        }
       } else {
         this.group.w = cw;
         this.group.h = ch;

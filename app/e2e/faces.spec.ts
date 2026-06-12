@@ -8,6 +8,7 @@ import {
   faceElementCenter,
   groupExpandButton,
   settleFrames,
+  TILE_TITLE_H,
 } from './util';
 
 /**
@@ -265,5 +266,84 @@ test('AI face: copy spec opens paste box; pasted kkface reply fills the draft', 
   const knob = face!.elements.find((e) => e.kind === 'knob' && e.moduleId);
   expect(knob?.moduleId).toBe(ids.synth);
   expect(knob?.paramId).toBe('cutoff');
+  expect(errors).toEqual([]);
+});
+
+test('resizing a faced tile scales its elements; shrink stops at the usable floor', async ({ page }) => {
+  // The grown tile's SE corner must stay inside the viewport to be draggable.
+  await page.setViewportSize({ width: 1800, height: 1200 });
+  const errors = captureErrors(page);
+  const ids = await start(page);
+  const groupId = await makeGroup(page, ids);
+
+  // Designed face: a knob, a wide meter, and a deliberately small label —
+  // the label's usable floor (10 px) is what should stop the shrink.
+  await page.evaluate(
+    ({ g, synth }) => {
+      window.__kk.setGroupFace(g, {
+        width: 320,
+        height: 220,
+        grid: 10,
+        snap: true,
+        elements: [
+          { id: 'k1', kind: 'knob', x: 40, y: 40, w: 70, h: 86, moduleId: synth, paramId: 'cutoff' },
+          { id: 'm1', kind: 'meter', x: 140, y: 160, w: 160, h: 16, moduleId: synth },
+          { id: 's1', kind: 'label', x: 280, y: 20, w: 20, h: 12, text: 'hi', size: 11 },
+        ],
+      });
+    },
+    { g: groupId, synth: ids.synth },
+  );
+
+  const readFace = () =>
+    page.evaluate((g) => {
+      const f = window.__kk.graph.groups.get(g)!.face!;
+      return { width: f.width, height: f.height, elements: f.elements.map((e) => ({ ...e })) };
+    }, groupId);
+
+  /** Drag the tile's SE resize corner by (dx, dy) client px. */
+  const dragSeCorner = async (dx: number, dy: number) => {
+    await settleFrames(page);
+    const pt = (await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), groupId))!;
+    const f = await readFace();
+    const cx = pt.x + f.width - 3;
+    const cy = pt.y + TILE_TITLE_H + f.height - 3;
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    // Clamp the destination inside the viewport — offscreen moves are dropped.
+    await page.mouse.move(Math.max(2, cx + dx), Math.max(2, cy + dy), { steps: 8 });
+    await page.mouse.up();
+    await settleFrames(page);
+  };
+
+  // Grow: elements scale and space out with the face (relative layout holds).
+  const before = await readFace();
+  await dragSeCorner(140, 100);
+  const grown = await readFace();
+  expect(grown.width).toBeGreaterThan(before.width + 100);
+  expect(grown.height).toBeGreaterThan(before.height + 70);
+  for (let i = 0; i < before.elements.length; i++) {
+    const a = before.elements[i];
+    const b = grown.elements[i];
+    expect(b.x / grown.width).toBeCloseTo(a.x / before.width, 2);
+    expect(b.w / grown.width).toBeCloseTo(a.w / before.width, 2);
+    expect(b.y / grown.height).toBeCloseTo(a.y / before.height, 2);
+    expect(b.h / grown.height).toBeCloseTo(a.h / before.height, 2);
+    // Everything stays inside the face area.
+    expect(b.x + b.w).toBeLessThanOrEqual(grown.width + 0.5);
+    expect(b.y + b.h).toBeLessThanOrEqual(grown.height + 0.5);
+  }
+
+  // Shrink hard: stops where the smallest element (label, 20 px wide at the
+  // 320 px design width) would drop below 10 px — face floor 160 px, not 120.
+  await dragSeCorner(-800, -800);
+  const shrunk = await readFace();
+  expect(shrunk.width).toBeGreaterThan(155);
+  expect(shrunk.width).toBeLessThan(168);
+  for (const el of shrunk.elements) {
+    expect(Math.min(el.w, el.h)).toBeGreaterThanOrEqual(9.5);
+    expect(el.x + el.w).toBeLessThanOrEqual(shrunk.width + 0.5);
+    expect(el.y + el.h).toBeLessThanOrEqual(shrunk.height + 0.5);
+  }
   expect(errors).toEqual([]);
 });
