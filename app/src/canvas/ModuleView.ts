@@ -302,6 +302,9 @@ export class ModuleView extends Container {
       style: { fontSize: 12, fill: theme.text, fontWeight: 'bold' },
     });
     title.position.set(8, 5);
+    // Let title-bar clicks fall through to the body (drag, double-click) —
+    // group tiles do the same.
+    title.eventMode = 'none';
     this.addChild(title);
 
     // Composer: group-tile-style title-bar toggle — ⛶ opens the roll in
@@ -340,6 +343,24 @@ export class ModuleView extends Container {
     this.body.eventMode = 'static';
     this.body.cursor = 'grab';
     this.body.on('pointerdown', (e) => this.handlers.onBodyDown(this, e));
+    // Containers: double-click the title bar toggles the grown in-place
+    // editor ↔ compact tile — the same gesture as group tiles (PRD §6).
+    const toggle = this.containerToggle();
+    if (toggle) {
+      // Manual double-tap timer (GroupView pattern): native e.detail keeps
+      // counting past 2 across rapid successive double-clicks.
+      let lastTap = 0;
+      this.body.on('pointertap', (e) => {
+        if (this.toLocal(e.global).y > TITLE_H) return;
+        const now = performance.now();
+        if (now - lastTap < 350) {
+          lastTap = 0;
+          toggle();
+        } else {
+          lastTap = now;
+        }
+      });
+    }
     this.body.on('pointerover', (e) =>
       this.tooltip.show(
         [this.instance.label ?? this.def.name, this.def.description],
@@ -348,6 +369,23 @@ export class ModuleView extends Container {
       ),
     );
     this.body.on('pointerout', () => this.tooltip.hide());
+  }
+
+  /** Open ↔ shrink action for container tiles (null = not a container). */
+  private containerToggle(): (() => void) | null {
+    const id = this.instance.id;
+    if (this.instance.type === 'composer') {
+      return () =>
+        appState.composerOpen.has(id) ? appState.closeComposer(id) : appState.openComposer(id);
+    }
+    if (this.instance.type === 'visualizer') {
+      return () => {
+        if (appState.visualizerOpen === id) appState.closeVisualizer();
+        else if (appState.visEditorOpen === id) appState.closeVisEditor();
+        else appState.openVisualizer(id);
+      };
+    }
+    return null;
   }
 
   private buildPorts(): void {
@@ -936,6 +974,10 @@ export class ModuleView extends Container {
     }
     if (type === 'modmatrix') {
       this.buildModMatrixFace(x, top, w);
+      return;
+    }
+    if (type === 'intelligence') {
+      this.buildIntelligenceFace(x, top, w);
       return;
     }
 
@@ -1699,6 +1741,58 @@ export class ModuleView extends Container {
       gp.y + this.h * s > 0 &&
       gp.y < window.innerHeight
     );
+  }
+
+  /**
+   * TODO(intelligence): placeholder face only. One mock "AI prompt window"
+   * row appears per wired input type; nothing generates yet. Planned: each
+   * row opens an input-aware prompt panel (audio → analysis, notes → MIDI
+   * generation, text → lyrics/visual prompts, visual → scene edits) through
+   * the shared buildAiContext() pipeline, plus matching output ports.
+   */
+  private buildIntelligenceFace(x: number, y: number, w: number): void {
+    const wired = this.def.ports.filter(
+      (p) =>
+        p.direction === 'in' &&
+        [...appState.graph.wires.values()].some(
+          (wr) => wr.to.moduleId === this.instance.id && wr.to.portId === p.id,
+        ),
+    );
+
+    if (wired.length === 0) {
+      const hint = new Text({
+        text: '🤖 Wire any signal in —\na matching AI prompt\nwindow appears here.',
+        style: { fontSize: 11, fill: theme.textDim, lineHeight: 17 },
+      });
+      hint.position.set(x, y + 6);
+      this.addChild(hint);
+      return;
+    }
+
+    let py = y + 2;
+    const rowH = 40;
+    for (const p of wired) {
+      if (py + rowH > this.h - 12) break; // stretch the tile for more rows
+      const g = new Graphics();
+      g.roundRect(x, py, w, rowH - 6, 6)
+        .fill({ color: 0x000000, alpha: 0.2 })
+        .stroke({ width: 1, color: theme.moduleStroke });
+      g.circle(x + 12, py + (rowH - 6) / 2, 4).fill(PORT_TYPE_COLORS[p.type]);
+      this.addChild(g);
+      const label = new Text({
+        text: `${p.label} prompt`,
+        style: { fontSize: 11, fontWeight: '700', fill: theme.text },
+      });
+      label.position.set(x + 24, py + 5);
+      this.addChild(label);
+      const stub = new Text({
+        text: '✨ Describe what to generate… (coming soon)',
+        style: { fontSize: 9, fill: theme.textDim },
+      });
+      stub.position.set(x + 24, py + 19);
+      this.addChild(stub);
+      py += rowH;
+    }
   }
 
   /**

@@ -245,6 +245,34 @@ const visualizer: ModuleDef = {
   height: 280,
 };
 
+// TODO(intelligence): placeholder module — the face shows one AI prompt
+// window per wired input type, but nothing is generated yet. Planned: each
+// prompt drives an input-aware AI flow (audio → analysis/description, notes →
+// MIDI generation, text → lyrics/visual prompts, visual → scene edits…) via
+// the shared buildAiContext() pipeline, plus matching output ports.
+const intelligence: ModuleDef = {
+  type: 'intelligence',
+  name: 'Intelligence',
+  category: 'data',
+  description:
+    'AI hub — wire any signal in and a matching AI prompt window appears inside. ' +
+    'Placeholder: prompts are mocked, generation is not implemented yet.',
+  ports: [
+    { id: 'in', label: 'Audio', type: 'audio', direction: 'in', description: 'Audio for AI analysis prompts; multiple wires are summed.' },
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note events for AI melody/harmony prompts.' },
+    { id: 'mod', label: 'Mod', type: 'control', direction: 'in', description: 'Control signal for AI modulation prompts.' },
+    { id: 'trig', label: 'Trig', type: 'trigger', direction: 'in', description: 'Trigger pulses for AI event prompts.' },
+    { id: 'clock', label: 'Clock', type: 'transport', direction: 'in', description: 'Transport clock for AI timing-aware prompts.' },
+    { id: 'color', label: 'Color', type: 'color', direction: 'in', description: 'Live color for AI palette prompts.' },
+    { id: 'text', label: 'Text', type: 'text', direction: 'in', description: 'Text stream (lyrics, speech) for AI text prompts.' },
+    { id: 'vin', label: 'Visual', type: 'visual', direction: 'in', description: 'Rendered frame for AI visual prompts.' },
+  ],
+  params: [],
+  customFace: true,
+  width: 280,
+  height: 240,
+};
+
 export const COLOR_MODES = ['rainbow', 'pulse', 'flash', 'random', 'spectrum', 'vu', 'breathe', 'strobe'] as const;
 export const COLOR_SYNCS = ['off', '1/4', '1/2', '1 bar', '2 bars', '4 bars'] as const;
 
@@ -1122,6 +1150,6 @@ export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
     voice, osc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
     mixer, recorder, audioOut, levels, visualizer, colorgen,
-    stt, transporttext, textinput, notenames,
+    stt, transporttext, textinput, notenames, intelligence,
   ].map((d) => [d.type, d]),
 );

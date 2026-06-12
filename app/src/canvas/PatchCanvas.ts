@@ -114,7 +114,14 @@ export class PatchCanvas {
 
     window.addEventListener('keydown', (e) => this.onKeyDown(e));
 
-    appState.on('graphChanged', () => this.syncViews());
+    appState.on('graphChanged', () => {
+      this.syncViews();
+      // TODO(intelligence): placeholder face lists wired inputs — refresh on
+      // wire changes (syncViews only adds/removes whole tiles).
+      for (const v of this.views.values()) {
+        if (v.instance.type === 'intelligence') v.rebuild();
+      }
+    });
     appState.on('projectLoaded', () => this.rebuildAll());
     appState.on('composerChanged', () => {
       // Open/shrink resizes the composer tile (state mutates instance.w/h).

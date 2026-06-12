@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { boot, captureErrors, clearPatch, settleFrames } from './util';
+import { boot, captureErrors, classicRig, clearPatch, settleFrames } from './util';
 
 test('palette search filters modules', async ({ page }) => {
   await boot(page);
@@ -137,4 +137,82 @@ test('container tiles (composer, visualizer) stretch beyond the 3× cap', async 
   // Non-container tiles keep the 3× sanity cap.
   expect(sizes.knob.w).toBeLessThan(4000);
   expect(sizes.knob.h).toBeLessThan(3000);
+});
+
+test('double-clicking a container title bar toggles open ↔ shrink', async ({ page }) => {
+  await boot(page);
+  // Empty canvas so the collision resolver can't shift tiles between the
+  // two clicks of a double-click.
+  await clearPatch(page);
+  const ids = await page.evaluate(() => {
+    const s = window.__kk;
+    const comp = s.addModule('composer', 600, 400);
+    const vis = s.addModule('visualizer', 1400, 400);
+    return { comp: comp.id, vis: vis.id };
+  });
+
+  const dblOnTitle = async (id: string, until: () => Promise<boolean>) => {
+    // Canvas hit areas lag tile rebuilds — retry like clickUntil.
+    for (let i = 0; i < 8; i++) {
+      // Pan the tile's TOP edge to a fixed spot clear of the app toolbar —
+      // grown container tiles are taller than the viewport center allows.
+      await page.evaluate((mid) => {
+        const c = window.__kkCanvas;
+        const r = c.clientRectFor(mid);
+        if (r) c.panBy(400 - r.left, 150 - r.top);
+      }, id);
+      await settleFrames(page, 4);
+      const r = await page.evaluate((mid) => window.__kkCanvas.clientRectFor(mid), id);
+      if (r) await page.mouse.dblclick(r.left + 60 * r.scale, r.top + 12 * r.scale);
+      await settleFrames(page, 2);
+      if (await until()) return;
+    }
+    expect(await until()).toBe(true);
+  };
+
+  // Composer: title dblclick opens the piano roll, again shrinks it.
+  await dblOnTitle(ids.comp, () =>
+    page.evaluate((id) => window.__kk.composerOpen.has(id), ids.comp),
+  );
+  await dblOnTitle(ids.comp, () =>
+    page.evaluate((id) => !window.__kk.composerOpen.has(id), ids.comp),
+  );
+
+  // Visualizer: title dblclick opens the big view, again shrinks it.
+  await dblOnTitle(ids.vis, () =>
+    page.evaluate((id) => window.__kk.visualizerOpen === id, ids.vis),
+  );
+  await expect(page.locator('.vis-overlay')).toBeVisible();
+  await dblOnTitle(ids.vis, () =>
+    page.evaluate(() => window.__kk.visualizerOpen === null),
+  );
+  await expect(page.locator('.vis-overlay')).toBeHidden();
+});
+
+test('intelligence module accepts every input type (placeholder face)', async ({ page }) => {
+  const errors = captureErrors(page);
+  await boot(page);
+  const rig = await classicRig(page);
+  const result = await page.evaluate((synthId) => {
+    const s = window.__kk;
+    const ai = s.addModule('intelligence', 800, 600);
+    const seq = s.addModule('sequencer', 300, 700);
+    const lfo = s.addModule('lfo', 300, 1000);
+    const text = s.addModule('textinput', 300, 1300);
+    const vis = s.addModule('visualizer', 300, 1600);
+    const color = s.addModule('colorgen', 300, 1900);
+    return {
+      ports: [
+        s.connect({ moduleId: synthId, portId: 'out' }, { moduleId: ai.id, portId: 'in' }).ok,
+        s.connect({ moduleId: seq.id, portId: 'notes' }, { moduleId: ai.id, portId: 'notes' }).ok,
+        s.connect({ moduleId: lfo.id, portId: 'out' }, { moduleId: ai.id, portId: 'mod' }).ok,
+        s.connect({ moduleId: text.id, portId: 'out' }, { moduleId: ai.id, portId: 'text' }).ok,
+        s.connect({ moduleId: vis.id, portId: 'vout' }, { moduleId: ai.id, portId: 'vin' }).ok,
+        s.connect({ moduleId: color.id, portId: 'out' }, { moduleId: ai.id, portId: 'color' }).ok,
+      ],
+    };
+  }, rig.synth);
+  expect(result.ports).toEqual([true, true, true, true, true, true]);
+  await settleFrames(page, 5);
+  expect(errors).toEqual([]);
 });
