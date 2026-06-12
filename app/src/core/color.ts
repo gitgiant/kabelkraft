@@ -1,7 +1,6 @@
 /**
- * Color math for the dynamic color system (color wires, Color Gen module).
- * Colors travel as packed 24-bit RGB ints; generation happens in HSL.
- * The worklet duplicates hslToRgbInt — keep the formulas in sync.
+ * Color math for the dynamic tint system (frame-derived UI tints).
+ * Colors travel as packed 24-bit RGB ints; adjustments happen in HSL.
  */
 
 /** HSL (all 0–1) → packed 24-bit RGB. */

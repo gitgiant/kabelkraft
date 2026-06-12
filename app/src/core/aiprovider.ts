@@ -15,8 +15,10 @@ import { MODULE_DEFS } from './registry';
 import { generateSpecPack } from './aispec';
 import { parseKkGroup } from './aiimport';
 import { MIDI_SPEC, parseKkMidi } from './aimidi';
+import { generateFaceSpecPack, parseKkFace } from './aiface';
 import { generateProjectSpecPack, parseKkProject } from './aiproject';
 import { generateVisualSpecPack, parseKkVis } from './aivisual';
+import type { Graph } from './graph';
 
 export type ProviderKind = 'none' | 'claude' | 'local';
 
@@ -243,6 +245,30 @@ export function generateVisual(
     'visual graph',
     (text) => {
       const r = parseKkVis(text);
+      return { ok: r.ok, errors: r.errors };
+    },
+    userPrompt,
+    settings,
+    maxAttempts,
+    onProgress,
+  );
+}
+
+/** Face flavour: design a front panel for an existing group — the group's
+ * live modules ride along in the spec, so bindings need no remap. */
+export function generateFace(
+  graph: Graph,
+  groupId: string,
+  userPrompt: string,
+  settings: AiSettings,
+  maxAttempts = 3,
+  onProgress?: (status: string) => void,
+): Promise<GenerateResult> {
+  return generateWithSpec(
+    generateFaceSpecPack(graph, groupId),
+    'module face',
+    (text) => {
+      const r = parseKkFace(text, graph, groupId);
       return { ok: r.ok, errors: r.errors };
     },
     userPrompt,

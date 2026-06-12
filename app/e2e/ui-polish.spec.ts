@@ -178,15 +178,16 @@ test('double-clicking a container title bar toggles open ↔ shrink', async ({ p
     page.evaluate((id) => !window.__kk.composerOpen.has(id), ids.comp),
   );
 
-  // Visualizer: title dblclick opens the big view, again shrinks it.
+  // Visualizer: title dblclick opens the graph editor in-tile, again shrinks
+  // back to the compact container (big view keeps its ⛶ button).
   await dblOnTitle(ids.vis, () =>
-    page.evaluate((id) => window.__kk.visualizerOpen === id, ids.vis),
+    page.evaluate((id) => window.__kk.visEditorOpen === id, ids.vis),
   );
-  await expect(page.locator('.vis-overlay')).toBeVisible();
+  await expect(page.locator('.vised')).toBeVisible();
   await dblOnTitle(ids.vis, () =>
-    page.evaluate(() => window.__kk.visualizerOpen === null),
+    page.evaluate(() => window.__kk.visEditorOpen === null),
   );
-  await expect(page.locator('.vis-overlay')).toBeHidden();
+  await expect(page.locator('.vised')).toBeHidden();
 });
 
 test('intelligence module accepts every input type (placeholder face)', async ({ page }) => {
@@ -200,7 +201,6 @@ test('intelligence module accepts every input type (placeholder face)', async ({
     const lfo = s.addModule('lfo', 300, 1000);
     const text = s.addModule('textinput', 300, 1300);
     const vis = s.addModule('visualizer', 300, 1600);
-    const color = s.addModule('colorgen', 300, 1900);
     return {
       ports: [
         s.connect({ moduleId: synthId, portId: 'out' }, { moduleId: ai.id, portId: 'in' }).ok,
@@ -208,11 +208,43 @@ test('intelligence module accepts every input type (placeholder face)', async ({
         s.connect({ moduleId: lfo.id, portId: 'out' }, { moduleId: ai.id, portId: 'mod' }).ok,
         s.connect({ moduleId: text.id, portId: 'out' }, { moduleId: ai.id, portId: 'text' }).ok,
         s.connect({ moduleId: vis.id, portId: 'vout' }, { moduleId: ai.id, portId: 'vin' }).ok,
-        s.connect({ moduleId: color.id, portId: 'out' }, { moduleId: ai.id, portId: 'color' }).ok,
       ],
     };
   }, rig.synth);
-  expect(result.ports).toEqual([true, true, true, true, true, true]);
+  expect(result.ports).toEqual([true, true, true, true, true]);
   await settleFrames(page, 5);
   expect(errors).toEqual([]);
+});
+
+test('auto-wire button chains the selected modules left-to-right', async ({ page }) => {
+  await boot(page);
+  await clearPatch(page);
+
+  const wireBtn = page.locator('.toolbar button.auto-wire');
+  await expect(wireBtn).toBeDisabled();
+
+  await page.evaluate(() => {
+    const s = window.__kk;
+    const kb = s.addModule('keyboard', 300, 400);
+    const smpl = s.addModule('smpl', 700, 400);
+    const out = s.addModule('audioOut', 1100, 400);
+    s.select({ moduleId: kb.id });
+    s.addToSelection({ moduleId: smpl.id });
+    s.addToSelection({ moduleId: out.id });
+  });
+  await expect(wireBtn).toBeEnabled();
+
+  await wireBtn.click();
+  const wires = await page.evaluate(() =>
+    [...window.__kk.graph.wires.values()].map((w) => w.type).sort(),
+  );
+  expect(wires).toEqual(['audio', 'note']);
+
+  // Idempotent: every matching port is taken now, second click adds nothing.
+  await wireBtn.click();
+  expect(await page.evaluate(() => window.__kk.graph.wires.size)).toBe(2);
+
+  // One undo step removes the whole auto-wire batch.
+  await page.evaluate(() => window.__kk.undo());
+  expect(await page.evaluate(() => window.__kk.graph.wires.size)).toBe(0);
 });

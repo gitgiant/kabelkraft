@@ -103,11 +103,34 @@ export interface ContainerFrame {
   upstream: ContainerFrame[];
 }
 
+// -- derived tint -------------------------------------------------------------
+// The UI tint system averages a container's rendered frame into one RGB value
+// (group tint poles / module tint ports). A small linear-tap downsample pass
+// renders the final frame into a TINT_DS² grid, copies it to a mappable
+// buffer, and averages on the CPU after an async map — no pipeline stall.
+
+const TINT_DS = 16;
+const TINT_INTERVAL_MS = 66; // ~15 Hz; consumers smooth, so steps don't show
+const TINT_ROW_BYTES = 256; // copyTextureToBuffer minimum row alignment
+const CLEAR_RGB_INT = (0x0c << 16) | (0x0c << 8) | 0x12;
+
+/** Per-container throttle, shared across views so duplicates don't double-sample. */
+const lastTintAt = new Map<string, number>();
+
 export class ContainerRenderer {
   private pool: TexturePool;
   private states = new NodeStateStore();
   private readonly t0 = performance.now();
   private lastTime = 0;
+
+  /** UI hook: should this container's frame be averaged into a tint? */
+  static tintWanted: ((id: string) => boolean) | null = null;
+  /** UI hook: receives the averaged frame color (packed 24-bit RGB). */
+  static tintSink: ((id: string, rgb: number) => void) | null = null;
+
+  private tintTex: GPUTexture | null = null;
+  private tintBuf: GPUBuffer | null = null;
+  private tintPending = false;
 
   private constructor(
     private readonly device: GPUDevice,
@@ -229,15 +252,111 @@ export class ContainerRenderer {
       pass.end();
     }
 
+    // Derived tint: encode the downsample+copy into the same submission.
+    let tintEncoded = false;
+    if (
+      ContainerRenderer.tintWanted?.(frame.id) &&
+      !this.tintPending &&
+      performance.now() - (lastTintAt.get(frame.id) ?? 0) >= TINT_INTERVAL_MS
+    ) {
+      lastTintAt.set(frame.id, performance.now());
+      if (final) {
+        this.encodeTintSample(env.encoder, final);
+        tintEncoded = true;
+      } else {
+        // Nothing wired to Output — the canvas shows the clear color.
+        ContainerRenderer.tintSink?.(frame.id, CLEAR_RGB_INT);
+      }
+    }
+
     this.device.queue.submit([env.encoder.finish()]);
+    if (tintEncoded) this.resolveTintSample(frame.id);
     this.pool.endFrame();
     this.states.prune(liveKeys);
     framesRendered++;
+  }
+
+  /** Downsample the final frame into a TINT_DS² grid and queue a buffer copy. */
+  private encodeTintSample(encoder: GPUCommandEncoder, final: GPUTexture): void {
+    this.tintTex ??= this.device.createTexture({
+      size: { width: TINT_DS, height: TINT_DS },
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+    this.tintBuf ??= this.device.createBuffer({
+      size: TINT_ROW_BYTES * TINT_DS,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    // The blit shader (over-background composite) at low resolution: linear
+    // taps make each output texel a small average of the frame.
+    const pipeline = fullscreenPipeline(this.device, 'blit', BLIT_FS, 'rgba8unorm');
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [
+        { view: this.tintTex.createView(), clearValue: CLEAR, loadOp: 'clear', storeOp: 'store' },
+      ],
+    });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(
+      0,
+      this.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: sharedSampler(this.device) },
+          { binding: 1, resource: final.createView() },
+        ],
+      }),
+    );
+    pass.draw(3);
+    pass.end();
+    encoder.copyTextureToBuffer(
+      { texture: this.tintTex },
+      { buffer: this.tintBuf, bytesPerRow: TINT_ROW_BYTES },
+      { width: TINT_DS, height: TINT_DS },
+    );
+  }
+
+  /** Async map → average → sink. Never stalls the render path. */
+  private resolveTintSample(id: string): void {
+    const buf = this.tintBuf;
+    if (!buf) return;
+    this.tintPending = true;
+    buf
+      .mapAsync(GPUMapMode.READ)
+      .then(() => {
+        const data = new Uint8Array(buf.getMappedRange());
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        for (let y = 0; y < TINT_DS; y++) {
+          const row = y * TINT_ROW_BYTES;
+          for (let x = 0; x < TINT_DS; x++) {
+            const px = row + x * 4;
+            r += data[px];
+            g += data[px + 1];
+            b += data[px + 2];
+          }
+        }
+        buf.unmap();
+        const n = TINT_DS * TINT_DS;
+        const rgb =
+          (Math.round(r / n) << 16) | (Math.round(g / n) << 8) | Math.round(b / n);
+        ContainerRenderer.tintSink?.(id, rgb);
+      })
+      .catch(() => {
+        // Device loss / destroyed buffer — drop the sample.
+      })
+      .finally(() => {
+        this.tintPending = false;
+      });
   }
 
   /** Release GPU resources (stops webcam tracks via node-state disposal). */
   destroy(): void {
     this.states.destroy();
     this.pool.destroy();
+    this.tintTex?.destroy();
+    if (!this.tintPending) this.tintBuf?.destroy();
+    this.tintTex = null;
+    this.tintBuf = null;
   }
 }

@@ -19,7 +19,6 @@ import {
   type SeqStep,
 } from '../core/registry';
 import { clipFromData } from '../core/composer';
-import { hexToRgbInt, hslToRgbInt, rgbIntToHex, rgbIntToHsl } from '../core/color';
 import { bandCoefs, biquadResponseDb, chainResponseDb, vcfCoefs } from '../core/eqmath';
 import { appState } from '../state';
 import { theme } from '../theme';
@@ -74,6 +73,22 @@ function visThumb(moduleId: string, aspect: number): VisThumb {
   return t;
 }
 
+/** Keep a tint source rendering while its tile is hidden (collapsed group) —
+ * otherwise the derived tint would freeze at its last sampled color. */
+const hiddenTintTick = new Map<string, number>();
+
+export function tickHiddenTintSource(moduleId: string): void {
+  const now = performance.now();
+  if (now - (hiddenTintTick.get(moduleId) ?? 0) < 66) return;
+  hiddenTintTick.set(moduleId, now);
+  const thumb = visThumb(moduleId, 0.66);
+  if (!thumb.renderer) return;
+  const frame = appState.visFrame(moduleId);
+  if (frame && graphSupported(frame.graph)) {
+    thumb.renderer.render(frame);
+  }
+}
+
 /** Minimal HSL→hex for particle colors. */
 export function hslToHex(h: number, s: number, l: number): number {
   const a = s * Math.min(l, 1 - l);
@@ -90,6 +105,7 @@ function noteName(pitch: number): string {
 
 export const PORT_RADIUS = 7;
 const TITLE_H = 24;
+export { TITLE_H as MODULE_TITLE_H };
 /** Minimum knob-grid cell width / nominal fixed-band cell height. */
 const CELL_W = 64;
 const CELL_H = 60;
@@ -157,7 +173,7 @@ export class ModuleView extends Container {
   private ctrlRedraws: Array<() => void> = [];
   /** Control centers by param id — e2e and tools aim pointers with this. */
   private paramAnchors = new Map<string, { x: number; y: number }>();
-  /** Live tint from an incoming color wire (packed RGB); null = none. */
+  /** Resolved live tint (packed RGB); null = default accent. */
   private liveColor: number | null = null;
 
   /** Faces whose fixed layout cannot shrink below the def's default size. */
@@ -168,6 +184,9 @@ export class ModuleView extends Container {
     readonly def: ModuleDef,
     private handlers: PortHandlers,
     private tooltip: Tooltip,
+    /** Headless: face-view embed — tile face only (no title buttons, ports,
+     * resize, body drag); double-click runs onOpen instead. */
+    private opts: { headless?: boolean; onOpen?: () => void } = {},
   ) {
     super();
     this.position.set(instance.x, instance.y);
@@ -199,6 +218,8 @@ export class ModuleView extends Container {
   /** While the piano roll is open inside a composer, the tile can't shrink
    * below a usable editor size (shrink via the title-bar toggle instead). */
   private rollMin(base: number): number {
+    // Embeds must not grow when the roll opens — the overlay pins to them as-is.
+    if (this.opts.headless) return 0;
     if (this.instance.type !== 'composer' || !appState.composerOpen.has(this.instance.id)) return 0;
     return base === this.def.width ? 600 : 400;
   }
@@ -244,18 +265,49 @@ export class ModuleView extends Container {
     this.sampleNameText = null;
     this.stepGrid = null;
     this.lastDrawnStep = -1;
-    this.colorPrevG = null;
-    this.lastPrevColor = -2;
 
     this.body = new Graphics();
     this.addChild(this.body);
     this.drawBody(this.selected);
+    if (this.opts.headless) {
+      this.buildHeadlessBody();
+      this.buildFace();
+      return;
+    }
     // Handles sit just above the body so ports/face/title (added next) win hit
     // priority in their bands, while the handles still beat body-drag on edges.
     this.mountResizeHandles();
     this.buildTitle();
     this.buildPorts();
     this.buildFace();
+  }
+
+  /** Headless body: swallows drags (the group tile underneath must not move
+   * from inside the view) and double-taps into the target's editor. */
+  private buildHeadlessBody(): void {
+    this.body.eventMode = 'static';
+    this.body.cursor = this.opts.onOpen ? 'pointer' : 'default';
+    let lastTap = 0;
+    this.body.on('pointertap', () => {
+      const now = performance.now();
+      if (now - lastTap < 350) {
+        lastTap = 0;
+        this.opts.onOpen?.();
+      } else {
+        lastTap = now;
+      }
+    });
+    this.body.on('pointerover', (e) =>
+      this.tooltip.show(
+        [
+          this.instance.label ?? this.def.name,
+          this.opts.onOpen ? 'Live view — double-click to open.' : 'Live view.',
+        ],
+        e.clientX,
+        e.clientY,
+      ),
+    );
+    this.body.on('pointerout', () => this.tooltip.hide());
   }
 
   private drawBody(selected: boolean): void {
@@ -276,6 +328,7 @@ export class ModuleView extends Container {
     if (stripe !== undefined) {
       this.body.rect(0, TITLE_H, w, 3).fill(stripe);
     }
+    if (this.opts.headless) return; // no resize affordance on embeds
     // Resize grip glyph (se corner) — discoverability for the all-sides handles.
     this.body.moveTo(w - 13, h - 4).lineTo(w - 4, h - 13)
       .stroke({ width: 1.5, color: theme.textDim, alpha: 0.8 });
@@ -283,7 +336,7 @@ export class ModuleView extends Container {
       .stroke({ width: 1.5, color: theme.textDim, alpha: 0.8 });
   }
 
-  /** Tint from an incoming color wire; redraws accent + body when it changes. */
+  /** Resolved tint (own tint port or enclosing group); redraws accents when it changes. */
   setLiveColor(color: number | null): void {
     if (color === this.liveColor) return;
     this.liveColor = color;
@@ -291,7 +344,7 @@ export class ModuleView extends Container {
     this.refreshParams();
   }
 
-  /** Accent for controller faces: the live color wire, else the type color. */
+  /** Accent for control visuals: the resolved tint, else the control type color. */
   private accent(): number {
     return this.liveColor ?? PORT_TYPE_COLORS.control;
   }
@@ -379,10 +432,12 @@ export class ModuleView extends Container {
         appState.composerOpen.has(id) ? appState.closeComposer(id) : appState.openComposer(id);
     }
     if (this.instance.type === 'visualizer') {
+      // Title bar dblclick targets the graph editor (in-tile, like the
+      // composer's piano roll); the big display view keeps its ⛶ button.
       return () => {
-        if (appState.visualizerOpen === id) appState.closeVisualizer();
-        else if (appState.visEditorOpen === id) appState.closeVisEditor();
-        else appState.openVisualizer(id);
+        if (appState.visEditorOpen === id) appState.closeVisEditor();
+        else if (appState.visualizerOpen === id) appState.closeVisualizer();
+        else appState.openVisEditor(id);
       };
     }
     return null;
@@ -707,10 +762,10 @@ export class ModuleView extends Container {
       g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
       g.arc(cx, cy, r, a0, a1).stroke({ width: 3, color: theme.inset });
       g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
-      g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: PORT_TYPE_COLORS.control });
+      g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: this.accent() });
       g.moveTo(cx + Math.cos(av) * r * 0.25, cy + Math.sin(av) * r * 0.25)
         .lineTo(cx + Math.cos(av) * r * 0.66, cy + Math.sin(av) * r * 0.66)
-        .stroke({ width: 2, color: theme.text });
+        .stroke({ width: 2, color: this.accent() });
       value.text = this.formatCtrl(c);
     };
     redraw();
@@ -776,12 +831,12 @@ export class ModuleView extends Container {
         const a = angleFor(i);
         g.moveTo(cx + Math.cos(a) * r * 0.92, cy + Math.sin(a) * r * 0.92)
           .lineTo(cx + Math.cos(a) * r * 1.15, cy + Math.sin(a) * r * 1.15)
-          .stroke({ width: 2, color: i === idx ? PORT_TYPE_COLORS.control : theme.moduleStroke });
+          .stroke({ width: 2, color: i === idx ? this.accent() : theme.moduleStroke });
       }
       const av = angleFor(idx);
       g.moveTo(cx + Math.cos(av) * r * 0.2, cy + Math.sin(av) * r * 0.2)
         .lineTo(cx + Math.cos(av) * r * 0.66, cy + Math.sin(av) * r * 0.66)
-        .stroke({ width: 2.5, color: theme.text });
+        .stroke({ width: 2.5, color: this.accent() });
       value.text = opts[idx] ?? '';
     };
     redraw();
@@ -852,7 +907,7 @@ export class ModuleView extends Container {
       const n = Math.min(1, Math.max(0, this.ctrlNorm(c, c.get())));
       g.clear();
       g.roundRect(x, y, w, h, 4).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
-      g.roundRect(x, y + h * (1 - n), w, h * n, 4).fill(PORT_TYPE_COLORS.control);
+      g.roundRect(x, y + h * (1 - n), w, h * n, 4).fill(this.accent());
       g.roundRect(x - 6, y + h * (1 - n) - 5, w + 12, 10, 3)
         .fill(theme.button)
         .stroke({ width: 1, color: theme.text });
@@ -966,10 +1021,6 @@ export class ModuleView extends Container {
     if (type === 'recorder') {
       this.buildRecorderFace(x, top + 4, w - 36);
       this.buildVMeter(this.w - 32, top + 12, 14, this.h - top - 26);
-      return;
-    }
-    if (type === 'colorgen') {
-      this.buildColorGenFace(x, top, w);
       return;
     }
     if (type === 'modmatrix') {
@@ -1280,7 +1331,7 @@ export class ModuleView extends Container {
     g.arc(cx, cy, 36, a0, av).stroke({ width: 4, color: this.accent() });
     g.moveTo(cx + Math.cos(av) * 10, cy + Math.sin(av) * 10)
       .lineTo(cx + Math.cos(av) * 26, cy + Math.sin(av) * 26)
-      .stroke({ width: 3, color: theme.text });
+      .stroke({ width: 3, color: this.accent() });
     if (this.ctrlText) this.ctrlText.text = this.ctrlScaledText();
   }
 
@@ -1497,75 +1548,6 @@ export class ModuleView extends Container {
     g.roundRect(r.x, r.y, r.w, r.h, 10)
       .fill(on ? this.accent() : theme.button)
       .stroke({ width: 2, color: on ? theme.text : theme.moduleStroke });
-  }
-
-  // -- Color Gen face: param grid + live preview + base/flash swatches -----------
-
-  private colorPrevG: Graphics | null = null;
-  private colorPrevRect = { x: 0, y: 0, w: 0, h: 0 };
-  private lastPrevColor = -2;
-
-  private buildColorGenFace(x: number, y: number, w: number): void {
-    const ctrls = this.def.params.map((p) => this.paramCtrl(p));
-    const band = this.ctrlBandH(ctrls.length, w);
-    this.buildCtrlGrid(ctrls, x, y, w, band);
-
-    // Live output strip, with the base/flash picker swatches on the right.
-    const py = y + band + 8;
-    const ph = Math.max(18, this.h - py - 14);
-    this.colorPrevRect = { x, y: py, w: w - 60, h: ph };
-    this.colorPrevG = new Graphics();
-    this.addChild(this.colorPrevG);
-    this.lastPrevColor = -2;
-
-    const buildSwatch = (
-      sx: number,
-      tip: string[],
-      get: () => number,
-      apply: (h: number, s: number) => void,
-    ) => {
-      const g = new Graphics();
-      const draw = () => {
-        g.clear();
-        g.roundRect(sx, py, 24, ph, 4).fill(get()).stroke({ width: 1, color: theme.moduleStroke });
-      };
-      draw();
-      this.ctrlRedraws.push(draw);
-      g.eventMode = 'static';
-      g.cursor = 'pointer';
-      g.on('pointerdown', (e) => {
-        e.stopPropagation();
-        const input = document.createElement('input');
-        input.type = 'color';
-        input.value = rgbIntToHex(get());
-        input.onchange = () => {
-          const { h, s } = rgbIntToHsl(hexToRgbInt(input.value));
-          appState.beginUndoable();
-          apply(h, s);
-          this.refreshParams();
-        };
-        input.click();
-      });
-      g.on('pointerover', (e) => this.tooltip.show(tip, e.clientX, e.clientY));
-      g.on('pointerout', () => this.tooltip.hide());
-      this.addChild(g);
-    };
-
-    buildSwatch(
-      x + w - 52,
-      ['Base color', 'Click to pick — writes the Hue/Sat params.'],
-      () => hslToRgbInt(this.instance.params.hue ?? 0.6, this.instance.params.sat ?? 0.85, 0.5),
-      (h, s) => {
-        appState.setParam(this.instance.id, 'hue', h);
-        appState.setParam(this.instance.id, 'sat', s);
-      },
-    );
-    buildSwatch(
-      x + w - 24,
-      ['Flash color', 'Click to pick — writes the Flash Hue param (flash mode).'],
-      () => hslToRgbInt(this.instance.params.hue2 ?? 0, this.instance.params.sat ?? 0.85, 0.5),
-      (h) => appState.setParam(this.instance.id, 'hue2', h),
-    );
   }
 
   // -- mixer face: channel faders + pan knobs ------------------------------------
@@ -2678,7 +2660,7 @@ export class ModuleView extends Container {
             cw - 6,
             barH,
             2,
-          ).fill(amt > 0 ? PORT_TYPE_COLORS.control : 0x52e07a);
+          ).fill(amt > 0 ? this.accent() : 0x52e07a);
         } else {
           g.circle(cx + cw / 2, cy + ch / 2, 1.5).fill(theme.textDim);
         }
@@ -2787,18 +2769,6 @@ export class ModuleView extends Container {
     }
     if (this.visG) this.drawVisScene();
     if (this.textFaceLine) this.updateTextFace();
-    if (this.colorPrevG) {
-      const cur = appState.colorValues[this.instance.id] ?? -1;
-      if (cur !== this.lastPrevColor) {
-        this.lastPrevColor = cur;
-        const r = this.colorPrevRect;
-        this.colorPrevG.clear();
-        this.colorPrevG
-          .roundRect(r.x, r.y, r.w, r.h, 5)
-          .fill(cur >= 0 ? cur : theme.inset)
-          .stroke({ width: 1, color: theme.moduleStroke });
-      }
-    }
     if (this.compG) {
       let pos = -1;
       if (appState.transport.playing) {

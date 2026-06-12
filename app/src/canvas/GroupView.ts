@@ -12,11 +12,25 @@ import type { ParamSpec } from '../core/module';
 import { PORT_TYPE_COLORS, type PortType } from '../core/types';
 import { appState } from '../state';
 import { nextGroupColor, theme } from '../theme';
-import { PORT_RADIUS } from './ModuleView';
+import { MODULE_TITLE_H, ModuleView, PORT_RADIUS, type PortHandlers } from './ModuleView';
 import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import type { Tooltip } from './Tooltip';
 
 const TITLE_H = 24;
+
+/** Headless embeds never wire ports — their port layer isn't built. */
+const NOOP_PORT_HANDLERS: PortHandlers = {
+  onPortDown: () => {},
+  onPortUp: () => {},
+  onBodyDown: () => {},
+};
+
+const NOOP_GROUP_HANDLERS: GroupHandlers = {
+  onPortDown: () => {},
+  onPortUp: () => {},
+  onBodyDown: () => {},
+  onToggleCollapse: () => {},
+};
 
 /** Data-URL → Texture cache for face backgrounds/images. */
 const faceTextures = new Map<string, Texture | 'loading'>();
@@ -70,9 +84,14 @@ export class GroupView extends Container {
     private boundaryPorts: BoundaryPort[],
     private handlers: GroupHandlers,
     private tooltip: Tooltip,
+    /** Headless: face-view sub-panel embed — faced tile only (no title
+     * buttons, ports, resize, body drag); double-click runs onOpen. */
+    private opts: { headless?: boolean; onOpen?: () => void } = {},
   ) {
     super();
-    if (group.collapsed) this.buildCollapsedTile();
+    // Headless embeds always render the faced tile, whatever the child's
+    // collapsed state on the (hidden) canvas.
+    if (group.collapsed || opts.headless) this.buildCollapsedTile();
     // Expanded frame is drawn by the canvas each tick (it must track member
     // positions); this view only renders the collapsed tile.
   }
@@ -89,6 +108,7 @@ export class GroupView extends Container {
     this.portCenters.clear();
     this.portDots.clear();
     this.liveDraws = [];
+    this.embedded = []; // instances are destroyed with the tile's children
 
     const face = this.group.face;
     const inputs = this.boundaryPorts.filter((p) => p.direction === 'in');
@@ -112,24 +132,48 @@ export class GroupView extends Container {
     body.roundRect(0, 0, w, TITLE_H, 10).fill(theme.groupTitle);
     body.rect(0, TITLE_H - 8, w, 8).fill(theme.groupTitle);
     body.eventMode = 'static';
-    body.cursor = 'grab';
-    body.on('pointerdown', (e) => this.handlers.onBodyDown(this, e));
-    // Double-click (tile anywhere; faced tiles: title bar only) expands — PRD §6.
-    let lastTap = 0;
-    body.on('pointertap', (e) => {
-      if (face && this.toLocal(e.global).y > TITLE_H) return;
-      const now = performance.now();
-      if (now - lastTap < 350) this.handlers.onToggleCollapse(this.group.id);
-      lastTap = now;
-    });
-    body.on('pointerover', (e) =>
-      this.tooltip.show(
-        [this.group.name, `Module group — ${appState.graph.modulesInGroup(this.group.id).size} modules. Double-click ${face ? 'the title bar' : ''} to open.`],
-        e.clientX,
-        e.clientY,
-      ),
-    );
-    body.on('pointerout', () => this.tooltip.hide());
+    if (this.opts.headless) {
+      // Sub-panel embed: swallow drags (the host tile must not move from
+      // inside the panel); double-tap drills into the child group.
+      body.cursor = this.opts.onOpen ? 'pointer' : 'default';
+      let lastTap = 0;
+      body.on('pointertap', () => {
+        const now = performance.now();
+        if (now - lastTap < 350) {
+          lastTap = 0;
+          this.opts.onOpen?.();
+        } else {
+          lastTap = now;
+        }
+      });
+      body.on('pointerover', (e) =>
+        this.tooltip.show(
+          [this.group.name, this.opts.onOpen ? 'Sub-panel — double-click to open the group.' : 'Sub-panel.'],
+          e.clientX,
+          e.clientY,
+        ),
+      );
+      body.on('pointerout', () => this.tooltip.hide());
+    } else {
+      body.cursor = 'grab';
+      body.on('pointerdown', (e) => this.handlers.onBodyDown(this, e));
+      // Double-click (tile anywhere; faced tiles: title bar only) expands — PRD §6.
+      let lastTap = 0;
+      body.on('pointertap', (e) => {
+        if (face && this.toLocal(e.global).y > TITLE_H) return;
+        const now = performance.now();
+        if (now - lastTap < 350) this.handlers.onToggleCollapse(this.group.id);
+        lastTap = now;
+      });
+      body.on('pointerover', (e) =>
+        this.tooltip.show(
+          [this.group.name, `Module group — ${appState.graph.modulesInGroup(this.group.id).size} modules. Double-click ${face ? 'the title bar' : ''} to open.`],
+          e.clientX,
+          e.clientY,
+        ),
+      );
+      body.on('pointerout', () => this.tooltip.hide());
+    }
     this.addChild(body);
 
     // Background image, stretched to the face area.
@@ -147,6 +191,52 @@ export class GroupView extends Container {
       if (faceTexture(face.bgAssetId, apply)) apply();
     }
 
+    if (!this.opts.headless) this.buildTileChrome(w);
+
+    if (face) {
+      for (const el of face.elements) this.buildFaceElement(el);
+    }
+    if (this.opts.headless) return; // no ports/resize on embeds
+
+    const place = (ports: BoundaryPort[], x: number) => {
+      ports.forEach((port, i) => {
+        const y = TITLE_H + 18 + i * 26;
+        this.portCenters.set(port.key, { x, y });
+        const dot = new Graphics();
+        this.drawDot(dot, port.type, false);
+        dot.position.set(x, y);
+        dot.eventMode = 'static';
+        dot.cursor = 'crosshair';
+        dot.hitArea = { contains: (px: number, py: number) => px * px + py * py < 20 * 20 };
+        dot.on('pointerdown', (e) => {
+          e.stopPropagation();
+          this.handlers.onPortDown(port.moduleId, port.portId, e);
+        });
+        dot.on('pointerup', (e) => {
+          e.stopPropagation();
+          this.handlers.onPortUp(port.moduleId, port.portId, e);
+        });
+        dot.on('pointerover', (e) => {
+          const mod = appState.graph.modules.get(port.moduleId);
+          this.tooltip.show(
+            [`${port.label} — ${port.type} ${port.direction}`, `Inside: ${mod?.label ?? mod?.type ?? port.moduleId}`],
+            e.clientX,
+            e.clientY,
+          );
+        });
+        dot.on('pointerout', () => this.tooltip.hide());
+        this.addChild(dot);
+        this.portDots.set(port.key, dot);
+      });
+    };
+    place(inputs, 0);
+    place(outputs, w);
+
+    this.mountResizeHandles();
+  }
+
+  /** Title text + title-bar buttons + color swatch (full tiles only). */
+  private buildTileChrome(w: number): void {
     const title = new Text({
       text: `▣ ${this.group.name}`,
       style: { fontSize: 12, fill: theme.text, fontWeight: 'bold' },
@@ -205,46 +295,6 @@ export class GroupView extends Container {
     swatch.on('pointerover', (e) => this.tooltip.show(['Recolor group', 'Click to cycle colors.'], e.clientX, e.clientY));
     swatch.on('pointerout', () => this.tooltip.hide());
     this.addChild(swatch);
-
-    if (face) {
-      for (const el of face.elements) this.buildFaceElement(el);
-    }
-
-    const place = (ports: BoundaryPort[], x: number) => {
-      ports.forEach((port, i) => {
-        const y = TITLE_H + 18 + i * 26;
-        this.portCenters.set(port.key, { x, y });
-        const dot = new Graphics();
-        this.drawDot(dot, port.type, false);
-        dot.position.set(x, y);
-        dot.eventMode = 'static';
-        dot.cursor = 'crosshair';
-        dot.hitArea = { contains: (px: number, py: number) => px * px + py * py < 20 * 20 };
-        dot.on('pointerdown', (e) => {
-          e.stopPropagation();
-          this.handlers.onPortDown(port.moduleId, port.portId, e);
-        });
-        dot.on('pointerup', (e) => {
-          e.stopPropagation();
-          this.handlers.onPortUp(port.moduleId, port.portId, e);
-        });
-        dot.on('pointerover', (e) => {
-          const mod = appState.graph.modules.get(port.moduleId);
-          this.tooltip.show(
-            [`${port.label} — ${port.type} ${port.direction}`, `Inside: ${mod?.label ?? mod?.type ?? port.moduleId}`],
-            e.clientX,
-            e.clientY,
-          );
-        });
-        dot.on('pointerout', () => this.tooltip.hide());
-        this.addChild(dot);
-        this.portDots.set(port.key, dot);
-      });
-    };
-    place(inputs, 0);
-    place(outputs, w);
-
-    this.mountResizeHandles();
   }
 
   // -- resize (all sides) ----------------------------------------------------
@@ -343,6 +393,14 @@ export class GroupView extends Container {
   /** Live-updating element redraws, run from the canvas ticker. */
   private liveDraws: Array<{ key: () => string; redraw: () => void; last: string }> = [];
 
+  /** Headless tile embeds ('view' elements: member modules or child-group
+   * sub-panels) + their tile-local rects. */
+  private embedded: Array<{
+    view: ModuleView | GroupView;
+    /** Tile-local rect + extra scale of the embedded tile (for overlay anchoring). */
+    rect: { x: number; y: number; scale: number };
+  }> = [];
+
   private boundParam(
     moduleId?: string,
     paramId?: string,
@@ -416,6 +474,11 @@ export class GroupView extends Container {
       x: dx * Math.cos(rotRad) + dy * Math.sin(rotRad),
       y: -dx * Math.sin(rotRad) + dy * Math.cos(rotRad),
     });
+
+    if (el.kind === 'view') {
+      this.buildViewElement(el, wrap, fx, fy);
+      return;
+    }
 
     if (el.kind === 'label') {
       const t = new Text({
@@ -498,10 +561,10 @@ export class GroupView extends Container {
     // Interactive controls: knob / slider / xy / button.
     const bound = () => this.boundParam(el.moduleId, el.paramId);
     const dim = bound() ? 1 : 0.35;
-    // Accent: a bound Color Gen's live color, else the control type color.
+    // Accent: a bound visual source's frame color, else the group's resolved tint.
     const accent = () => {
-      const c = el.colorModuleId ? appState.colorValues[el.colorModuleId] : undefined;
-      return c ?? PORT_TYPE_COLORS.control;
+      const c = el.tintSourceId ? appState.tintValues[el.tintSourceId] : undefined;
+      return c ?? this.resolvedTint();
     };
 
     if (el.kind === 'knob') {
@@ -524,7 +587,7 @@ export class GroupView extends Container {
         g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: accent() });
         g.moveTo(cx + Math.cos(av) * r * 0.3, cy + Math.sin(av) * r * 0.3)
           .lineTo(cx + Math.cos(av) * r * 0.72, cy + Math.sin(av) * r * 0.72)
-          .stroke({ width: 2, color: theme.text });
+          .stroke({ width: 2, color: accent() });
       };
       redraw();
       this.liveDraws.push({ key: () => `${bound()?.value ?? NaN}:${accent()}`, redraw, last: '' });
@@ -702,6 +765,152 @@ export class GroupView extends Container {
     this.addCaption(wrap, el, fx, fy + btnH + 2);
   }
 
+  /** 'view' element: live embed of a member module's tile or a child group's
+   * face (headless, title bar cropped, uniform-scaled + letterboxed). */
+  private buildViewElement(el: FaceElement, wrap: Container, fx: number, fy: number): void {
+    const mod = el.moduleId ? appState.graph.modules.get(el.moduleId) : undefined;
+    if (!mod && el.groupId && el.groupId !== this.group.id) {
+      this.buildGroupViewElement(el, el.groupId, wrap, fx, fy);
+      return;
+    }
+    if (!mod) {
+      // Unbound (or P2 group target) — placeholder matching the editor's.
+      const g = new Graphics()
+        .roundRect(fx, fy, el.w, el.h, 5)
+        .fill(theme.inset)
+        .stroke({ width: 1, color: theme.moduleStroke });
+      g.alpha = 0.5;
+      g.eventMode = 'static';
+      g.on('pointerover', (e) =>
+        this.tooltip.show(
+          [el.label ?? 'View', 'Unbound — open the face editor (🎛) to bind it.'],
+          e.clientX,
+          e.clientY,
+        ),
+      );
+      g.on('pointerout', () => this.tooltip.hide());
+      wrap.addChild(g);
+      const t = new Text({ text: '🗔', style: { fontSize: 18, fill: theme.textDim } });
+      t.anchor.set(0.5);
+      t.position.set(fx + el.w / 2, fy + el.h / 2);
+      t.eventMode = 'none';
+      wrap.addChild(t);
+      this.addCaption(wrap, el, fx, fy + el.h + 2);
+      return;
+    }
+
+    const def = appState.graph.def(mod.type);
+    const onOpen =
+      mod.type === 'composer'
+        ? () => appState.openComposer(mod.id)
+        : mod.type === 'visualizer'
+          ? () => appState.openVisEditor(mod.id)
+          : undefined;
+    const mv = new ModuleView(mod, def, NOOP_PORT_HANDLERS, this.tooltip, {
+      headless: true,
+      onOpen,
+    });
+    // Visible content = tile minus its title strip; shift up so the strip
+    // lands above the mask, center the rest in the element rect.
+    const contentH = mv.h - MODULE_TITLE_H;
+    const s = Math.min(el.w / mv.w, el.h / contentH);
+    const ex = fx + (el.w - mv.w * s) / 2;
+    const ey = fy + (el.h - contentH * s) / 2 - MODULE_TITLE_H * s;
+    mv.position.set(ex, ey);
+    mv.scale.set(s);
+    const mask = new Graphics().rect(fx, fy, el.w, el.h).fill(0xffffff);
+    wrap.addChild(mask);
+    mv.mask = mask;
+    wrap.addChild(mv);
+    // Overlay anchoring ignores rotation — anchored panels don't rotate.
+    this.embedded.push({
+      view: mv,
+      rect: { x: el.x + el.w / 2 + ex, y: TITLE_H + el.y + el.h / 2 + ey, scale: s },
+    });
+    this.addCaption(wrap, el, fx, fy + el.h + 2);
+  }
+
+  /** 'view' element bound to a child group: its designed face as a live
+   * sub-panel (headless GroupView; containment tree keeps this acyclic). */
+  private buildGroupViewElement(el: FaceElement, childId: string, wrap: Container, fx: number, fy: number): void {
+    const child = appState.graph.groups.get(childId);
+    if (!child?.face) {
+      const g = new Graphics()
+        .roundRect(fx, fy, el.w, el.h, 5)
+        .fill(theme.inset)
+        .stroke({ width: 1, color: theme.moduleStroke });
+      g.alpha = 0.5;
+      g.eventMode = 'static';
+      g.on('pointerover', (e) =>
+        this.tooltip.show(
+          [el.label ?? child?.name ?? 'Sub-panel', 'This group has no face yet — design one (🎛) to embed it.'],
+          e.clientX,
+          e.clientY,
+        ),
+      );
+      g.on('pointerout', () => this.tooltip.hide());
+      wrap.addChild(g);
+      const t = new Text({ text: `▣ ${child?.name ?? '?'}`, style: { fontSize: 11, fill: theme.textDim } });
+      t.anchor.set(0.5);
+      t.position.set(fx + el.w / 2, fy + el.h / 2);
+      t.eventMode = 'none';
+      wrap.addChild(t);
+      this.addCaption(wrap, el, fx, fy + el.h + 2);
+      return;
+    }
+
+    const gv = new GroupView(child, [], NOOP_GROUP_HANDLERS, this.tooltip, {
+      headless: true,
+      onOpen: () => {
+        // Drill in: expand the child, and the host tile so it's visible.
+        if (child.collapsed) appState.toggleGroupCollapsed(childId);
+        if (this.group.collapsed) appState.toggleGroupCollapsed(this.group.id);
+      },
+    });
+    const contentH = gv.tileHeight - TITLE_H;
+    const s = Math.min(el.w / gv.tileWidth, el.h / contentH);
+    const ex = fx + (el.w - gv.tileWidth * s) / 2;
+    const ey = fy + (el.h - contentH * s) / 2 - TITLE_H * s;
+    gv.position.set(ex, ey);
+    gv.scale.set(s);
+    const mask = new Graphics().rect(fx, fy, el.w, el.h).fill(0xffffff);
+    wrap.addChild(mask);
+    gv.mask = mask;
+    wrap.addChild(gv);
+    this.embedded.push({
+      view: gv,
+      rect: { x: el.x + el.w / 2 + ex, y: TITLE_H + el.y + el.h / 2 + ey, scale: s },
+    });
+    this.addCaption(wrap, el, fx, fy + el.h + 2);
+  }
+
+  /** Tile-local rect of the embedded tile for moduleId (overlay anchoring) —
+   * nested sub-panels are searched recursively, transforms composed. */
+  embedRect(moduleId: string): { x: number; y: number; w: number; h: number; scale: number } | null {
+    for (const e of this.embedded) {
+      if (e.view instanceof ModuleView) {
+        if (e.view.instance.id !== moduleId) continue;
+        return { x: e.rect.x, y: e.rect.y, w: e.view.w, h: e.view.h, scale: e.rect.scale };
+      }
+      const r = e.view.embedRect(moduleId);
+      if (r) {
+        return {
+          x: e.rect.x + r.x * e.rect.scale,
+          y: e.rect.y + r.y * e.rect.scale,
+          w: r.w,
+          h: r.h,
+          scale: e.rect.scale * r.scale,
+        };
+      }
+    }
+    return null;
+  }
+
+  /** Forward param refreshes to embedded tiles (recursing into sub-panels). */
+  refreshParams(): void {
+    for (const e of this.embedded) e.view.refreshParams();
+  }
+
   /** Pop a freshly inserted faced group tile into existence (AI import). */
   popIn(): void {
     this.popFrom = { x: this.position.x, y: this.position.y };
@@ -738,6 +947,12 @@ export class GroupView extends Container {
     );
   }
 
+  /** Resolved tint for this group's face accents (own pole, then ancestors),
+   * falling back to the control type color. */
+  private resolvedTint(): number {
+    return appState.tintForGroup(this.group.id) ?? PORT_TYPE_COLORS.control;
+  }
+
   /** Canvas ticker: refresh meters/readouts and externally-changed controls. */
   updateLive(): void {
     for (const d of this.liveDraws) {
@@ -746,6 +961,10 @@ export class GroupView extends Container {
         d.last = k;
         d.redraw();
       }
+    }
+    for (const e of this.embedded) {
+      if (e.view instanceof ModuleView) e.view.setLiveColor(appState.tintFor(e.view.instance.id));
+      e.view.updateLive();
     }
   }
 

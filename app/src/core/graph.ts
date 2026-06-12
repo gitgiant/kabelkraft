@@ -21,13 +21,30 @@ export interface PortRef {
 
 /** A group's exposed boundary port (pole). Shape matches canvas BoundaryPort. */
 export interface GroupPole {
-  key: string; // `${moduleId}:${portId}`
+  key: string; // `${moduleId}:${portId}` — moduleId is the group id for intrinsic poles
   moduleId: string;
   portId: string;
   direction: 'in' | 'out';
   type: PortType;
   label: string;
+  /** True for poles owned by the group itself (no member port behind them). */
+  intrinsic?: boolean;
 }
+
+/**
+ * Ports owned by the group itself rather than forwarded from a member.
+ * Wires may legally end on a group id + one of these port ids; the engine
+ * never sees such wires (they are filtered out of the engine sync).
+ */
+export const INTRINSIC_GROUP_PORTS: PortSpec[] = [
+  {
+    id: 'tint',
+    label: 'Tint',
+    type: 'visual',
+    direction: 'in',
+    description: 'Wire a visualizer frame — accent colors inside this group take its derived color.',
+  },
+];
 
 export interface Wire {
   id: string;
@@ -44,8 +61,10 @@ export type ConnectResult =
 
 /**
  * Module group (PRD §6) — a pure organization layer over the flat graph.
- * The engine never sees groups; wires stay between concrete modules, so
- * grouping/collapsing never interrupts audio.
+ * The engine never sees groups: audio-path wires stay between concrete
+ * modules, so grouping/collapsing never interrupts audio. The one exception
+ * is intrinsic group poles (INTRINSIC_GROUP_PORTS) — UI-only wires may end
+ * on a group id and are filtered out of the engine sync (isGroupWire).
  */
 export interface ModuleGroup {
   id: string;
@@ -110,10 +129,11 @@ export class Graph {
     return group;
   }
 
-  /** Dissolve a group; members are reparented to the group's parent (if any). */
-  dissolveGroup(groupId: string): void {
+  /** Dissolve a group; members are reparented to the group's parent (if any).
+   * Wires ending on the group's intrinsic poles die with it. */
+  dissolveGroup(groupId: string): Wire[] {
     const group = this.groups.get(groupId);
-    if (!group) return;
+    if (!group) return [];
     const parent = this.parentGroup(groupId);
     if (parent) {
       parent.moduleIds.push(...group.moduleIds);
@@ -121,6 +141,12 @@ export class Graph {
       parent.groupIds = parent.groupIds.filter((g) => g !== groupId);
     }
     this.groups.delete(groupId);
+    const removed: Wire[] = [];
+    for (const wire of this.wires.values()) {
+      if (wire.from.moduleId === groupId || wire.to.moduleId === groupId) removed.push(wire);
+    }
+    for (const w of removed) this.wires.delete(w.id);
+    return removed;
   }
 
   /** Direct parent group of a module, if any. */
@@ -255,6 +281,20 @@ export class Graph {
       add(moduleId, portId, spec.direction, spec.type, spec.label ?? portId);
     }
 
+    // Intrinsic poles (owned by the group itself, e.g. tint).
+    for (const p of INTRINSIC_GROUP_PORTS) {
+      const key = `${groupId}:${p.id}`;
+      poles.set(key, {
+        key,
+        moduleId: groupId,
+        portId: p.id,
+        direction: p.direction,
+        type: p.type,
+        label: p.label ?? p.id,
+        intrinsic: true,
+      });
+    }
+
     // Hidden wins over everything (applied last).
     for (const key of group.poleHidden ?? []) poles.delete(key);
 
@@ -292,6 +332,10 @@ export class Graph {
       const inner = fromIn ? w.from : w.to;
       crossing.add(`${inner.moduleId}:${inner.portId}`);
     }
+    // Wires ending on the group itself wire its intrinsic poles.
+    for (const w of this.wires.values()) {
+      if (w.to.moduleId === groupId) crossing.add(`${groupId}:${w.to.portId}`);
+    }
     const baseline = new Set(crossing);
     for (const moduleId of members) {
       const mod = this.modules.get(moduleId);
@@ -310,6 +354,11 @@ export class Graph {
       const sep = key.indexOf(':');
       const moduleId = key.slice(0, sep);
       const portId = key.slice(sep + 1);
+      if (moduleId === groupId) {
+        const spec = INTRINSIC_GROUP_PORTS.find((p) => p.id === portId);
+        if (spec) addable.push({ key, label: spec.label ?? portId, baseline: true });
+        continue;
+      }
       if (!members.has(moduleId)) continue;
       const spec = this.port({ moduleId, portId });
       if (!spec) continue;
@@ -324,8 +373,18 @@ export class Graph {
 
   port(ref: PortRef): PortSpec | undefined {
     const mod = this.modules.get(ref.moduleId);
-    if (!mod) return undefined;
-    return this.def(mod.type).ports.find((p) => p.id === ref.portId);
+    if (mod) return this.def(mod.type).ports.find((p) => p.id === ref.portId);
+    // Group endpoint: intrinsic ports (e.g. tint) make groups legal wire targets.
+    if (this.groups.has(ref.moduleId)) {
+      return INTRINSIC_GROUP_PORTS.find((p) => p.id === ref.portId);
+    }
+    return undefined;
+  }
+
+  /** True if a wire touches a group endpoint — such wires are UI-only and
+   * must be filtered out of the engine sync. */
+  isGroupWire(wire: Wire): boolean {
+    return this.groups.has(wire.from.moduleId) || this.groups.has(wire.to.moduleId);
   }
 
   wiresInto(ref: PortRef): Wire[] {
@@ -374,9 +433,9 @@ export class Graph {
     if (!check.ok) return check;
     const type = this.port(from)!.type;
 
-    // Control/color/visual fan-in: one wire only; last-connected wins (PRD §4.3).
+    // Control/visual fan-in: one wire only; last-connected wins (PRD §4.3).
     let detached: Wire | undefined;
-    if (type === 'control' || type === 'color' || type === 'visual') {
+    if (type === 'control' || type === 'visual') {
       const existing = this.wiresInto(to);
       if (existing.length > 0) {
         detached = existing[0];

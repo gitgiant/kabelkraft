@@ -11,7 +11,7 @@ import { PORT_TYPE_COLORS } from '../core/types';
 import { appState } from '../state';
 import { nextGroupColor, onThemeChange, theme } from '../theme';
 import { GroupView, type BoundaryPort } from './GroupView';
-import { ModuleView } from './ModuleView';
+import { ModuleView, tickHiddenTintSource } from './ModuleView';
 import { Tooltip } from './Tooltip';
 
 
@@ -42,6 +42,9 @@ export class PatchCanvas {
   private views = new Map<string, ModuleView>();
   private groupViews = new Map<string, GroupView>();
   private frames = new Map<string, ExpandedFrame>();
+  /** Wire anchors for expanded groups' intrinsic poles (set by drawFrames). */
+  private frameAnchors = new Map<string, { x: number; y: number }>();
+  private lastTickAt = performance.now();
   private tooltip!: Tooltip;
 
   private wireDrag: WireDrag | null = null;
@@ -141,6 +144,7 @@ export class PatchCanvas {
       }
       if (rebuilt) this.syncViews();
       for (const v of this.views.values()) v.refreshParams();
+      for (const gv of this.groupViews.values()) gv.refreshParams();
     });
     appState.on('sampleLoaded', () => {
       for (const v of this.views.values()) v.refreshSample();
@@ -219,16 +223,40 @@ export class PatchCanvas {
     moduleId: string,
   ): { left: number; top: number; width: number; height: number; scale: number; onScreen: boolean } | null {
     const view = this.views.get(moduleId);
-    if (!view || !view.visible) return null;
     const rect = this.app.canvas.getBoundingClientRect();
     const s = this.world.scale.x;
-    const left = rect.left + this.world.position.x + view.position.x * s;
-    const top = rect.top + this.world.position.y + view.position.y * s;
-    const width = view.w * s;
-    const height = view.h * s;
+    let left: number;
+    let top: number;
+    let width: number;
+    let height: number;
+    let scale = s;
+    if (view && view.visible) {
+      left = rect.left + this.world.position.x + view.position.x * s;
+      top = rect.top + this.world.position.y + view.position.y * s;
+      width = view.w * s;
+      height = view.h * s;
+    } else {
+      // Hidden inside a collapsed group — anchor onto a face 'view' embed
+      // of this module instead, if one exists.
+      let embed: { gv: GroupView; r: { x: number; y: number; w: number; h: number; scale: number } } | null = null;
+      for (const gv of this.groupViews.values()) {
+        const r = gv.embedRect(moduleId);
+        if (r) {
+          embed = { gv, r };
+          break;
+        }
+      }
+      if (!embed) return null;
+      const { gv, r } = embed;
+      scale = s * r.scale;
+      left = rect.left + this.world.position.x + (gv.position.x + r.x) * s;
+      top = rect.top + this.world.position.y + (gv.position.y + r.y) * s;
+      width = r.w * scale;
+      height = r.h * scale;
+    }
     const onScreen =
       left + width > rect.left && left < rect.right && top + height > rect.top && top < rect.bottom;
-    return { left, top, width, height, scale: s, onScreen };
+    return { left, top, width, height, scale, onScreen };
   }
 
   /** Client-space center of a param's control widget (e2e + tools). */
@@ -993,6 +1021,21 @@ export class PatchCanvas {
 
   /** Resolve a wire endpoint to a visible anchor: module port or group proxy. */
   private endpointPosition(ref: PortRef): { x: number; y: number } | null {
+    // Group endpoint (intrinsic pole, e.g. tint): the collapsed tile's pole
+    // dot, the hiding ancestor's tile, or the expanded frame's title corner.
+    if (appState.graph.groups.has(ref.moduleId)) {
+      const behind = appState.graph.groupHiddenBehind(ref.moduleId);
+      const gv = this.groupViews.get(behind?.id ?? ref.moduleId);
+      if (gv) {
+        return (
+          gv.portWorldPosition(`${ref.moduleId}:${ref.portId}`) ?? {
+            x: gv.position.x + gv.tileWidth / 2,
+            y: gv.position.y + gv.tileHeight / 2,
+          }
+        );
+      }
+      return this.frameAnchors.get(ref.moduleId) ?? null;
+    }
     const hiddenIn = appState.graph.hiddenBehind(ref.moduleId);
     if (hiddenIn) {
       const gv = this.groupViews.get(hiddenIn.id);
@@ -1078,6 +1121,8 @@ export class PatchCanvas {
       title.position.set(minX - pad + 10, minY - pad - 10);
       rename.position.set(title.position.x + title.width + 10, title.position.y + 1);
       swatch.position.set(rename.position.x + 18, title.position.y + 8);
+      // Wire-endpoint anchor for the group's intrinsic poles while expanded.
+      this.frameAnchors.set(group.id, { x: minX - pad, y: minY - pad - 8 });
     }
   }
 
@@ -1115,14 +1160,6 @@ export class PatchCanvas {
           alpha = 0.3 + 0.6 * v;
           width = 2 + 2 * v;
         }
-      } else if (wire.type === 'color') {
-        // Color wires render in the color they currently carry.
-        const c = appState.colorValues[wire.from.moduleId];
-        if (c !== undefined) {
-          color = c;
-          alpha = 0.85;
-          width = 2.5;
-        }
       }
 
       if (wire.id === appState.selectedWireId) {
@@ -1144,15 +1181,19 @@ export class PatchCanvas {
       }
     }
 
-    // Resolve color wires: generator output tints its destination views.
-    const liveColors = new Map<string, number>();
-    for (const wire of appState.graph.wires.values()) {
-      if (wire.type !== 'color') continue;
-      const c = appState.colorValues[wire.from.moduleId];
-      if (c !== undefined) liveColors.set(wire.to.moduleId, c);
-    }
+    // Resolve tints: nearest wired source (own tint port, then enclosing
+    // groups inside-out) colors each view's accents. Group tiles resolve
+    // their own tint in GroupView.updateLive.
+    appState.tickTints(now - this.lastTickAt);
+    this.lastTickAt = now;
     for (const [id, view] of this.views) {
-      view.setLiveColor(liveColors.get(id) ?? null);
+      view.setLiveColor(appState.tintFor(id));
+    }
+    // Tint sources hidden inside collapsed groups still render (throttled),
+    // so the derived color keeps moving.
+    for (const id of appState.tintSourceIds()) {
+      const v = this.views.get(id);
+      if (!v || !v.visible) tickHiddenTintSource(id);
     }
 
     for (const view of this.views.values()) {

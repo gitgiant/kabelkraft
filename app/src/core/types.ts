@@ -10,7 +10,6 @@ export type PortType =
   | 'control'
   | 'trigger'
   | 'transport'
-  | 'color'
   | 'text'
   | 'visual';
 
@@ -23,7 +22,6 @@ export const PORT_TYPE_COLORS: Record<PortType, number> = {
   control: 0xff3dd0, // magenta
   trigger: 0x52e07a, // green
   transport: 0xf0f0f0, // white
-  color: 0xb070ff, // violet — carries a live RGB value (Color Gen → UI tints)
   text: 0xb9c0cc, // steel — carries live string events (lyrics, readouts)
   visual: 0x52e0c4, // teal — carries a rendered frame (visualizer chaining)
 };

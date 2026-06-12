@@ -1349,151 +1349,6 @@ class NotenamesModule {
   }
 }
 
-// -- Color Gen (PRD: dynamic UI colors) ---------------------------------------
-// Reacts to audio/control input and emits a packed 24-bit RGB color in the
-// status stream. Color wires are routed view-side — the engine only computes
-// each generator's current color. Keep hslToRgbInt in sync with core/color.ts.
-
-const COLOR_SYNC_BEATS = [0, 1, 2, 4, 8, 16]; // off, 1/4, 1/2, 1, 2, 4 bars
-
-function hslToRgbInt(h, s, l) {
-  const hh = ((h % 1) + 1) % 1;
-  const a = s * Math.min(l, 1 - l);
-  const f = (n) => {
-    const k = (n + hh * 12) % 12;
-    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
-  };
-  return (Math.round(f(0) * 255) << 16) | (Math.round(f(8) * 255) << 8) | Math.round(f(4) * 255);
-}
-
-class ColorGenModule {
-  constructor(id, params) {
-    this.id = id;
-    this.type = 'colorgen';
-    this.params = params;
-    this.inputs = { in: makeStereoBuf() };
-    this.controlIn = {};
-    this.env = 0;
-    this.phase = 0;
-    this.flashAmt = 0;
-    this.randH = Math.random();
-    this.wasAbove = false;
-    this.lastBeat = -1;
-    this.h = 0.6;
-    this.s = 0.85;
-    this.l = 0.5;
-    this.capture = new Float32Array(FFT_N);
-    this.capIdx = 0;
-    this.tempo = 120;
-    this.posBeats = 0;
-    this.playing = false;
-  }
-
-  render(blockSize) {
-    const p = this.params;
-    const mode = Math.round(p.mode ?? 0);
-    const depth = p.depth ?? 1;
-
-    // Input level: audio peak, falling back to the Mod control.
-    let peak = 0;
-    const L = this.inputs.in.L;
-    const R = this.inputs.in.R;
-    for (let i = 0; i < blockSize; i++) {
-      const a = Math.abs((L[i] + R[i]) * 0.5);
-      if (a > peak) peak = a;
-    }
-    const modV = this.controlIn.mod !== undefined ? cval(this.controlIn.mod, 0) : 0;
-    const src = Math.max(peak, modV);
-
-    // Spectrum mode keeps a capture ring for the status-rate FFT.
-    if (mode === 4) {
-      for (let i = 0; i < blockSize; i++) {
-        this.capture[this.capIdx] = (L[i] + R[i]) * 0.5;
-        this.capIdx = (this.capIdx + 1) % FFT_N;
-      }
-    }
-
-    // Envelope follower: ~10 ms attack, ~250 ms release.
-    const dt = blockSize / sampleRate;
-    const tau = src > this.env ? 0.01 : 0.25;
-    this.env += (src - this.env) * Math.min(1, dt / tau);
-
-    // Rate: free Hz or synced to the transport tempo.
-    const beats = COLOR_SYNC_BEATS[Math.round(p.sync ?? 0)] || 0;
-    const rate = beats > 0 ? this.tempo / 60 / beats : p.rate ?? 0.4;
-    const prevPhase = this.phase;
-    this.phase = (this.phase + rate * dt) % 1;
-    const wrapped = this.phase < prevPhase;
-
-    // Hits: envelope rising through a threshold, or each beat while playing.
-    const above = this.env > 0.18;
-    const hit = above && !this.wasAbove;
-    this.wasAbove = above;
-    const beat = Math.floor(this.posBeats);
-    const onBeat = this.playing && beat !== this.lastBeat;
-    this.lastBeat = beat;
-
-    let h = p.hue ?? 0.6;
-    let s = p.sat ?? 0.85;
-    let l = 0.5;
-    switch (mode) {
-      case 0: // rainbow — hue cycles, level adds sparkle
-        h = this.phase;
-        l = 0.45 + 0.2 * this.env * depth;
-        break;
-      case 1: // pulse — brightness follows the envelope
-        l = 0.12 + 0.55 * depth * this.env + 0.3 * (1 - depth);
-        break;
-      case 2: { // flash — jump to the flash hue on hits, decay back
-        if (hit || (src < 0.001 && onBeat)) this.flashAmt = 1;
-        this.flashAmt = Math.max(0, this.flashAmt - dt * 3);
-        const k = this.flashAmt * depth;
-        h = h + (((p.hue2 ?? 0) - h + 1.5) % 1 - 0.5) * k; // shortest hue path
-        l = 0.35 + 0.3 * k;
-        break;
-      }
-      case 3: // random — new color per hit/beat, or per cycle when idle
-        if (hit || onBeat || (src < 0.001 && wrapped)) this.randH = Math.random();
-        h = this.randH;
-        l = 0.45 + 0.15 * this.env * depth;
-        break;
-      case 4: // spectrum — hue computed at status time from the FFT
-        l = 0.3 + 0.4 * this.env * depth;
-        break;
-      case 5: // vu — green → red by level
-        h = (1 - Math.min(1, this.env * 1.3 * depth)) * 0.33;
-        s = 0.95;
-        break;
-      case 6: // breathe — slow sine brightness, no input required
-        l = 0.32 + 0.22 * depth * (0.5 + 0.5 * Math.sin(this.phase * 2 * Math.PI));
-        break;
-      case 7: // strobe — hard blink at rate (or per beat when synced)
-        l = this.phase < 0.5 ? 0.08 : 0.08 + 0.57 * depth;
-        break;
-    }
-    this.h = h;
-    this.s = s;
-    this.l = l;
-  }
-
-  /** Packed RGB for the status stream; spectrum mode runs its FFT here (~30 Hz). */
-  colorValue() {
-    if (Math.round(this.params.mode ?? 0) === 4) {
-      const bins = computeSpectrum(this.capture, this.capIdx);
-      let num = 0;
-      let den = 0;
-      for (let b = 0; b < bins.length; b++) {
-        const w = Math.min(1, Math.max(0, (bins[b] + 80) / 80));
-        num += w * b;
-        den += w;
-      }
-      const centroid = den > 0.001 ? num / den / (bins.length - 1) : 0;
-      this.h = centroid * 0.78; // bass = red … treble = violet
-    }
-    return hslToRgbInt(this.h, this.s, this.l);
-  }
-}
-
 class LevelsModule {
   constructor(id, params) {
     this.id = id;
@@ -2484,8 +2339,6 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new VisualizerModule(m.id, m.params));
           } else if (m.type === 'notenames') {
             next.set(m.id, new NotenamesModule(m.id, m.params));
-          } else if (m.type === 'colorgen') {
-            next.set(m.id, new ColorGenModule(m.id, m.params));
           } else if (m.type === 'audioOut') {
             next.set(m.id, new AudioOutModule(m.id, m.params));
           } else if (m.type === 'lfo') {
@@ -2988,11 +2841,6 @@ class EngineProcessor extends AudioWorkletProcessor {
       }
 
       if (mod.type === 'delay') mod.tempo = this.transport.tempo; // sync mode needs the clock
-      if (mod.type === 'colorgen') {
-        mod.tempo = this.transport.tempo;
-        mod.posBeats = this.transport.posBeats;
-        mod.playing = this.transport.playing;
-      }
       mod.render(blockSize);
 
       if (mod.type === 'audioOut') {
@@ -3074,7 +2922,6 @@ class EngineProcessor extends AudioWorkletProcessor {
     const gainReduction = {};
     const spectra = {};
     const visData = {};
-    const colorValues = {};
     const textNotes = {};
     for (const mod of this.modules.values()) {
       if (mod.type === 'sequencer') seqSteps[mod.id] = mod.currentStep;
@@ -3082,7 +2929,6 @@ class EngineProcessor extends AudioWorkletProcessor {
       if (mod.grDb !== undefined) gainReduction[mod.id] = mod.grDb;
       if (mod.type === 'peq') spectra[mod.id] = mod.spectrum();
       if (mod.type === 'visualizer') visData[mod.id] = mod.visData();
-      if (mod.type === 'colorgen') colorValues[mod.id] = mod.colorValue();
       if (mod.type === 'notenames') {
         const notes = mod.drainNotes();
         if (notes.length > 0) textNotes[mod.id] = notes;
@@ -3097,7 +2943,6 @@ class EngineProcessor extends AudioWorkletProcessor {
       gainReduction,
       spectra,
       visData,
-      colorValues,
       textNotes,
       noteActivity: [...this.noteActivity],
       songPosition: this.transport.posBeats,

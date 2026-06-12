@@ -65,14 +65,8 @@ Wire types: notes (cyan), control (magenta, single fan-in), audio (amber, sums).
   path before it.
 `;
 
-const FACE_RULES = `
-## Optional module face (front panel)
-
-You MAY add a top-level \`face\` object to give the patch a designed control panel —
-knobs/sliders/etc. wired to inner module params. The patch is collapsed to this
-panel when imported, so it reads as one finished instrument. Omit \`face\` for a
-plain patch.
-
+/** Face object schema + layout rules — shared by the patch, project, and face-only spec packs. */
+export const FACE_ELEMENT_RULES = `
 \`\`\`json
 "face": {
   "width": 360, "height": 230,
@@ -96,6 +90,15 @@ Rules:
   captions for sections.
 - Bindings that don't resolve are dropped with a warning; the rest of the face still loads.
 `;
+
+const FACE_RULES = `
+## Optional module face (front panel)
+
+You MAY add a top-level \`face\` object to give the patch a designed control panel —
+knobs/sliders/etc. wired to inner module params. The patch is collapsed to this
+panel when imported, so it reads as one finished instrument. Omit \`face\` for a
+plain patch.
+${FACE_ELEMENT_RULES}`;
 
 const EXAMPLES = `
 ## Annotated examples

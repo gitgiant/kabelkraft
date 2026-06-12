@@ -7,10 +7,11 @@
  * generate in-app via aiprovider.
  */
 
-import { extractJson, parseKkGroup, type KkGroupModule } from './aiimport';
+import { extractJson, parseFace, parseKkGroup, type KkGroupModule } from './aiimport';
 import { MIDI_FIELDS, MIDI_GUIDANCE } from './aimidi';
-import { moduleCatalogSection, SIGNAL_FLOW } from './aispec';
+import { FACE_ELEMENT_RULES, moduleCatalogSection, SIGNAL_FLOW } from './aispec';
 import { clipFromData } from './composer';
+import type { FaceSpec } from './face';
 import type { ModuleDef } from './module';
 
 const PROJECT_FORMAT_RULES = `
@@ -58,6 +59,13 @@ contain other groups via its \`groups\` array, e.g. a "Drums" group containing
 - \`groups\`: ids of child groups directly inside this group.
 - Each module and each group may appear in at most ONE parent.
 - \`collapsed\` (optional, default true): collapsed groups render as one tile.
+- \`face\` (optional): a designed front panel for this group — its collapsed tile
+  renders as that control panel, so each instrument reads as a finished module.
+  Give the main instruments faces (a few key knobs + a meter beats many controls).
+  Format below; \`module\` ids must be modules inside THIS group (nested included).
+
+### Group faces (front panels)
+${FACE_ELEMENT_RULES}
 
 ### Composer clips (MIDI embedded in the JSON)
 
@@ -98,6 +106,8 @@ export interface KkProjectGroup {
   moduleIds: string[];
   groupIds: string[];
   collapsed: boolean;
+  /** Optional designed front panel; bindings reference project module ids. */
+  face?: FaceSpec;
 }
 
 export interface ParsedKkProject {
@@ -169,7 +179,7 @@ export function parseKkProject(text: string, defs: Map<string, ModuleDef>): Pars
   if (clamped !== tempo) warnings.push(`Tempo ${tempo} out of range 20–300 — clamped.`);
   tempo = clamped;
 
-  const groups = parseGroups(raw.groups, modules, warnings);
+  const groups = parseGroups(raw.groups, modules, defs, warnings);
 
   return {
     ok: true,
@@ -193,6 +203,7 @@ export function parseKkProject(text: string, defs: Map<string, ModuleDef>): Pars
 function parseGroups(
   raw: unknown,
   modules: KkGroupModule[],
+  defs: Map<string, ModuleDef>,
   warnings: string[],
 ): KkProjectGroup[] {
   if (!Array.isArray(raw)) return [];
@@ -200,6 +211,7 @@ function parseGroups(
 
   const groups: KkProjectGroup[] = [];
   const byId = new Map<string, KkProjectGroup>();
+  const rawFaces = new Map<string, unknown>();
   (raw as Array<Record<string, unknown>>).forEach((g, i) => {
     const id = typeof g.id === 'string' && g.id ? g.id : `group${i}`;
     if (byId.has(id)) {
@@ -214,6 +226,7 @@ function parseGroups(
       collapsed: g.collapsed !== false,
     };
     byId.set(id, group);
+    rawFaces.set(id, g.face);
     groups.push(group);
   });
 
@@ -267,6 +280,28 @@ function parseGroups(
       seen.add(parent);
       parent = groupOwner.get(parent);
     }
+  }
+
+  // Group faces, after ownership/cycles settle: bindings may only reference
+  // modules inside the group (nested children included) — outside refs are
+  // dropped by parseFace with a warning, the rest of the face loads.
+  const modulesByType = new Map(modules.map((m) => [m.id, m]));
+  const membersOf = (g: KkProjectGroup): Set<string> => {
+    const out = new Set(g.moduleIds);
+    for (const cid of g.groupIds) {
+      for (const m of membersOf(byId.get(cid)!)) out.add(m);
+    }
+    return out;
+  };
+  for (const g of groups) {
+    const rawFace = rawFaces.get(g.id);
+    if (!rawFace) continue;
+    const inGroup = new Map(
+      [...membersOf(g)].map((mid) => [mid, modulesByType.get(mid)!] as const),
+    );
+    const faceWarnings: string[] = [];
+    g.face = parseFace(rawFace, inGroup, defs, faceWarnings);
+    warnings.push(...faceWarnings.map((w) => `Group "${g.id}": ${w}`));
   }
 
   return groups;

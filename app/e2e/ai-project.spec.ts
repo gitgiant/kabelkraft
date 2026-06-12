@@ -24,7 +24,20 @@ const PROJECT = JSON.stringify({
     { from: { module: 'mix', port: 'out' }, to: { module: 'out', port: 'in' } },
   ],
   groups: [
-    { id: 'bass', name: 'Bass', modules: ['comp', 'v', 's'], groups: [] },
+    {
+      id: 'bass',
+      name: 'Bass',
+      modules: ['comp', 'v', 's'],
+      groups: [],
+      face: {
+        width: 280,
+        height: 160,
+        elements: [
+          { kind: 'label', x: 12, y: 4, text: 'BASS' },
+          { kind: 'knob', x: 12, y: 28, label: 'Wave', module: 's', param: 'wave' },
+        ],
+      },
+    },
     { id: 'master', name: 'Master', modules: ['mix', 'out'], groups: ['bass'] },
   ],
 });
@@ -48,6 +61,8 @@ test('AI project dialog: paste, replace project, nested groups + tempo land', as
     const master = groups.find((g) => g.name === 'Master');
     const bass = groups.find((g) => g.name === 'Bass');
     const comp = [...s.graph.modules.values()].find((m) => m.type === 'composer');
+    const osc = [...s.graph.modules.values()].find((m) => m.type === 'osc');
+    const knob = bass?.face?.elements.find((e) => e.kind === 'knob');
     return {
       name: s.projectName,
       tempo: s.transport.tempo,
@@ -56,6 +71,9 @@ test('AI project dialog: paste, replace project, nested groups + tempo land', as
       groups: groups.length,
       nested: !!master && !!bass && master.groupIds.includes(bass.id),
       clipNotes: (comp?.data?.notes as unknown[] | undefined)?.length ?? 0,
+      faceElements: bass?.face?.elements.length ?? 0,
+      // Binding remapped from the project's own id "s" to the real instance id.
+      knobBound: !!knob && knob.moduleId === osc?.id && knob.paramId === 'wave',
     };
   });
   expect(after.name).toBe('E2E Song');
@@ -65,6 +83,8 @@ test('AI project dialog: paste, replace project, nested groups + tempo land', as
   expect(after.groups).toBe(2);
   expect(after.nested).toBe(true);
   expect(after.clipNotes).toBe(1);
+  expect(after.faceElements).toBe(2);
+  expect(after.knobBound).toBe(true);
 });
 
 test('bad project shows readable errors, nothing replaced', async ({ page }) => {

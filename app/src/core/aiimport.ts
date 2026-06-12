@@ -95,17 +95,19 @@ export function extractJson(text: string): string {
 }
 
 const FACE_KINDS = new Set<FaceElementKind>([
-  'knob', 'slider', 'xy', 'button', 'label', 'image', 'meter', 'readout',
+  'knob', 'slider', 'xy', 'button', 'label', 'image', 'meter', 'readout', 'view',
 ]);
 
 /**
  * Parse an optional designed front panel (PRD §6/§10). Element bindings keep the
  * patch's own module ids here; importAiPatch remaps them to real instance ids.
  * Face problems are warnings (recoverable) — a bad face never blocks the import.
+ * `byId` only needs each module's type, so live ModuleInstances work too
+ * (aiface.ts validates against real instance ids with no remap).
  */
-function parseFace(
+export function parseFace(
   raw: unknown,
-  byId: Map<string, KkGroupModule>,
+  byId: Map<string, { type: string }>,
   defs: Map<string, ModuleDef>,
   warnings: string[],
 ): FaceSpec | undefined {
@@ -147,7 +149,7 @@ function parseFace(
       } else {
         el.moduleId = moduleId;
         const def = defs.get(mod.type)!;
-        if (kind !== 'meter') {
+        if (kind !== 'meter' && kind !== 'view') {
           const paramId = String(e.param ?? e.paramId ?? '');
           if (def.params.some((p) => p.id === paramId)) {
             el.paramId = paramId;

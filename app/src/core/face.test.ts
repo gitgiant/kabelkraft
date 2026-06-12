@@ -7,6 +7,8 @@ import {
   newFaceElement,
   pruneFaceBindings,
   snapTo,
+  viewGroupTargets,
+  viewTargets,
   type FaceSpec,
 } from './face';
 import { Graph } from './graph';
@@ -64,6 +66,75 @@ describe('face model', () => {
     expect(face.elements[0].moduleId).toBe(synth.id);
     expect(face.elements[1].moduleId).toBeUndefined();
     expect(face.elements[2].moduleId).toBeUndefined();
+  });
+});
+
+describe('face view elements', () => {
+  it('viewTargets lists members (nested included), not outsiders', () => {
+    const { graph, synth, lfo, group } = makeGraph();
+    const nested = createInstance(MODULE_DEFS.get('composer')!, 0, 0);
+    const outside = createInstance(MODULE_DEFS.get('audioOut')!, 0, 0);
+    graph.addModule(nested);
+    graph.addModule(outside);
+    const child = graph.createGroup('Child', [nested.id], [], 0, 0);
+    group.groupIds.push(child.id);
+
+    const ids = viewTargets(graph, group.id).map((t) => t.moduleId);
+    expect(ids).toContain(synth.id);
+    expect(ids).toContain(lfo.id);
+    expect(ids).toContain(nested.id);
+    expect(ids).not.toContain(outside.id);
+
+    expect(viewGroupTargets(graph, group.id).map((g) => g.groupId)).toEqual([child.id]);
+    expect(viewGroupTargets(graph, child.id)).toEqual([]);
+  });
+
+  it('prune keeps member-bound views, clears outsiders and foreign groupIds', () => {
+    const { graph, synth, group } = makeGraph();
+    const outside = createInstance(MODULE_DEFS.get('audioOut')!, 0, 0);
+    graph.addModule(outside);
+    const inner = createInstance(MODULE_DEFS.get('vca')!, 0, 0);
+    graph.addModule(inner);
+    const child = graph.createGroup('Child', [inner.id], [], 0, 0);
+    group.groupIds.push(child.id);
+    const stranger = graph.createGroup('Elsewhere', [], [], 0, 0);
+
+    const face = defaultFace();
+    face.elements.push(
+      { ...newFaceElement(face, 'view', 0, 0), moduleId: synth.id },
+      { ...newFaceElement(face, 'view', 0, 0), id: 'e2', moduleId: outside.id },
+      { ...newFaceElement(face, 'view', 0, 0), id: 'e3', groupId: child.id },
+      { ...newFaceElement(face, 'view', 0, 0), id: 'e4', groupId: stranger.id },
+    );
+    pruneFaceBindings(graph, group.id, face);
+    expect(face.elements[0].moduleId).toBe(synth.id);
+    expect(face.elements[1].moduleId).toBeUndefined();
+    expect(face.elements[2].groupId).toBe(child.id);
+    expect(face.elements[3].groupId).toBeUndefined();
+  });
+
+  it('kkmod round-trip remaps view moduleId and groupId', () => {
+    const { graph, synth, group } = makeGraph();
+    const inner = createInstance(MODULE_DEFS.get('vca')!, 0, 0);
+    graph.addModule(inner);
+    const child = graph.createGroup('Child', [inner.id], [], 0, 0);
+    group.groupIds.push(child.id);
+
+    const face = defaultFace();
+    face.elements.push(
+      { ...newFaceElement(face, 'view', 0, 0), moduleId: synth.id },
+      { ...newFaceElement(face, 'view', 0, 100), id: 'e2', groupId: child.id },
+    );
+    group.face = face;
+
+    const imported = importKkmod(exportKkmod(graph, group.id, new Map()), MODULE_DEFS);
+    expect(imported.warnings).toEqual([]);
+    const root = imported.groups.find((g) => g.id === imported.rootGroupId)!;
+    const newSynth = imported.modules.find((m) => m.type === 'vcf')!;
+    const newChild = imported.groups.find((g) => g.id !== imported.rootGroupId)!;
+    expect(root.face!.elements[0].moduleId).toBe(newSynth.id);
+    expect(root.face!.elements[1].groupId).toBe(newChild.id);
+    expect(newChild.id).not.toBe(child.id);
   });
 });
 

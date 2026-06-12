@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { planAutoWire } from './autowire';
 import { Graph } from './graph';
 import { createInstance } from './module';
 import { MODULE_DEFS } from './registry';
@@ -198,5 +199,146 @@ describe('project serialization (PRD §15)', () => {
     const loaded = deserializeProject(tampered, MODULE_DEFS);
     expect(loaded.warnings.some((w) => w.includes('superSaw'))).toBe(true);
     expect(loaded.graph.wires.size).toBe(0);
+  });
+});
+
+describe('intrinsic group poles (tint)', () => {
+  function setupVis() {
+    const graph = new Graph(MODULE_DEFS);
+    const vis = createInstance(MODULE_DEFS.get('visualizer')!, -300, 0);
+    const vis2 = createInstance(MODULE_DEFS.get('visualizer')!, -300, 300);
+    const knob = createInstance(MODULE_DEFS.get('knob')!, 0, 0);
+    const lfo = createInstance(MODULE_DEFS.get('lfo')!, 0, 300);
+    for (const m of [vis, vis2, knob, lfo]) graph.addModule(m);
+    const group = graph.createGroup('G', [knob.id, lfo.id], [], 0, 0);
+    return { graph, vis, vis2, knob, lfo, group };
+  }
+
+  it('every group exposes an intrinsic visual tint-in pole', () => {
+    const { graph, group } = setupVis();
+    const tint = graph.groupPoles(group.id).find((p) => p.portId === 'tint');
+    expect(tint).toBeDefined();
+    expect(tint!.moduleId).toBe(group.id);
+    expect(tint!.type).toBe('visual');
+    expect(tint!.direction).toBe('in');
+    expect(tint!.intrinsic).toBe(true);
+  });
+
+  it('connects a visual output to the group tint pole; rejects type mismatch', () => {
+    const { graph, vis, lfo, group } = setupVis();
+    const ok = graph.connect({ moduleId: vis.id, portId: 'vout' }, { moduleId: group.id, portId: 'tint' });
+    expect(ok.ok).toBe(true);
+    const bad = graph.connect({ moduleId: lfo.id, portId: 'out' }, { moduleId: group.id, portId: 'tint' });
+    expect(bad.ok).toBe(false);
+  });
+
+  it('tint pole is single fan-in: a second wire detaches the first', () => {
+    const { graph, vis, vis2, group } = setupVis();
+    graph.connect({ moduleId: vis.id, portId: 'vout' }, { moduleId: group.id, portId: 'tint' });
+    const second = graph.connect({ moduleId: vis2.id, portId: 'vout' }, { moduleId: group.id, portId: 'tint' });
+    expect(second.ok).toBe(true);
+    if (second.ok) expect(second.detached?.from.moduleId).toBe(vis.id);
+    expect(graph.wiresInto({ moduleId: group.id, portId: 'tint' })).toHaveLength(1);
+  });
+
+  it('poleHidden hides the tint pole; wired flag reported in edit info', () => {
+    const { graph, vis, group } = setupVis();
+    group.poleHidden = [`${group.id}:tint`];
+    expect(graph.groupPoles(group.id).some((p) => p.portId === 'tint')).toBe(false);
+    expect(
+      graph.groupPoleEditInfo(group.id).addable.some((a) => a.key === `${group.id}:tint`),
+    ).toBe(true);
+    group.poleHidden = [];
+    graph.connect({ moduleId: vis.id, portId: 'vout' }, { moduleId: group.id, portId: 'tint' });
+    const info = graph.groupPoleEditInfo(group.id);
+    expect(info.poles.find((p) => p.key === `${group.id}:tint`)?.wired).toBe(true);
+  });
+
+  it('dissolving a group removes wires ending on its poles', () => {
+    const { graph, vis, group } = setupVis();
+    graph.connect({ moduleId: vis.id, portId: 'vout' }, { moduleId: group.id, portId: 'tint' });
+    const removed = graph.dissolveGroup(group.id);
+    expect(removed).toHaveLength(1);
+    expect(graph.wires.size).toBe(0);
+  });
+
+  it('group-endpoint wires round-trip through serialization', () => {
+    const { graph, vis, group } = setupVis();
+    graph.connect({ moduleId: vis.id, portId: 'vout' }, { moduleId: group.id, portId: 'tint' });
+    const json = serializeProject('Tint', graph, DEFAULT_TRANSPORT);
+    const loaded = deserializeProject(json, MODULE_DEFS);
+    expect(loaded.warnings).toEqual([]);
+    const wires = [...loaded.graph.wires.values()];
+    expect(wires.some((w) => w.to.moduleId === group.id && w.to.portId === 'tint')).toBe(true);
+  });
+});
+
+describe('auto-wire planner', () => {
+  function planSetup() {
+    const graph = new Graph(MODULE_DEFS);
+    const keyboard = createInstance(MODULE_DEFS.get('keyboard')!, 0, 0);
+    const smpl = createInstance(MODULE_DEFS.get('smpl')!, 300, 0);
+    const audioOut = createInstance(MODULE_DEFS.get('audioOut')!, 600, 0);
+    for (const m of [keyboard, smpl, audioOut]) graph.addModule(m);
+    return { graph, keyboard, smpl, audioOut };
+  }
+
+  it('chains selected modules left-to-right by type', () => {
+    const { graph, keyboard, smpl, audioOut } = planSetup();
+    const plan = planAutoWire(graph, [audioOut.id, keyboard.id, smpl.id]);
+    expect(plan).toEqual([
+      { from: { moduleId: keyboard.id, portId: 'notes' }, to: { moduleId: smpl.id, portId: 'notes' } },
+      { from: { moduleId: smpl.id, portId: 'out' }, to: { moduleId: audioOut.id, portId: 'in' } },
+    ]);
+  });
+
+  it('planned wires all pass graph.connect', () => {
+    const { graph, keyboard, smpl, audioOut } = planSetup();
+    for (const p of planAutoWire(graph, [keyboard.id, smpl.id, audioOut.id])) {
+      expect(graph.connect(p.from, p.to).ok).toBe(true);
+    }
+    expect(graph.wires.size).toBe(2);
+  });
+
+  it('skips already-wired ports — never steals or duplicates', () => {
+    const { graph, keyboard, smpl, audioOut } = planSetup();
+    graph.connect({ moduleId: smpl.id, portId: 'out' }, { moduleId: audioOut.id, portId: 'in' });
+    const plan = planAutoWire(graph, [keyboard.id, smpl.id, audioOut.id]);
+    expect(plan).toEqual([
+      { from: { moduleId: keyboard.id, portId: 'notes' }, to: { moduleId: smpl.id, portId: 'notes' } },
+    ]);
+  });
+
+  it('falls back to right-to-left when left-to-right yields nothing', () => {
+    const graph = new Graph(MODULE_DEFS);
+    const audioOut = createInstance(MODULE_DEFS.get('audioOut')!, 0, 0);
+    const smpl = createInstance(MODULE_DEFS.get('smpl')!, 300, 0);
+    for (const m of [audioOut, smpl]) graph.addModule(m);
+    const plan = planAutoWire(graph, [audioOut.id, smpl.id]);
+    expect(plan).toEqual([
+      { from: { moduleId: smpl.id, portId: 'out' }, to: { moduleId: audioOut.id, portId: 'in' } },
+    ]);
+  });
+
+  it('matches free control inputs in declaration order without touching wired ones', () => {
+    const graph = new Graph(MODULE_DEFS);
+    const lfo0 = createInstance(MODULE_DEFS.get('lfo')!, -300, 0);
+    const lfo = createInstance(MODULE_DEFS.get('lfo')!, 0, 0);
+    const wtosc = createInstance(MODULE_DEFS.get('wtosc')!, 300, 0);
+    for (const m of [lfo0, lfo, wtosc]) graph.addModule(m);
+    // Pitch already driven — auto-wire must take the next free control input.
+    graph.connect({ moduleId: lfo0.id, portId: 'out' }, { moduleId: wtosc.id, portId: 'pitch' });
+    const plan = planAutoWire(graph, [lfo.id, wtosc.id]);
+    expect(plan).toEqual([
+      { from: { moduleId: lfo.id, portId: 'out' }, to: { moduleId: wtosc.id, portId: 'posMod' } },
+    ]);
+  });
+
+  it('returns empty plan when nothing matches', () => {
+    const graph = new Graph(MODULE_DEFS);
+    const kb1 = createInstance(MODULE_DEFS.get('keyboard')!, 0, 0);
+    const kb2 = createInstance(MODULE_DEFS.get('keyboard')!, 300, 0);
+    for (const m of [kb1, kb2]) graph.addModule(m);
+    expect(planAutoWire(graph, [kb1.id, kb2.id])).toEqual([]);
   });
 });

@@ -2,17 +2,21 @@
   import { onMount } from 'svelte';
   import {
     bindableParams,
-    colorSources,
+    tintSources,
     defaultFace,
     meterTargets,
     newFaceElement,
     pruneFaceBindings,
     snapTo,
+    viewGroupTargets,
+    viewTargets,
     type BindTarget,
     type FaceElement,
     type FaceElementKind,
     type FaceSpec,
   } from '../core/face';
+  import { generateFaceSpecPack, parseKkFace } from '../core/aiface';
+  import { generateFace, loadSettings, providerReady } from '../core/aiprovider';
   import { appState } from '../state';
   import { RESIZE_DIRS, resizeCursor, resizeSize, type ResizeDir } from '../canvas/resize';
 
@@ -22,7 +26,9 @@
   let learning = $state(false);
   let targets = $state<BindTarget[]>([]);
   let meterMods = $state<Array<{ moduleId: string; label: string }>>([]);
-  let colorMods = $state<Array<{ moduleId: string; label: string }>>([]);
+  let viewMods = $state<Array<{ moduleId: string; label: string }>>([]);
+  let viewGroups = $state<Array<{ groupId: string; label: string }>>([]);
+  let tintMods = $state<Array<{ moduleId: string; label: string }>>([]);
   let poleInfo = $state<ReturnType<(typeof appState.graph)['groupPoleEditInfo']>>({ poles: [], addable: [] });
   let bgFileInput: HTMLInputElement;
   let imgFileInput: HTMLInputElement;
@@ -36,6 +42,7 @@
     { kind: 'image', label: '🖼 Image' },
     { kind: 'meter', label: '▮ Meter' },
     { kind: 'readout', label: '# Readout' },
+    { kind: 'view', label: '🗔 View' },
   ];
 
   const selected = $derived(face.elements.find((e) => e.id === selectedId) ?? null);
@@ -48,7 +55,9 @@
     pruneFaceBindings(appState.graph, id, face);
     targets = bindableParams(appState.graph, id);
     meterMods = meterTargets(appState.graph, id);
-    colorMods = colorSources(appState.graph, id);
+    viewMods = viewTargets(appState.graph, id);
+    viewGroups = viewGroupTargets(appState.graph, id);
+    tintMods = tintSources(appState.graph);
     poleInfo = appState.graph.groupPoleEditInfo(id);
     selectedId = null;
     learning = false;
@@ -95,7 +104,9 @@
         // Membership can have changed while expanded (modules added inside).
         targets = bindableParams(appState.graph, groupId);
         meterMods = meterTargets(appState.graph, groupId);
-        colorMods = colorSources(appState.graph, groupId);
+        viewMods = viewTargets(appState.graph, groupId);
+        viewGroups = viewGroupTargets(appState.graph, groupId);
+        tintMods = tintSources(appState.graph);
       }
     });
     const offG = appState.on('graphChanged', () => {
@@ -118,6 +129,75 @@
     const el = newFaceElement(face, kind, face.width / 2 - 40, face.height / 2 - 40);
     face.elements.push(el);
     selectedId = el.id;
+  }
+
+  /** Default view size: 160 wide at the target's face aspect (minus title bar). */
+  function viewSizeFor(target: { moduleId?: string; groupId?: string }): { w: number; h: number } {
+    const w = 160;
+    let aspect = 0.75;
+    if (target.moduleId) {
+      const mod = appState.graph.modules.get(target.moduleId);
+      if (!mod) return { w, h: 120 };
+      const def = appState.graph.def(mod.type);
+      aspect = Math.max(40, def.height - 24) / def.width;
+    } else if (target.groupId) {
+      const g = appState.graph.groups.get(target.groupId);
+      if (!g?.face) return { w, h: 120 };
+      aspect = g.face.height / g.face.width;
+    }
+    return { w, h: Math.min(300, Math.max(40, Math.round(w * aspect))) };
+  }
+
+  /** Place a pre-bound view (drag-drop from the Members list, or click). */
+  function addViewFor(target: { moduleId?: string; groupId?: string }, x?: number, y?: number) {
+    const size = viewSizeFor(target);
+    const el = newFaceElement(
+      face,
+      'view',
+      snapTo(Math.max(0, (x ?? face.width / 2) - size.w / 2), face.grid, face.snap),
+      snapTo(Math.max(0, (y ?? face.height / 2) - size.h / 2), face.grid, face.snap),
+    );
+    el.w = size.w;
+    el.h = size.h;
+    el.moduleId = target.moduleId;
+    el.groupId = target.groupId;
+    face.elements.push(el);
+    selectedId = el.id;
+  }
+
+  function onSurfaceDrop(e: DragEvent) {
+    const moduleId = e.dataTransfer?.getData('text/kk-view');
+    const childId = e.dataTransfer?.getData('text/kk-view-group');
+    if (!moduleId && !childId) return;
+    e.preventDefault();
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    addViewFor(
+      moduleId ? { moduleId } : { groupId: childId },
+      e.clientX - r.left,
+      e.clientY - r.top,
+    );
+  }
+
+  function viewTargetLabel(el: FaceElement): string {
+    if (el.moduleId) return viewMods.find((v) => v.moduleId === el.moduleId)?.label ?? 'unbound';
+    if (el.groupId) return `▣ ${viewGroups.find((g) => g.groupId === el.groupId)?.label ?? 'unbound'}`;
+    return 'unbound';
+  }
+
+  /** Combined view-binding select value: `m:<moduleId>` | `g:<groupId>` | ''. */
+  function viewBindingValue(el: FaceElement): string {
+    return el.moduleId ? `m:${el.moduleId}` : el.groupId ? `g:${el.groupId}` : '';
+  }
+
+  function setViewBinding(el: FaceElement, key: string) {
+    el.moduleId = key.startsWith('m:') ? key.slice(2) : undefined;
+    el.groupId = key.startsWith('g:') ? key.slice(2) : undefined;
+  }
+
+  function isUnbound(el: FaceElement): boolean {
+    if (el.kind === 'label' || el.kind === 'image') return false;
+    if (el.kind === 'view') return !el.moduleId && !el.groupId;
+    return !el.moduleId;
   }
 
   function removeSelected() {
@@ -266,6 +346,68 @@
   function cancel() {
     appState.closeFaceEditor();
   }
+
+  // -- AI generation (VisEditor pattern: generate in-app, or copy spec + paste) --
+
+  let aiPrompt = $state('');
+  let aiBusy = $state(false);
+  let aiStatus = $state('');
+  let aiErrors = $state<string[]>([]);
+  let aiPasteOpen = $state(false);
+  let aiPasteText = $state('');
+  let aiCopied = $state(false);
+
+  /** Validated face → the editor draft; Save Face commits, Cancel discards. */
+  function applyKkFace(text: string): boolean {
+    if (!groupId) return false;
+    const parsed = parseKkFace(text, appState.graph, groupId);
+    aiErrors = parsed.errors;
+    if (!parsed.ok || !parsed.face) return false;
+    face = parsed.face;
+    selectedId = null;
+    aiStatus = parsed.warnings.join(' · ');
+    return true;
+  }
+
+  async function aiGenerate(): Promise<void> {
+    const prompt = aiPrompt.trim();
+    if (!prompt || aiBusy || !groupId) return;
+    const settings = loadSettings();
+    aiErrors = [];
+    if (!providerReady(settings)) {
+      aiStatus = 'No AI provider configured (🤖 AI panel) — use 📋 to copy the spec and paste the reply.';
+      aiPasteOpen = true;
+      return;
+    }
+    aiBusy = true;
+    try {
+      const result = await generateFace(appState.graph, groupId, prompt, settings, 3, (s) => (aiStatus = s));
+      if (!applyKkFace(result.text)) aiStatus = 'Generation failed validation — errors below.';
+    } catch (e) {
+      aiErrors = [(e as Error).message];
+      aiStatus = '';
+    } finally {
+      aiBusy = false;
+    }
+  }
+
+  async function copyFaceSpec(): Promise<void> {
+    if (!groupId) return;
+    const prompt = aiPrompt.trim();
+    const spec = generateFaceSpecPack(appState.graph, groupId);
+    await navigator.clipboard.writeText(prompt ? `${spec}\n\nRequest: ${prompt}` : spec);
+    aiCopied = true;
+    aiPasteOpen = true;
+    setTimeout(() => (aiCopied = false), 2000);
+  }
+
+  function aiPasteApply(): void {
+    if (!aiPasteText.trim()) return;
+    if (applyKkFace(aiPasteText)) {
+      aiPasteText = '';
+      aiPasteOpen = false;
+    }
+  }
 </script>
 
 {#if groupId}
@@ -299,11 +441,73 @@
           <button onclick={cancel}>Cancel</button>
         </div>
 
+        <div class="ai-row">
+          <span title="AI face design">🤖</span>
+          <input
+            class="ai-prompt"
+            placeholder="Describe the panel — e.g. performance panel: cutoff + resonance knobs, level slider, output meter"
+            bind:value={aiPrompt}
+            disabled={aiBusy}
+            onkeydown={(e) => {
+              if (e.key === 'Enter') void aiGenerate();
+              e.stopPropagation();
+            }}
+          />
+          <button class="ai-generate" onclick={() => void aiGenerate()} disabled={aiBusy} title="AI-generate this face (replaces the draft; Save commits)">
+            {aiBusy ? '…' : '✨ Generate'}
+          </button>
+          <button class="ai-copy" onclick={() => void copyFaceSpec()} title="Copy the face spec + this group's modules for any chatbot">
+            {aiCopied ? '✓ Copied' : '📋'}
+          </button>
+        </div>
+        {#if aiStatus}
+          <div class="ai-status">{aiStatus}</div>
+        {/if}
+        {#if aiErrors.length}
+          <div class="ai-errors">
+            {#each aiErrors as err}
+              <div>• {err}</div>
+            {/each}
+          </div>
+        {/if}
+        {#if aiPasteOpen}
+          <div class="ai-paste">
+            <textarea bind:value={aiPasteText} placeholder="Paste the chatbot's kkface JSON reply here…"></textarea>
+            <div class="ai-paste-actions">
+              <button class="ai-paste-apply" onclick={aiPasteApply}>Apply reply</button>
+              <button onclick={() => (aiPasteOpen = false)}>✕</button>
+            </div>
+          </div>
+        {/if}
+
         <div class="body">
           <div class="kinds">
             {#each KINDS as k}
               <button onclick={() => addElement(k.kind)}>{k.label}</button>
             {/each}
+            {#if viewMods.length || viewGroups.length}
+              <div class="members-head">Members</div>
+              <div class="members">
+                {#each viewGroups as g (g.groupId)}
+                  <button
+                    class="member"
+                    draggable="true"
+                    title="Drag onto the face (or click) to embed this group's face as a live sub-panel"
+                    ondragstart={(e) => e.dataTransfer?.setData('text/kk-view-group', g.groupId)}
+                    onclick={() => addViewFor({ groupId: g.groupId })}
+                  >▣ {g.label}</button>
+                {/each}
+                {#each viewMods as m (m.moduleId)}
+                  <button
+                    class="member"
+                    draggable="true"
+                    title="Drag onto the face (or click) to add a live view of this module"
+                    ondragstart={(e) => e.dataTransfer?.setData('text/kk-view', m.moduleId)}
+                    onclick={() => addViewFor({ moduleId: m.moduleId })}
+                  >🗔 {m.label}</button>
+                {/each}
+              </div>
+            {/if}
           </div>
 
           <div class="surface-wrap">
@@ -319,6 +523,8 @@
                   : 'none'}
               style:background-size={assetUrl(face.bgAssetId) ? '100% 100%' : 'auto'}
               onpointerdown={() => (selectedId = null)}
+              ondragover={(e) => e.preventDefault()}
+              ondrop={onSurfaceDrop}
             >
               {#each RESIZE_DIRS as dir (dir)}
                 <div
@@ -331,7 +537,7 @@
                 <div
                   class="el {el.kind}"
                   class:selected={el.id === selectedId}
-                  class:unbound={!el.moduleId && el.kind !== 'label' && el.kind !== 'image'}
+                  class:unbound={isUnbound(el)}
                   style:left="{el.x}px"
                   style:top="{el.y}px"
                   style:width="{el.w}px"
@@ -357,6 +563,8 @@
                     {/if}
                   {:else if el.kind === 'meter'}
                     <div class="meter-bar"></div>
+                  {:else if el.kind === 'view'}
+                    <div class="view-box">🗔 {viewTargetLabel(el)}</div>
                   {:else}
                     <div class="readout-box">0.00</div>
                   {/if}
@@ -448,6 +656,23 @@
                     {/each}
                   </select>
                 </label>
+              {:else if selected.kind === 'view'}
+                <label class="full">
+                  Target
+                  <select
+                    value={viewBindingValue(selected)}
+                    onchange={(e) => setViewBinding(selected!, e.currentTarget.value)}
+                  >
+                    <option value="">— unbound —</option>
+                    {#each viewGroups as g}
+                      <option value={`g:${g.groupId}`}>▣ {g.label}</option>
+                    {/each}
+                    {#each viewMods as m}
+                      <option value={`m:${m.moduleId}`}>🗔 {m.label}</option>
+                    {/each}
+                  </select>
+                </label>
+                <p class="hint">Live view of a member tile or a child group's face. Double-click it on the face to open the target.</p>
               {:else}
                 <label class="full">
                   {selected.kind === 'xy' ? 'X binding' : 'Binding'}
@@ -480,13 +705,13 @@
                 </button>
                 {#if selected.kind !== 'readout'}
                   <label class="full">
-                    Color source
+                    Tint source
                     <select
-                      value={selected.colorModuleId ?? ''}
-                      onchange={(e) => (selected!.colorModuleId = e.currentTarget.value || undefined)}
+                      value={selected.tintSourceId ?? ''}
+                      onchange={(e) => (selected!.tintSourceId = e.currentTarget.value || undefined)}
                     >
-                      <option value="">— static —</option>
-                      {#each colorMods as m}
+                      <option value="">— group tint —</option>
+                      {#each tintMods as m}
                         <option value={m.moduleId}>{m.label}</option>
                       {/each}
                     </select>
@@ -575,6 +800,45 @@
     background: var(--accent);
     color: #1a1a20;
     font-weight: 600;
+  }
+  .ai-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .ai-prompt {
+    flex: 1;
+    min-width: 0;
+  }
+  .ai-status {
+    padding: 4px 14px;
+    font-size: 12px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .ai-errors {
+    padding: 4px 14px 8px;
+    font-size: 12px;
+    color: #ff5050;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .ai-paste {
+    display: flex;
+    gap: 8px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .ai-paste textarea {
+    flex: 1;
+    height: 64px;
+    resize: vertical;
+  }
+  .ai-paste-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
   .body {
     display: flex;
@@ -690,6 +954,43 @@
     height: 100%;
     border-radius: 4px;
     background: linear-gradient(90deg, #52e07a 55%, var(--control) 55%);
+  }
+  .members-head {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--panel-border);
+  }
+  .members {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow-y: auto;
+    min-height: 0;
+  }
+  .member {
+    text-align: left;
+    cursor: grab;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .view-box {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    background: var(--control);
+    border: 1px dashed var(--control-border);
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--text);
+    overflow: hidden;
   }
   .readout-box {
     width: 100%;

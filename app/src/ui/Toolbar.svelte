@@ -11,6 +11,7 @@
   let canUndo = $state(false);
   let canRedo = $state(false);
   let canGroup = $state(false);
+  let canAutoWire = $state(false);
   let selectedGroup = $state<string | null>(null);
   let canShrink = $state(false);
   let fileInput: HTMLInputElement;
@@ -20,6 +21,7 @@
     canUndo = appState.canUndo;
     canRedo = appState.canRedo;
     canGroup = appState.selectedModuleIds.size + appState.selectedGroupIds.size >= 2;
+    canAutoWire = appState.selectedModuleIds.size >= 2;
     selectedGroup = [...appState.selectedGroupIds][0] ?? null;
     canShrink = appState.shrinkableGroupId() !== null;
   }
@@ -205,6 +207,14 @@
     </button>
     <button class="arrange" onclick={() => patchCanvas.autoArrange()} title="Auto-arrange: lay modules out left-to-right by signal flow">
       ⇶ Arrange
+    </button>
+    <button
+      class="auto-wire"
+      disabled={!canAutoWire}
+      onclick={() => appState.autoWireSelection()}
+      title="Auto-wire selection: connect free outputs to matching free inputs, left to right"
+    >
+      ⚡ Wire
     </button>
   </div>
 

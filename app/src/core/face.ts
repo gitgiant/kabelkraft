@@ -20,7 +20,8 @@ export type FaceElementKind =
   | 'label'
   | 'image'
   | 'meter'
-  | 'readout';
+  | 'readout'
+  | 'view';
 
 export interface FaceElement {
   id: string;
@@ -40,8 +41,11 @@ export interface FaceElement {
   /** XY pad: Y-axis target (moduleId/paramId is the X axis). */
   moduleId2?: string;
   paramId2?: string;
-  /** Color Gen inside the group whose live color tints this control. */
-  colorModuleId?: string;
+  /** View elements: child-group target (sub-panel; moduleId targets a member
+   * module's tile instead). Serialized now, rendered in P2. */
+  groupId?: string;
+  /** Visual-source module (has a visual out) whose derived frame color tints this control; unset = group tint. */
+  tintSourceId?: string;
   /** Label elements. */
   text?: string;
   size?: number;
@@ -74,6 +78,7 @@ export const ELEMENT_DEFAULTS: Record<FaceElementKind, { w: number; h: number }>
   image: { w: 100, h: 100 },
   meter: { w: 90, h: 16 },
   readout: { w: 90, h: 22 },
+  view: { w: 160, h: 120 },
 };
 
 export function newFaceElement(face: FaceSpec, kind: FaceElementKind, x: number, y: number): FaceElement {
@@ -116,14 +121,41 @@ export function bindableParams(graph: Graph, groupId: string): BindTarget[] {
   return out;
 }
 
-/** Inner Color Gen modules — color-source targets for face elements. */
-export function colorSources(graph: Graph, groupId: string): Array<{ moduleId: string; label: string }> {
+/** Modules with a visual output — tint-source targets for face elements. */
+export function tintSources(graph: Graph): Array<{ moduleId: string; label: string }> {
+  const out: Array<{ moduleId: string; label: string }> = [];
+  for (const mod of graph.modules.values()) {
+    const def = graph.def(mod.type);
+    if (!def.ports.some((p) => p.type === 'visual' && p.direction === 'out')) continue;
+    out.push({ moduleId: mod.id, label: mod.label ?? def.name });
+  }
+  return out;
+}
+
+/** Members whose tile can be embedded as a live view (any member module). */
+export function viewTargets(graph: Graph, groupId: string): Array<{ moduleId: string; label: string }> {
   const out: Array<{ moduleId: string; label: string }> = [];
   for (const moduleId of graph.modulesInGroup(groupId)) {
     const mod = graph.modules.get(moduleId);
-    if (!mod || mod.type !== 'colorgen') continue;
+    if (!mod) continue;
     out.push({ moduleId, label: mod.label ?? graph.def(mod.type).name });
   }
+  return out;
+}
+
+/** Child groups of the subtree under groupId — sub-panel view targets (P2). */
+export function viewGroupTargets(graph: Graph, groupId: string): Array<{ groupId: string; label: string }> {
+  const out: Array<{ groupId: string; label: string }> = [];
+  const visit = (id: string) => {
+    const g = graph.groups.get(id);
+    if (!g) return;
+    for (const child of g.groupIds) {
+      const cg = graph.groups.get(child);
+      if (cg) out.push({ groupId: child, label: cg.name });
+      visit(child);
+    }
+  };
+  visit(groupId);
   return out;
 }
 
@@ -149,10 +181,16 @@ export function pruneFaceBindings(graph: Graph, groupId: string, face: FaceSpec)
     const mod = graph.modules.get(moduleId);
     return !!mod && graph.def(mod.type).params.some((p) => p.id === paramId);
   };
+  const childGroups = new Set(viewGroupTargets(graph, groupId).map((g) => g.groupId));
   for (const el of face.elements) {
     if (el.kind === 'label' || el.kind === 'image') continue;
     if (el.kind === 'meter') {
       if (!valid(el.moduleId)) el.moduleId = undefined;
+      continue;
+    }
+    if (el.kind === 'view') {
+      if (!valid(el.moduleId)) el.moduleId = undefined;
+      if (el.groupId && !childGroups.has(el.groupId)) el.groupId = undefined;
       continue;
     }
     if (!valid(el.moduleId, el.paramId)) {
@@ -163,8 +201,11 @@ export function pruneFaceBindings(graph: Graph, groupId: string, face: FaceSpec)
       el.moduleId2 = undefined;
       el.paramId2 = undefined;
     }
-    if (el.colorModuleId && !members.has(el.colorModuleId)) {
-      el.colorModuleId = undefined;
+    if (el.tintSourceId) {
+      const src = graph.modules.get(el.tintSourceId);
+      const ok =
+        !!src && graph.def(src.type).ports.some((p) => p.type === 'visual' && p.direction === 'out');
+      if (!ok) el.tintSourceId = undefined;
     }
   }
 }
@@ -309,7 +350,8 @@ export function importKkmod(json: string, defs: Map<string, ModuleDef>): KkmodIm
             ...el,
             moduleId: el.moduleId ? moduleIdMap.get(el.moduleId) : undefined,
             moduleId2: el.moduleId2 ? moduleIdMap.get(el.moduleId2) : undefined,
-            colorModuleId: el.colorModuleId ? moduleIdMap.get(el.colorModuleId) : undefined,
+            tintSourceId: el.tintSourceId ? moduleIdMap.get(el.tintSourceId) : undefined,
+            groupId: el.groupId ? groupIdMap.get(el.groupId) : undefined,
           })),
         }
       : undefined,

@@ -49,7 +49,6 @@ export type EngineModuleType =
   | 'slew'
   | 'cmath'
   | 'modmatrix'
-  | 'colorgen'
   | 'notenames';
 
 export interface EngineModuleSnapshot {
@@ -200,8 +199,6 @@ export interface StatusMessage {
     string,
     { notes: number[]; ctrl: number; onset: number; waveL?: number[]; waveR?: number[] }
   >;
-  /** Live Color Gen outputs as packed 24-bit RGB per module. */
-  colorValues?: Record<string, number>;
   /** Pitches that reached each Note Names module since the last post. */
   textNotes?: Record<string, number[]>;
   /** Module ids that emitted notes since the last post (for wire flashes). */

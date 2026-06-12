@@ -225,3 +225,45 @@ test('new blank face + embedding one faced group inside another', async ({ page 
   expect(nested).toBe(true);
   expect(errors).toEqual([]);
 });
+
+test('AI face: copy spec opens paste box; pasted kkface reply fills the draft', async ({ page }) => {
+  const errors = captureErrors(page);
+  const ids = await start(page);
+  const groupId = await makeGroup(page, ids);
+
+  await page.locator('button.edit-face').click();
+  await expect(page.locator('.face-editor .panel')).toBeVisible();
+
+  // No provider configured in e2e: 📋 copies spec + context, opens paste box.
+  await page.locator('button.ai-copy').click();
+  await expect(page.locator('.ai-paste textarea')).toBeVisible();
+
+  const reply = await page.evaluate(
+    (i) =>
+      JSON.stringify({
+        kind: 'kkface',
+        width: 300,
+        height: 180,
+        elements: [
+          { kind: 'label', x: 10, y: 4, text: 'SYNTH' },
+          { kind: 'knob', x: 10, y: 30, label: 'Cutoff', module: i.synth, param: 'cutoff' },
+          { kind: 'knob', x: 90, y: 30, label: 'Ghost', module: 'nope', param: 'x' }, // unbound
+        ],
+      }),
+    ids,
+  );
+  await page.locator('.ai-paste textarea').fill(reply);
+  await page.locator('button.ai-paste-apply').click();
+
+  // Draft replaced: three elements on the surface, ghost knob unbound.
+  await expect(page.locator('.surface .el')).toHaveCount(3);
+  await expect(page.locator('.surface .el.unbound')).toHaveCount(1);
+
+  await page.locator('button', { hasText: 'Save Face' }).click();
+  const face = await page.evaluate((g) => window.__kk.graph.groups.get(g)!.face, groupId);
+  expect(face!.elements).toHaveLength(3);
+  const knob = face!.elements.find((e) => e.kind === 'knob' && e.moduleId);
+  expect(knob?.moduleId).toBe(ids.synth);
+  expect(knob?.paramId).toBe('cutoff');
+  expect(errors).toEqual([]);
+});

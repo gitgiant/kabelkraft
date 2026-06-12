@@ -183,6 +183,7 @@ const composer: ModuleDef = {
     'with quantize/humanize tools and MIDI file import/export.',
   ports: [
     { id: 'notes', label: 'Notes', type: 'note', direction: 'out', description: 'Clip note stream while the transport plays.' },
+    { id: 'tint', label: 'Tint', type: 'visual', direction: 'in', description: 'Wire a visualizer frame — accent colors on this tile take its derived color.' },
   ],
   params: [],
   width: 320,
@@ -237,6 +238,7 @@ const visualizer: ModuleDef = {
     { id: 'text', label: 'Text', type: 'text', direction: 'in', description: 'Text stream for Text Layer nodes (lyrics, readouts); multiple wires merge.' },
     { id: 'vin', label: 'Vis In', type: 'visual', direction: 'in', description: 'Frame from another visualizer — appears inside as a Visual In node, for layering scenes.' },
     { id: 'vout', label: 'Vis Out', type: 'visual', direction: 'out', description: 'This visualizer’s rendered frame; chain it into another visualizer’s Vis In.' },
+    { id: 'tint', label: 'Tint', type: 'visual', direction: 'in', description: 'Wire a visualizer frame — accent colors on this tile take its derived color.' },
   ],
   params: [],
   customFace: true,
@@ -263,7 +265,6 @@ const intelligence: ModuleDef = {
     { id: 'mod', label: 'Mod', type: 'control', direction: 'in', description: 'Control signal for AI modulation prompts.' },
     { id: 'trig', label: 'Trig', type: 'trigger', direction: 'in', description: 'Trigger pulses for AI event prompts.' },
     { id: 'clock', label: 'Clock', type: 'transport', direction: 'in', description: 'Transport clock for AI timing-aware prompts.' },
-    { id: 'color', label: 'Color', type: 'color', direction: 'in', description: 'Live color for AI palette prompts.' },
     { id: 'text', label: 'Text', type: 'text', direction: 'in', description: 'Text stream (lyrics, speech) for AI text prompts.' },
     { id: 'vin', label: 'Visual', type: 'visual', direction: 'in', description: 'Rendered frame for AI visual prompts.' },
   ],
@@ -271,38 +272,6 @@ const intelligence: ModuleDef = {
   customFace: true,
   width: 280,
   height: 240,
-};
-
-export const COLOR_MODES = ['rainbow', 'pulse', 'flash', 'random', 'spectrum', 'vu', 'breathe', 'strobe'] as const;
-export const COLOR_SYNCS = ['off', '1/4', '1/2', '1 bar', '2 bars', '4 bars'] as const;
-
-const colorgen: ModuleDef = {
-  type: 'colorgen',
-  name: 'Color Gen',
-  category: 'visual',
-  description:
-    'Generates a live color from audio or a control signal — wire its Color output to a ' +
-    'Knob/Slider/XY/Button color input (or bind face elements) so the UI moves with the music. ' +
-    'Modes: rainbow (hue cycles), pulse (brightness follows level), flash (jumps to the flash ' +
-    'color on hits), random (new color per hit/cycle), spectrum (hue = spectral centroid), ' +
-    'vu (green→red by level), breathe (slow sine), strobe (hard blink). Click the swatches to ' +
-    'pick base/flash colors.',
-  ports: [
-    { id: 'in', label: 'Audio', type: 'audio', direction: 'in', description: 'Audio to react to; multiple wires are summed.' },
-    { id: 'mod', label: 'Mod', type: 'control', direction: 'in', description: 'Control input — drives level-reactive modes when no audio is wired.' },
-    { id: 'out', label: 'Color', type: 'color', direction: 'out', description: 'Live RGB color; fan out to any number of color inputs.' },
-  ],
-  params: [
-    { id: 'mode', label: 'Mode', min: 0, max: COLOR_MODES.length - 1, default: 0, options: [...COLOR_MODES], randomizable: true },
-    { id: 'rate', label: 'Rate', min: 0.05, max: 8, default: 0.4, unit: 'Hz', curve: 'exp', randomizable: true },
-    { id: 'sync', label: 'Sync', min: 0, max: COLOR_SYNCS.length - 1, default: 0, options: [...COLOR_SYNCS], randomizable: false },
-    { id: 'hue', label: 'Hue', min: 0, max: 1, default: 0.6, randomizable: true },
-    { id: 'sat', label: 'Sat', min: 0, max: 1, default: 0.85, randomizable: true },
-    { id: 'hue2', label: 'Flash Hue', min: 0, max: 1, default: 0.02, randomizable: true },
-    { id: 'depth', label: 'Depth', min: 0, max: 1, default: 1, randomizable: true },
-  ],
-  width: 260,
-  height: 290,
 };
 
 const levels: ModuleDef = {
@@ -860,7 +829,6 @@ const knob: ModuleDef = {
     'Wire its Control output anywhere a control input exists.',
   ports: [
     { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Knob value 0.0–1.0.' },
-    { id: 'color', label: 'Color', type: 'color', direction: 'in', description: 'Live tint from a Color Gen — the knob lights up with it.' },
   ],
   params: [
     { id: 'value', label: 'Value', min: 0, max: 1, default: 0.5, randomizable: true },
@@ -881,7 +849,6 @@ const slider: ModuleDef = {
     'default, shift-double-click types a value, ⚙ configures min/max/default (display only).',
   ports: [
     { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Slider value 0.0–1.0.' },
-    { id: 'color', label: 'Color', type: 'color', direction: 'in', description: 'Live tint from a Color Gen — the fader lights up with it.' },
   ],
   params: [
     { id: 'value', label: 'Value', min: 0, max: 1, default: 0.5, randomizable: true },
@@ -904,7 +871,6 @@ const xy: ModuleDef = {
   ports: [
     { id: 'x', label: 'X', type: 'control', direction: 'out', description: 'Horizontal puck position 0.0–1.0.' },
     { id: 'y', label: 'Y', type: 'control', direction: 'out', description: 'Vertical puck position 0.0–1.0 (up = 1).' },
-    { id: 'color', label: 'Color', type: 'color', direction: 'in', description: 'Live tint from a Color Gen — the puck lights up with it.' },
   ],
   params: [
     { id: 'x', label: 'X', min: 0, max: 1, default: 0.5, randomizable: true },
@@ -927,7 +893,6 @@ const button: ModuleDef = {
     '— gate an ADSR, mute a mixer channel, trigger a Sample & Hold.',
   ports: [
     { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Button state: 0 or 1.' },
-    { id: 'color', label: 'Color', type: 'color', direction: 'in', description: 'Live tint from a Color Gen — the button lights up with it.' },
   ],
   params: [
     { id: 'value', label: 'State', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
@@ -1149,7 +1114,7 @@ export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
     transport, sequencer, arp, composer, notethru, lfo, adsr, random, keyboard, midiIn, midiOut,
     voice, osc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
-    mixer, recorder, audioOut, levels, visualizer, colorgen,
+    mixer, recorder, audioOut, levels, visualizer,
     stt, transporttext, textinput, notenames, intelligence,
   ].map((d) => [d.type, d]),
 );

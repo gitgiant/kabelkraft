@@ -124,5 +124,66 @@ describe('AI project validation', () => {
     expect(spec).toContain('audioOut');
     // Starter patches are a UI affordance, not modules — never in the spec.
     expect(spec).not.toContain('Init Poly Synth');
+    // Per-group faces ride in the project spec.
+    expect(spec).toContain('Group faces');
+    expect(spec).toContain('"kind": "knob"');
+  });
+
+  it('parses a per-group face with bindings restricted to that group (nested included)', () => {
+    const doc = JSON.parse(validProject);
+    doc.groups = [
+      { id: 'bass', name: 'Bass', modules: ['comp', 'v', 'o'], groups: [] },
+      {
+        id: 'master',
+        name: 'Master',
+        modules: ['mix', 'out'],
+        groups: ['bass'],
+        face: {
+          width: 300,
+          height: 180,
+          elements: [
+            { kind: 'label', x: 10, y: 4, text: 'MASTER' },
+            // 'o' lives in nested child group "bass" — still inside master.
+            { kind: 'knob', x: 10, y: 30, label: 'Wave', module: 'o', param: 'wave' },
+            { kind: 'meter', x: 10, y: 130, module: 'out' },
+          ],
+        },
+      },
+    ];
+    const r = parseKkProject(JSON.stringify(doc), MODULE_DEFS);
+    expect(r.ok).toBe(true);
+    expect(r.project!.groups.find((g) => g.id === 'bass')!.face).toBeUndefined();
+    const face = r.project!.groups.find((g) => g.id === 'master')!.face!;
+    expect(face.elements).toHaveLength(3);
+    const knob = face.elements.find((e) => e.kind === 'knob')!;
+    expect(knob.moduleId).toBe('o');
+    expect(knob.paramId).toBe('wave');
+  });
+
+  it('drops face bindings that reach outside the group, keeping the rest', () => {
+    const doc = JSON.parse(validProject);
+    doc.groups = [
+      {
+        id: 'bass',
+        name: 'Bass',
+        modules: ['comp', 'v', 'o'],
+        groups: [],
+        face: {
+          elements: [
+            // 'mix' is in another group — binding dropped with a warning.
+            { kind: 'knob', x: 10, y: 10, module: 'mix', param: 'level1' },
+            { kind: 'knob', x: 90, y: 10, module: 'o', param: 'wave' },
+          ],
+        },
+      },
+      { id: 'master', name: 'Master', modules: ['mix', 'out'], groups: [] },
+    ];
+    const r = parseKkProject(JSON.stringify(doc), MODULE_DEFS);
+    expect(r.ok).toBe(true);
+    const face = r.project!.groups[0].face!;
+    expect(face.elements).toHaveLength(2);
+    expect(face.elements[0].moduleId).toBeUndefined(); // unbound, still placed
+    expect(face.elements[1].moduleId).toBe('o');
+    expect(r.warnings.some((w) => w.includes('Group "bass"') && w.includes('mix'))).toBe(true);
   });
 });

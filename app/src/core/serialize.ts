@@ -11,7 +11,7 @@ import type { VisGraphData } from '../visual/types';
 import type { SerializedSample } from './samples';
 import { DEFAULT_TRANSPORT, type TransportState } from './types';
 
-export const FORMAT_VERSION = 1;
+export const FORMAT_VERSION = 2;
 
 export interface ProjectFile {
   formatVersion: number;
@@ -102,6 +102,17 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
     bumpModuleId(mod.id);
   }
 
+  // Groups install before wires: wires may end on a group's intrinsic pole.
+  for (const group of raw.groups ?? []) {
+    const moduleIds = group.moduleIds.filter((id) => graph.modules.has(id));
+    graph.groups.set(group.id, { ...group, moduleIds });
+    bumpGroupId(group.id);
+  }
+  // Drop dangling child-group references (e.g. a skipped group).
+  for (const group of graph.groups.values()) {
+    group.groupIds = group.groupIds.filter((id) => graph.groups.has(id));
+  }
+
   for (const wire of raw.wires ?? []) {
     const result = graph.connect(wire.from, wire.to);
     if (!result.ok) {
@@ -115,16 +126,6 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
     result.wire.color = wire.color;
     graph.wires.set(wire.id, result.wire);
     bumpWireId(wire.id);
-  }
-
-  for (const group of raw.groups ?? []) {
-    const moduleIds = group.moduleIds.filter((id) => graph.modules.has(id));
-    graph.groups.set(group.id, { ...group, moduleIds });
-    bumpGroupId(group.id);
-  }
-  // Drop dangling child-group references (e.g. a skipped group).
-  for (const group of graph.groups.values()) {
-    group.groupIds = group.groupIds.filter((id) => graph.groups.has(id));
   }
 
   const midiMap: Record<string, { moduleId: string; paramId: string }> = {};
