@@ -1,6 +1,7 @@
 import { patchCanvas } from '../canvas/PatchCanvas';
 import { appState } from '../state';
 import { DRUM_BASE_NOTE, renderDefaultKit } from '../core/drumkit';
+import { OSC_WAVES, VCF_MODES } from '../core/registry';
 
 type FaceKnob = { id: string; kind: 'knob'; x: number; y: number; w: number; h: number; label: string; moduleId: string; paramId: string };
 type FaceLabel = { id: string; kind: 'label'; x: number; y: number; w: number; h: number; text: string; size: number };
@@ -338,6 +339,211 @@ export function addDrumKit(cx: number, cy: number): void {
   appState.setGroupFace(group.id, { width: 590, height: 280, grid: 10, snap: true, elements });
 }
 
+/**
+ * Drum Synth: seven drum voices synthesized live from components — sine bodies
+ * plus a shared noise oscillator through per-voice filters — instead of the
+ * Drum Kit's baked samples, so the panel knobs shape the sound in real time.
+ * Components have no per-note splitter (smpl's Trig Note is sample-only), so
+ * each voice is fired by its own sequencer trigger row; a preset beat means
+ * pressing Play grooves immediately.
+ *
+ * Percussion envelopes: sustain 1 with the sequencer gate at minimum, so the
+ * ADSR snaps open and Release is the drum's single decay control.
+ */
+export function addDrumSynth(cx: number, cy: number): void {
+  const at = (x: number, y: number): [number, number] => [cx + x, cy + y];
+  const wire = (fromId: string, fromPort: string, toId: string, toPort: string) =>
+    appState.connect({ moduleId: fromId, portId: fromPort }, { moduleId: toId, portId: toPort });
+
+  const rowY = (row: number) => -1050 + row * 300;
+
+  const env = (label: string, x: number, y: number, release: number, attack = 0.001) => {
+    const e = appState.addModule('adsr', ...at(x, y));
+    e.label = label;
+    appState.setParam(e.id, 'attack', attack);
+    appState.setParam(e.id, 'decay', 0.01);
+    appState.setParam(e.id, 'sustain', 1);
+    appState.setParam(e.id, 'release', release);
+    return e;
+  };
+
+  /** One trigger row: a sequencer with the given 16th-steps on, gating `amp`. */
+  const trigRow = (label: string, row: number, steps: number[], release: number, attack = 0.001) => {
+    const seq = appState.addModule('sequencer', ...at(-1620, rowY(row)));
+    seq.label = label;
+    appState.setParam(seq.id, 'gate', 0.05);
+    appState.setModuleData(
+      seq.id,
+      'steps',
+      Array.from({ length: 16 }, (_, s) => ({ on: steps.includes(s), pitch: 60 })),
+    );
+    const amp = env(`${label} Env`, -1240, rowY(row), release, attack);
+    wire(seq.id, 'notes', amp.id, 'notes');
+    return { seq, amp };
+  };
+
+  const voiceVca = (x: number, y: number, ampId: string, level: number) => {
+    const v = appState.addModule('vca', ...at(x, y));
+    appState.setParam(v.id, 'level', level);
+    wire(ampId, 'out', v.id, 'cv');
+    return v;
+  };
+
+  // -- kick: sine with a cmath-scaled pitch-sweep envelope --------------------
+  const kick = trigRow('Kick', 0, [0, 8], 0.45);
+  const kickPitchEnv = env('Kick Pitch', -1240, rowY(0) + 190, 0.07);
+  wire(kick.seq.id, 'notes', kickPitchEnv.id, 'notes');
+  const kickMath = appState.addModule('cmath', ...at(-960, rowY(0) + 190));
+  kickMath.label = 'Kick Sweep';
+  appState.setParam(kickMath.id, 'gainA', 0.2); // sweep depth, semitones/127
+  appState.setParam(kickMath.id, 'offset', 0.23); // body pitch ≈ 44 Hz
+  wire(kickPitchEnv.id, 'out', kickMath.id, 'a');
+  const kickOsc = appState.addModule('osc', ...at(-960, rowY(0)));
+  kickOsc.label = 'Kick Osc';
+  appState.setParam(kickOsc.id, 'wave', 0); // sine
+  wire(kickMath.id, 'out', kickOsc.id, 'pitch');
+  const kickVca = voiceVca(-680, rowY(0), kick.amp.id, 0.9);
+  wire(kickOsc.id, 'out', kickVca.id, 'in');
+
+  // -- shared noise source for snare rattle, clap and hats --------------------
+  const noise = appState.addModule('osc', ...at(-1240, rowY(0) - 220));
+  noise.label = 'Noise';
+  appState.setParam(noise.id, 'wave', OSC_WAVES.indexOf('noise'));
+
+  // -- snare: sine tone + highpassed noise, each with its own envelope --------
+  const snare = trigRow('Snare', 1, [4, 12], 0.16); // amp = noise (rattle) env
+  const snareToneEnv = env('Snare Tone Env', -1240, rowY(1) + 190, 0.09);
+  wire(snare.seq.id, 'notes', snareToneEnv.id, 'notes');
+  const snareOsc = appState.addModule('osc', ...at(-960, rowY(1)));
+  snareOsc.label = 'Snare Osc';
+  appState.setParam(snareOsc.id, 'wave', 0);
+  appState.setParam(snareOsc.id, 'semi', -6); // ≈ 185 Hz drum body
+  const snareToneVca = voiceVca(-680, rowY(1), snareToneEnv.id, 0.75);
+  wire(snareOsc.id, 'out', snareToneVca.id, 'in');
+  const snareVcf = appState.addModule('vcf', ...at(-960, rowY(1) + 190));
+  snareVcf.label = 'Snare Noise';
+  appState.setParam(snareVcf.id, 'mode', VCF_MODES.indexOf('highpass'));
+  appState.setParam(snareVcf.id, 'cutoff', 1800);
+  wire(noise.id, 'out', snareVcf.id, 'in');
+  const snareNoiseVca = voiceVca(-680, rowY(1) + 190, snare.amp.id, 0.7);
+  wire(snareVcf.id, 'out', snareNoiseVca.id, 'in');
+
+  // -- clap: bandpassed noise with a softened attack (must still complete
+  // within the ~6 ms sequencer gate, or the release starts from half level)
+  const clap = trigRow('Clap', 2, [12], 0.18, 0.005);
+  const clapVcf = appState.addModule('vcf', ...at(-960, rowY(2)));
+  clapVcf.label = 'Clap Tone';
+  appState.setParam(clapVcf.id, 'mode', VCF_MODES.indexOf('bandpass'));
+  appState.setParam(clapVcf.id, 'cutoff', 1100);
+  appState.setParam(clapVcf.id, 'res', 0.5);
+  wire(noise.id, 'out', clapVcf.id, 'in');
+  const clapVca = voiceVca(-680, rowY(2), clap.amp.id, 0.75);
+  wire(clapVcf.id, 'out', clapVca.id, 'in');
+
+  // -- hats: one highpass over the noise, short and long envelopes ------------
+  const ch = trigRow('CH', 3, [0, 2, 4, 6, 8, 10, 12], 0.05);
+  const oh = trigRow('OH', 4, [14], 0.4);
+  const hatVcf = appState.addModule('vcf', ...at(-960, rowY(3)));
+  hatVcf.label = 'Hat Tone';
+  appState.setParam(hatVcf.id, 'mode', VCF_MODES.indexOf('highpass'));
+  appState.setParam(hatVcf.id, 'cutoff', 7500);
+  wire(noise.id, 'out', hatVcf.id, 'in');
+  const chVca = voiceVca(-680, rowY(3), ch.amp.id, 0.45);
+  const ohVca = voiceVca(-680, rowY(4), oh.amp.id, 0.45);
+  wire(hatVcf.id, 'out', chVca.id, 'in');
+  wire(hatVcf.id, 'out', ohVca.id, 'in');
+
+  // -- toms: tuned sines, empty rows ready for fills ---------------------------
+  const tomL = trigRow('Tom L', 5, [], 0.3);
+  const tomH = trigRow('Tom H', 6, [], 0.24);
+  const tomLOsc = appState.addModule('osc', ...at(-960, rowY(5)));
+  tomLOsc.label = 'Tom L Osc';
+  appState.setParam(tomLOsc.id, 'wave', 0);
+  appState.setParam(tomLOsc.id, 'octave', -1);
+  appState.setParam(tomLOsc.id, 'semi', -5); // ≈ 98 Hz
+  const tomHOsc = appState.addModule('osc', ...at(-960, rowY(6)));
+  tomHOsc.label = 'Tom H Osc';
+  appState.setParam(tomHOsc.id, 'wave', 0);
+  appState.setParam(tomHOsc.id, 'octave', -1);
+  appState.setParam(tomHOsc.id, 'semi', 2); // ≈ 147 Hz
+  const tomLVca = voiceVca(-680, rowY(5), tomL.amp.id, 0.7);
+  const tomHVca = voiceVca(-680, rowY(6), tomH.amp.id, 0.7);
+  wire(tomLOsc.id, 'out', tomLVca.id, 'in');
+  wire(tomHOsc.id, 'out', tomHVca.id, 'in');
+
+  // -- sum: kick / snare+clap / hats / toms on the four mixer channels --------
+  const mixer = appState.addModule('mixer', ...at(-380, rowY(1)));
+  const audioOut = appState.addModule('audioOut', ...at(40, rowY(2)));
+  wire(kickVca.id, 'out', mixer.id, 'in1');
+  for (const v of [snareToneVca, snareNoiseVca, clapVca]) wire(v.id, 'out', mixer.id, 'in2');
+  for (const v of [chVca, ohVca]) wire(v.id, 'out', mixer.id, 'in3');
+  for (const v of [tomLVca, tomHVca]) wire(v.id, 'out', mixer.id, 'in4');
+  wire(mixer.id, 'out', audioOut.id, 'in');
+
+  // -- 808-style panel: per-drum sound shaping + the pattern rows -------------
+  const group = appState.graph.createGroup(
+    'Drum Synth',
+    [
+      kick.seq.id, kick.amp.id, kickPitchEnv.id, kickMath.id, kickOsc.id, kickVca.id,
+      noise.id,
+      snare.seq.id, snare.amp.id, snareToneEnv.id, snareOsc.id, snareToneVca.id, snareVcf.id, snareNoiseVca.id,
+      clap.seq.id, clap.amp.id, clapVcf.id, clapVca.id,
+      ch.seq.id, ch.amp.id, oh.seq.id, oh.amp.id, hatVcf.id, chVca.id, ohVca.id,
+      tomL.seq.id, tomL.amp.id, tomLOsc.id, tomLVca.id,
+      tomH.seq.id, tomH.amp.id, tomHOsc.id, tomHVca.id,
+      mixer.id,
+    ],
+    [],
+    cx - 100, cy + 45,
+  );
+  const view = (id: string, x: number, y: number, label: string, moduleId: string) =>
+    ({ id, kind: 'view' as const, x, y, w: 320, h: 104, label, moduleId });
+  appState.setGroupFace(group.id, {
+    width: 660,
+    height: 830,
+    grid: 10,
+    snap: true,
+    elements: [
+      caption('c1', 10, 10, 'KICK'),
+      knob('k1', 10, 28, 'Tune', kickMath.id, 'offset'),
+      knob('k2', 90, 28, 'Punch', kickMath.id, 'gainA'),
+      knob('k3', 170, 28, 'Decay', kick.amp.id, 'release'),
+      knob('k4', 250, 28, 'Level', kickVca.id, 'level'),
+      caption('c2', 340, 10, 'SNARE'),
+      knob('s1', 340, 28, 'Tone', snareOsc.id, 'semi'),
+      knob('s2', 420, 28, 'Snap', snareNoiseVca.id, 'level'),
+      knob('s3', 500, 28, 'Decay', snare.amp.id, 'release'),
+      knob('s4', 580, 28, 'Level', snareToneVca.id, 'level'),
+      caption('c3', 10, 124, 'CLAP'),
+      knob('p1', 10, 142, 'Tone', clapVcf.id, 'cutoff'),
+      knob('p2', 90, 142, 'Decay', clap.amp.id, 'release'),
+      knob('p3', 170, 142, 'Level', clapVca.id, 'level'),
+      caption('c4', 260, 124, 'HATS'),
+      knob('h1', 260, 142, 'Tone', hatVcf.id, 'cutoff'),
+      knob('h2', 340, 142, 'CH Dec', ch.amp.id, 'release'),
+      knob('h3', 420, 142, 'OH Dec', oh.amp.id, 'release'),
+      knob('h4', 500, 142, 'CH Lvl', chVca.id, 'level'),
+      knob('h5', 580, 142, 'OH Lvl', ohVca.id, 'level'),
+      caption('c5', 10, 238, 'TOMS'),
+      knob('t1', 10, 256, 'Tune L', tomLOsc.id, 'semi'),
+      knob('t2', 90, 256, 'Decay L', tomL.amp.id, 'release'),
+      knob('t3', 170, 256, 'Lvl L', tomLVca.id, 'level'),
+      knob('t4', 250, 256, 'Tune H', tomHOsc.id, 'semi'),
+      knob('t5', 330, 256, 'Decay H', tomH.amp.id, 'release'),
+      knob('t6', 410, 256, 'Lvl H', tomHVca.id, 'level'),
+      caption('c6', 10, 352, 'PATTERNS — click tiles to edit the beat'),
+      view('v1', 10, 370, 'Kick', kick.seq.id),
+      view('v2', 340, 370, 'Snare', snare.seq.id),
+      view('v3', 10, 484, 'Clap', clap.seq.id),
+      view('v4', 340, 484, 'CH', ch.seq.id),
+      view('v5', 10, 598, 'OH', oh.seq.id),
+      view('v6', 340, 598, 'Tom L', tomL.seq.id),
+      view('v7', 10, 712, 'Tom H', tomH.seq.id),
+      { id: 'm1', kind: 'meter' as const, x: 340, y: 760, w: 310, h: 16, label: 'Out', moduleId: mixer.id },
+    ],
+  });
+}
+
 export interface StarterPatch {
   name: string;
   description: string;
@@ -375,6 +581,14 @@ export const STARTERS: StarterPatch[] = [
     add: () => {
       const c = patchCanvas.viewCenter();
       addDrumKit(c.x, c.y);
+    },
+  },
+  {
+    name: 'Drum Synth',
+    description: '7 drum voices synthesized live (sine bodies + filtered noise), a trigger row each, 808-style panel — press play',
+    add: () => {
+      const c = patchCanvas.viewCenter();
+      addDrumSynth(c.x, c.y);
     },
   },
 ];
