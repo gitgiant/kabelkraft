@@ -1,0 +1,791 @@
+{
+  "formatVersion": 1,
+  "name": "Untitled",
+  "transport": {
+    "playing": false,
+    "tempo": 120,
+    "timeSignature": {
+      "num": 4,
+      "denom": 4
+    },
+    "songPosition": 64.56888888890545
+  },
+  "modules": [
+    {
+      "id": "m1",
+      "type": "voice",
+      "x": -497.5000000000001,
+      "y": -233.2852524716022,
+      "params": {
+        "voices": 4,
+        "glide": 0
+      }
+    },
+    {
+      "id": "m2",
+      "type": "osc",
+      "x": -247.5000000000001,
+      "y": -373.28525247160223,
+      "params": {
+        "wave": 3,
+        "octave": 0,
+        "semi": 0,
+        "fine": 0,
+        "pwm": 0.5,
+        "fmAmt": 0,
+        "level": 0.8
+      },
+      "label": "Osc A"
+    },
+    {
+      "id": "m3",
+      "type": "osc",
+      "x": -247.5000000000001,
+      "y": -123.2852524716022,
+      "params": {
+        "wave": 3,
+        "octave": 0,
+        "semi": 0,
+        "fine": 7,
+        "pwm": 0.5,
+        "fmAmt": 0,
+        "level": 0.8
+      },
+      "label": "Osc B"
+    },
+    {
+      "id": "m4",
+      "type": "adsr",
+      "x": -507.5000000000001,
+      "y": -63.285252471602206,
+      "params": {
+        "attack": 0.05,
+        "decay": 0.2,
+        "sustain": 0.6,
+        "release": 0.3
+      },
+      "label": "Amp Env"
+    },
+    {
+      "id": "m5",
+      "type": "lfo",
+      "x": -507.5000000000001,
+      "y": 126.7147475283978,
+      "params": {
+        "shape": 0,
+        "rate": 0.4,
+        "depth": 0.5,
+        "offset": 0.5
+      }
+    },
+    {
+      "id": "m6",
+      "type": "vcf",
+      "x": 12.499999999999886,
+      "y": -293.28525247160223,
+      "params": {
+        "mode": 0,
+        "cutoff": 1200,
+        "res": 0.2,
+        "amt": 1.2
+      }
+    },
+    {
+      "id": "m7",
+      "type": "vca",
+      "x": 272.4999999999999,
+      "y": -203.2852524716022,
+      "params": {
+        "level": 1
+      }
+    },
+    {
+      "id": "m8",
+      "type": "delay",
+      "x": 492.4999999999999,
+      "y": -263.28525247160223,
+      "params": {
+        "sync": 0,
+        "time": 350,
+        "feedback": 0.4,
+        "tone": 16000,
+        "pingpong": 0,
+        "mix": 0.35,
+        "bypass": 0
+      },
+      "label": "Echo"
+    },
+    {
+      "id": "m9",
+      "type": "reverb",
+      "x": 762.4999999999999,
+      "y": -283.28525247160223,
+      "params": {
+        "algo": 0,
+        "size": 0.5,
+        "decay": 0.5,
+        "predelay": 0,
+        "damp": 0.5,
+        "diffusion": 0.5,
+        "lowcut": 20,
+        "highcut": 16000,
+        "mix": 0.3,
+        "bypass": 0
+      }
+    },
+    {
+      "id": "m10",
+      "type": "audioOut",
+      "x": 970,
+      "y": -190,
+      "params": {
+        "level": 0.8,
+        "limiter": 1
+      }
+    },
+    {
+      "id": "m11",
+      "type": "composer",
+      "x": -811.7168651200001,
+      "y": -140.0765080116061,
+      "params": {},
+      "data": {
+        "notes": [
+          {
+            "start": 0,
+            "length": 0.75,
+            "pitch": 57,
+            "vel": 0.8,
+            "pan": 0,
+            "release": 0.5,
+            "modX": 0,
+            "modY": 0,
+            "prob": 1
+          },
+          {
+            "start": 1,
+            "length": 0.75,
+            "pitch": 60,
+            "vel": 0.8,
+            "pan": 0,
+            "release": 0.5,
+            "modX": 0,
+            "modY": 0,
+            "prob": 1
+          },
+          {
+            "start": 2,
+            "length": 0.75,
+            "pitch": 64,
+            "vel": 0.8,
+            "pan": 0,
+            "release": 0.5,
+            "modX": 0,
+            "modY": 0,
+            "prob": 1
+          },
+          {
+            "start": 3,
+            "length": 0.75,
+            "pitch": 60,
+            "vel": 0.8,
+            "pan": 0,
+            "release": 0.5,
+            "modX": 0,
+            "modY": 0,
+            "prob": 1
+          },
+          {
+            "start": 4,
+            "length": 0.75,
+            "pitch": 57,
+            "vel": 0.8,
+            "pan": 0,
+            "release": 0.5,
+            "modX": 0,
+            "modY": 0,
+            "prob": 1
+          },
+          {
+            "start": 5,
+            "length": 0.75,
+            "pitch": 60,
+            "vel": 0.8,
+            "pan": 0,
+            "release": 0.5,
+            "modX": 0,
+            "modY": 0,
+            "prob": 1
+          },
+          {
+            "start": 6,
+            "length": 0.75,
+            "pitch": 65,
+            "vel": 0.8,
+            "pan": 0,
+            "release": 0.5,
+            "modX": 0,
+            "modY": 0,
+            "prob": 1
+          },
+          {
+            "start": 7,
+            "length": 0.75,
+            "pitch": 64,
+            "vel": 0.8,
+            "pan": 0,
+            "release": 0.5,
+            "modX": 0,
+            "modY": 0,
+            "prob": 1
+          }
+        ],
+        "length": 8
+      },
+      "w": 720,
+      "h": 480
+    },
+    {
+      "id": "m12",
+      "type": "visualizer",
+      "x": 766.4510942143897,
+      "y": 177.28374162253755,
+      "params": {},
+      "data": {
+        "graph": {
+          "nodes": [
+            {
+              "id": "v1",
+              "type": "spectrum",
+              "x": 40,
+              "y": 60,
+              "params": {
+                "gain": 1.5
+              }
+            },
+            {
+              "id": "v2",
+              "type": "output",
+              "x": 320,
+              "y": 60,
+              "params": {}
+            }
+          ],
+          "wires": [
+            {
+              "id": "vw1",
+              "from": {
+                "nodeId": "v1",
+                "portId": "out"
+              },
+              "to": {
+                "nodeId": "v2",
+                "portId": "in"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "wires": [
+    {
+      "id": "w1",
+      "from": {
+        "moduleId": "m1",
+        "portId": "pitch"
+      },
+      "to": {
+        "moduleId": "m2",
+        "portId": "pitch"
+      },
+      "type": "control"
+    },
+    {
+      "id": "w2",
+      "from": {
+        "moduleId": "m1",
+        "portId": "pitch"
+      },
+      "to": {
+        "moduleId": "m3",
+        "portId": "pitch"
+      },
+      "type": "control"
+    },
+    {
+      "id": "w3",
+      "from": {
+        "moduleId": "m1",
+        "portId": "gate"
+      },
+      "to": {
+        "moduleId": "m4",
+        "portId": "gate"
+      },
+      "type": "control"
+    },
+    {
+      "id": "w4",
+      "from": {
+        "moduleId": "m2",
+        "portId": "out"
+      },
+      "to": {
+        "moduleId": "m6",
+        "portId": "in"
+      },
+      "type": "audio"
+    },
+    {
+      "id": "w5",
+      "from": {
+        "moduleId": "m3",
+        "portId": "out"
+      },
+      "to": {
+        "moduleId": "m6",
+        "portId": "in"
+      },
+      "type": "audio"
+    },
+    {
+      "id": "w6",
+      "from": {
+        "moduleId": "m5",
+        "portId": "out"
+      },
+      "to": {
+        "moduleId": "m6",
+        "portId": "mod"
+      },
+      "type": "control"
+    },
+    {
+      "id": "w7",
+      "from": {
+        "moduleId": "m6",
+        "portId": "out"
+      },
+      "to": {
+        "moduleId": "m7",
+        "portId": "in"
+      },
+      "type": "audio"
+    },
+    {
+      "id": "w8",
+      "from": {
+        "moduleId": "m4",
+        "portId": "out"
+      },
+      "to": {
+        "moduleId": "m7",
+        "portId": "cv"
+      },
+      "type": "control"
+    },
+    {
+      "id": "w9",
+      "from": {
+        "moduleId": "m7",
+        "portId": "out"
+      },
+      "to": {
+        "moduleId": "m8",
+        "portId": "in"
+      },
+      "type": "audio"
+    },
+    {
+      "id": "w10",
+      "from": {
+        "moduleId": "m8",
+        "portId": "out"
+      },
+      "to": {
+        "moduleId": "m9",
+        "portId": "in"
+      },
+      "type": "audio"
+    },
+    {
+      "id": "w11",
+      "from": {
+        "moduleId": "m9",
+        "portId": "out"
+      },
+      "to": {
+        "moduleId": "m10",
+        "portId": "in"
+      },
+      "type": "audio"
+    },
+    {
+      "id": "w12",
+      "from": {
+        "moduleId": "m11",
+        "portId": "notes"
+      },
+      "to": {
+        "moduleId": "m1",
+        "portId": "notes"
+      },
+      "type": "note"
+    },
+    {
+      "id": "w13",
+      "from": {
+        "moduleId": "m9",
+        "portId": "out"
+      },
+      "to": {
+        "moduleId": "m12",
+        "portId": "in"
+      },
+      "type": "audio"
+    }
+  ],
+  "groups": [
+    {
+      "id": "g1",
+      "name": "Poly Synth",
+      "x": -12.500000000000114,
+      "y": -193.2852524716022,
+      "collapsed": true,
+      "moduleIds": [
+        "m1",
+        "m2",
+        "m3",
+        "m4",
+        "m5",
+        "m6",
+        "m7",
+        "m8",
+        "m9"
+      ],
+      "groupIds": [],
+      "face": {
+        "width": 580,
+        "height": 430,
+        "grid": 10,
+        "snap": true,
+        "elements": [
+          {
+            "id": "e1",
+            "kind": "label",
+            "x": 10,
+            "y": 10,
+            "w": 120,
+            "h": 16,
+            "text": "VOICE",
+            "size": 12
+          },
+          {
+            "id": "e2",
+            "kind": "label",
+            "x": 170,
+            "y": 10,
+            "w": 120,
+            "h": 16,
+            "text": "OSC",
+            "size": 12
+          },
+          {
+            "id": "e3",
+            "kind": "label",
+            "x": 330,
+            "y": 10,
+            "w": 120,
+            "h": 16,
+            "text": "FILTER",
+            "size": 12
+          },
+          {
+            "id": "e4",
+            "kind": "knob",
+            "x": 10,
+            "y": 30,
+            "w": 70,
+            "h": 86,
+            "label": "Voices",
+            "moduleId": "m1",
+            "paramId": "voices"
+          },
+          {
+            "id": "e5",
+            "kind": "knob",
+            "x": 90,
+            "y": 30,
+            "w": 70,
+            "h": 86,
+            "label": "Glide",
+            "moduleId": "m1",
+            "paramId": "glide"
+          },
+          {
+            "id": "e6",
+            "kind": "knob",
+            "x": 170,
+            "y": 30,
+            "w": 70,
+            "h": 86,
+            "label": "Wave",
+            "moduleId": "m2",
+            "paramId": "wave"
+          },
+          {
+            "id": "e7",
+            "kind": "knob",
+            "x": 250,
+            "y": 30,
+            "w": 70,
+            "h": 86,
+            "label": "Detune",
+            "moduleId": "m3",
+            "paramId": "fine"
+          },
+          {
+            "id": "e8",
+            "kind": "knob",
+            "x": 330,
+            "y": 30,
+            "w": 70,
+            "h": 86,
+            "label": "Cutoff",
+            "moduleId": "m6",
+            "paramId": "cutoff"
+          },
+          {
+            "id": "e9",
+            "kind": "knob",
+            "x": 410,
+            "y": 30,
+            "w": 70,
+            "h": 86,
+            "label": "Q",
+            "moduleId": "m6",
+            "paramId": "res"
+          },
+          {
+            "id": "e10",
+            "kind": "knob",
+            "x": 490,
+            "y": 30,
+            "w": 70,
+            "h": 86,
+            "label": "LFO Amt",
+            "moduleId": "m6",
+            "paramId": "amt"
+          },
+          {
+            "id": "e11",
+            "kind": "label",
+            "x": 10,
+            "y": 130,
+            "w": 120,
+            "h": 16,
+            "text": "AMP ENV",
+            "size": 12
+          },
+          {
+            "id": "e12",
+            "kind": "label",
+            "x": 330,
+            "y": 130,
+            "w": 120,
+            "h": 16,
+            "text": "LFO",
+            "size": 12
+          },
+          {
+            "id": "e13",
+            "kind": "knob",
+            "x": 10,
+            "y": 150,
+            "w": 70,
+            "h": 86,
+            "label": "Attack",
+            "moduleId": "m4",
+            "paramId": "attack"
+          },
+          {
+            "id": "e14",
+            "kind": "knob",
+            "x": 90,
+            "y": 150,
+            "w": 70,
+            "h": 86,
+            "label": "Decay",
+            "moduleId": "m4",
+            "paramId": "decay"
+          },
+          {
+            "id": "e15",
+            "kind": "knob",
+            "x": 170,
+            "y": 150,
+            "w": 70,
+            "h": 86,
+            "label": "Sustain",
+            "moduleId": "m4",
+            "paramId": "sustain"
+          },
+          {
+            "id": "e16",
+            "kind": "knob",
+            "x": 250,
+            "y": 150,
+            "w": 70,
+            "h": 86,
+            "label": "Release",
+            "moduleId": "m4",
+            "paramId": "release"
+          },
+          {
+            "id": "e17",
+            "kind": "knob",
+            "x": 330,
+            "y": 150,
+            "w": 70,
+            "h": 86,
+            "label": "Rate",
+            "moduleId": "m5",
+            "paramId": "rate"
+          },
+          {
+            "id": "e18",
+            "kind": "knob",
+            "x": 410,
+            "y": 150,
+            "w": 70,
+            "h": 86,
+            "label": "Depth",
+            "moduleId": "m5",
+            "paramId": "depth"
+          },
+          {
+            "id": "e19",
+            "kind": "knob",
+            "x": 490,
+            "y": 150,
+            "w": 70,
+            "h": 86,
+            "label": "Level",
+            "moduleId": "m7",
+            "paramId": "level"
+          },
+          {
+            "id": "e20",
+            "kind": "label",
+            "x": 10,
+            "y": 250,
+            "w": 120,
+            "h": 16,
+            "text": "ECHO",
+            "size": 12
+          },
+          {
+            "id": "e21",
+            "kind": "label",
+            "x": 330,
+            "y": 250,
+            "w": 120,
+            "h": 16,
+            "text": "REVERB",
+            "size": 12
+          },
+          {
+            "id": "e22",
+            "kind": "knob",
+            "x": 10,
+            "y": 270,
+            "w": 70,
+            "h": 86,
+            "label": "Mix",
+            "moduleId": "m8",
+            "paramId": "mix"
+          },
+          {
+            "id": "e23",
+            "kind": "knob",
+            "x": 90,
+            "y": 270,
+            "w": 70,
+            "h": 86,
+            "label": "Time",
+            "moduleId": "m8",
+            "paramId": "time"
+          },
+          {
+            "id": "e24",
+            "kind": "knob",
+            "x": 170,
+            "y": 270,
+            "w": 70,
+            "h": 86,
+            "label": "Feedback",
+            "moduleId": "m8",
+            "paramId": "feedback"
+          },
+          {
+            "id": "e25",
+            "kind": "button",
+            "x": 250,
+            "y": 290,
+            "w": 70,
+            "h": 44,
+            "label": "Bypass",
+            "moduleId": "m8",
+            "paramId": "bypass"
+          },
+          {
+            "id": "e26",
+            "kind": "knob",
+            "x": 330,
+            "y": 270,
+            "w": 70,
+            "h": 86,
+            "label": "Mix",
+            "moduleId": "m9",
+            "paramId": "mix"
+          },
+          {
+            "id": "e27",
+            "kind": "knob",
+            "x": 410,
+            "y": 270,
+            "w": 70,
+            "h": 86,
+            "label": "Size",
+            "moduleId": "m9",
+            "paramId": "size"
+          },
+          {
+            "id": "e28",
+            "kind": "button",
+            "x": 490,
+            "y": 290,
+            "w": 70,
+            "h": 44,
+            "label": "Bypass",
+            "moduleId": "m9",
+            "paramId": "bypass"
+          },
+          {
+            "id": "e29",
+            "kind": "meter",
+            "x": 10,
+            "y": 390,
+            "w": 320,
+            "h": 16,
+            "label": "Out",
+            "moduleId": "m9"
+          }
+        ]
+      }
+    }
+  ],
+  "samples": [],
+  "faceAssets": {}
+}
