@@ -18,7 +18,8 @@
     type ComposerNote,
   } from '../core/composer';
   import type { ComposerClip } from '../core/composer';
-  import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
+  import { buildAiContext, withContext } from '../core/aicontext';
+import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
   import {
     generateMidiClip,
     loadSettings,
@@ -785,7 +786,12 @@
     aiWarnings = [];
     aiSuccess = '';
     try {
-      const result = await generateMidiClip(prompt, aiSettings, 3, (s) => (aiGenStatus = s));
+      // Tempo/length context helps the model write a clip that fits the song.
+      const context =
+        `${buildAiContext(appState.graph)} Transport: ${appState.transport.tempo} BPM, ` +
+        `${appState.transport.timeSignature.num}/${appState.transport.timeSignature.denom}; ` +
+        `this clip is ${clipLength} beats long.`;
+      const result = await generateMidiClip(withContext(context, prompt), aiSettings, 3, (s) => (aiGenStatus = s));
       aiText = result.text;
       const parsed = parseKkMidi(result.text);
       aiErrors = parsed.errors;

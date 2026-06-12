@@ -95,7 +95,7 @@ test('tutorial button asks about saving first; cancel aborts', async ({ page }) 
   await expect(page.locator('.tutorial')).toBeVisible();
 });
 
-test('AI dialog copies spec + USER PROMPT', async ({ page, context }) => {
+test('AI dialog copies spec + context + request', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.goto('/');
   await page.locator('button.ai-toggle').click();
@@ -107,5 +107,6 @@ test('AI dialog copies spec + USER PROMPT', async ({ page, context }) => {
 
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   expect(clip).toContain('KabelKraft'); // the spec pack
-  expect(clip.trim().endsWith('USER PROMPT: a warm dub bassline')).toBe(true);
+  expect(clip).toContain('Current project:'); // live context rides along
+  expect(clip.trim().endsWith('Request: a warm dub bassline')).toBe(true);
 });

@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
+  import { buildVisContext, withContext } from '../core/aicontext';
+  import { loadSettings, providerReady, generateVisual } from '../core/aiprovider';
+  import { generateVisualSpecPack, parseKkVis } from '../core/aivisual';
   import { appState } from '../state';
   import { visGraphOf } from '../visual/migrate';
   import { VIS_NODE_DEFS } from '../visual/registry';
@@ -381,6 +384,76 @@
     paramGestureActive = false;
   }
 
+  // -- AI generation (VISUALIZER_ENGINE_PLAN.md Phase 5) ------------------------
+
+  let aiPrompt = $state('');
+  let aiBusy = $state(false);
+  let aiStatus = $state('');
+  let aiNote = $state('');
+  let aiErrors = $state<string[]>([]);
+  let aiPasteOpen = $state(false);
+  let aiPasteText = $state('');
+  let aiCopied = $state(false);
+
+  /** Validated graph → container, one undo step; surfaces the model's note. */
+  function applyKkVis(text: string): boolean {
+    const parsed = parseKkVis(text);
+    aiErrors = parsed.errors;
+    if (!parsed.ok || !parsed.graph || !moduleId) return false;
+    appState.setVisGraph(moduleId, parsed.graph, true);
+    pull();
+    selectedNode = null;
+    selectedWire = null;
+    aiNote = [parsed.note, ...parsed.warnings].filter(Boolean).join(' · ');
+    return true;
+  }
+
+  async function aiGenerate(): Promise<void> {
+    const prompt = aiPrompt.trim();
+    if (!prompt || aiBusy || !moduleId) return;
+    const settings = loadSettings();
+    aiErrors = [];
+    aiNote = '';
+    if (!providerReady(settings)) {
+      aiStatus = 'No AI provider configured (🤖 AI panel) — use 📋 to copy the spec and paste the reply.';
+      aiPasteOpen = true;
+      return;
+    }
+    aiBusy = true;
+    try {
+      const contextual = withContext(buildVisContext(appState.graph, moduleId), prompt);
+      const result = await generateVisual(contextual, settings, 3, (s) => (aiStatus = s));
+      if (!applyKkVis(result.text)) aiStatus = 'Generation failed validation — errors below.';
+      else aiStatus = '';
+    } catch (e) {
+      aiErrors = [(e as Error).message];
+      aiStatus = '';
+    } finally {
+      aiBusy = false;
+    }
+  }
+
+  async function copyVisSpec(): Promise<void> {
+    if (!moduleId) return;
+    const prompt = aiPrompt.trim();
+    const spec = generateVisualSpecPack();
+    const context = buildVisContext(appState.graph, moduleId);
+    const payload = prompt ? `${spec}\n\n${withContext(context, prompt)}` : `${spec}\n\n${context}`;
+    await navigator.clipboard.writeText(payload);
+    aiCopied = true;
+    aiPasteOpen = true;
+    setTimeout(() => (aiCopied = false), 2000);
+  }
+
+  function aiPasteApply(): void {
+    if (!aiPasteText.trim()) return;
+    if (applyKkVis(aiPasteText)) {
+      aiPasteText = '';
+      aiPasteOpen = false;
+      aiStatus = '';
+    }
+  }
+
   async function pickImage(node: VisNodeInstance, file: File): Promise<void> {
     const url = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -498,6 +571,35 @@
         </svg>
       </div>
       <div class="inspector">
+        <div class="ai-row">
+          <input
+            class="textfield"
+            type="text"
+            placeholder="✨ Describe a scene…"
+            bind:value={aiPrompt}
+            onkeydown={(e) => {
+              if (e.key === 'Enter') void aiGenerate();
+            }}
+          />
+          <button onclick={() => void aiGenerate()} disabled={aiBusy} title="AI-generate this visual graph">
+            {aiBusy ? '…' : '✨'}
+          </button>
+          <button onclick={() => void copyVisSpec()} title="Copy spec + context for an external chat">
+            {aiCopied ? '✓' : '📋'}
+          </button>
+        </div>
+        {#if aiStatus}<div class="hint">{aiStatus}</div>{/if}
+        {#if aiNote}<div class="ai-note">💡 {aiNote}</div>{/if}
+        {#each aiErrors as err (err)}<div class="ai-error">{err}</div>{/each}
+        {#if aiPasteOpen}
+          <textarea
+            class="textfield"
+            rows="3"
+            placeholder="Paste the AI reply (kkvis JSON) here…"
+            bind:value={aiPasteText}
+          ></textarea>
+          <button onclick={aiPasteApply} disabled={!aiPasteText.trim()}>Apply pasted graph</button>
+        {/if}
         <canvas class="preview" bind:this={previewEl}></canvas>
         {#if !webgpuAvailable()}
           <div class="hint">Full preview needs a WebGPU browser; the tile shows an approximation.</div>
@@ -772,6 +874,30 @@
     border: 1px solid #34343f;
     border-radius: 6px;
     color: var(--text, #e8e8ee);
+  }
+  .ai-row {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .ai-row input {
+    flex: 1;
+    min-width: 0;
+  }
+  .ai-note {
+    font-size: 11px;
+    color: #8fd8a8;
+    line-height: 1.4;
+  }
+  .ai-error {
+    font-size: 11px;
+    color: #ff8a8a;
+    line-height: 1.4;
+  }
+  textarea.textfield {
+    resize: vertical;
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
   }
   .hint {
     font-size: 11px;

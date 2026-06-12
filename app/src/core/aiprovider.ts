@@ -16,6 +16,7 @@ import { generateSpecPack } from './aispec';
 import { parseKkGroup } from './aiimport';
 import { MIDI_SPEC, parseKkMidi } from './aimidi';
 import { generateProjectSpecPack, parseKkProject } from './aiproject';
+import { generateVisualSpecPack, parseKkVis } from './aivisual';
 
 export type ProviderKind = 'none' | 'claude' | 'local';
 
@@ -227,6 +228,27 @@ export function generateProject(
     maxAttempts,
     onProgress,
     16000,
+  );
+}
+
+/** Visual-graph flavour: same providers and repair loop, .kkvis spec/validator. */
+export function generateVisual(
+  userPrompt: string,
+  settings: AiSettings,
+  maxAttempts = 3,
+  onProgress?: (status: string) => void,
+): Promise<GenerateResult> {
+  return generateWithSpec(
+    generateVisualSpecPack(),
+    'visual graph',
+    (text) => {
+      const r = parseKkVis(text);
+      return { ok: r.ok, errors: r.errors };
+    },
+    userPrompt,
+    settings,
+    maxAttempts,
+    onProgress,
   );
 }
 

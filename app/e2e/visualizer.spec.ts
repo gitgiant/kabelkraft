@@ -282,8 +282,9 @@ test('double-clicking the tile scene opens the visual graph editor', async ({ pa
   const r = await page.evaluate((mid) => window.__kkCanvas.clientRectFor(mid), id);
   await page.mouse.dblclick(r!.left + r!.width / 2, r!.top + r!.height / 2);
   await expect(page.locator('.vised')).toBeVisible();
-  // Init graph shows its two nodes in the editor.
+  // Init graph shows its two nodes in the editor; the AI row is present.
   await expect(page.locator('.vised .node')).toHaveCount(2);
+  await expect(page.locator('.vised .ai-row input')).toBeVisible();
   await page.locator('.vised button[title="Close (Esc)"]').click();
   await expect(page.locator('.vised')).toBeHidden();
 });

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
-  import { extractJson } from '../core/aiimport';
+  import { buildAiContext, withContext } from '../core/aicontext';
+import { extractJson } from '../core/aiimport';
   import { generateProjectSpecPack, parseKkProject } from '../core/aiproject';
   import { MODULE_DEFS } from '../core/registry';
   import { generateSpecPack } from '../core/aispec';
@@ -154,7 +155,8 @@
     readyPatch = '';
     try {
       const gen = mode === 'project' ? generateProject : generatePatch;
-      const result = await gen(prompt, settings, 3, (s) => (genStatus = s));
+      const contextual = withContext(buildAiContext(appState.graph), prompt);
+      const result = await gen(contextual, settings, 3, (s) => (genStatus = s));
       text = result.text;
       if (!result.ok) {
         runImport(); // surface the validation errors (nothing is inserted)
@@ -174,10 +176,11 @@
   }
 
   async function copySpec() {
-    // Spec + the user's request in one paste-able block.
+    // Spec + live context + the user's request in one paste-able block.
     const prompt = userPrompt.trim();
     const spec = mode === 'project' ? generateProjectSpecPack() : generateSpecPack();
-    const payload = prompt ? `${spec}\n\nUSER PROMPT: ${prompt}` : spec;
+    const context = buildAiContext(appState.graph);
+    const payload = prompt ? `${spec}\n\n${withContext(context, prompt)}` : `${spec}\n\n${context}`;
     await navigator.clipboard.writeText(payload);
     copied = true;
     setTimeout(() => (copied = false), 2000);

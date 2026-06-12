@@ -152,7 +152,7 @@ draws the thumbnail texture.
 - Cross-container topological scheduling, shared device/texture pool,
   visibility culling.
 
-## Phase 5 — AI
+## Phase 5 — AI ✅ done 2026-06-12
 
 - Spec pack visual section + few-shot example graphs.
 - Container AI-generate button: prompt + spec + current graph → validate
