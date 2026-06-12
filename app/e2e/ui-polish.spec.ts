@@ -110,3 +110,31 @@ test('AI dialog copies spec + context + request', async ({ page, context }) => {
   expect(clip).toContain('Current project:'); // live context rides along
   expect(clip.trim().endsWith('Request: a warm dub bassline')).toBe(true);
 });
+
+test('container tiles (composer, visualizer) stretch beyond the 3× cap', async ({ page }) => {
+  await boot(page);
+  const sizes = await page.evaluate(() => {
+    const s = window.__kk;
+    const c = window.__kkCanvas;
+    const vis = s.addModule('visualizer', 600, 500);
+    const comp = s.addModule('composer', 2000, 500);
+    const knob = s.addModule('lfo', 3500, 500);
+    // Huge instance sizes — view getters clamp live, no rebuild needed.
+    for (const m of [vis, comp, knob]) {
+      m.w = 4000;
+      m.h = 3000;
+    }
+    const zoom = c.clientRectFor(vis.id)!.scale;
+    const dims = (id: string) => {
+      const r = c.clientRectFor(id)!;
+      return { w: Math.round(r.width / zoom), h: Math.round(r.height / zoom) };
+    };
+    return { vis: dims(vis.id), comp: dims(comp.id), knob: dims(knob.id) };
+  });
+  // Containers take the full requested size (old cap: 3× default ≈ 840/960).
+  expect(sizes.vis).toEqual({ w: 4000, h: 3000 });
+  expect(sizes.comp).toEqual({ w: 4000, h: 3000 });
+  // Non-container tiles keep the 3× sanity cap.
+  expect(sizes.knob.w).toBeLessThan(4000);
+  expect(sizes.knob.h).toBeLessThan(3000);
+});

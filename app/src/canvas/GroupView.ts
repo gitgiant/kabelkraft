@@ -297,12 +297,13 @@ export class GroupView extends Container {
     const sy = e.clientY;
     const scale = this.worldTransform.a || 1;
     let raf = 0;
-    const MIN_W = 120, MAX_W = 1200, MIN_H = 80, MAX_H = 900;
+    // Groups are containers — minimum only, stretch to any size.
+    const MIN_W = 120, MIN_H = 80;
     const apply = (ev: PointerEvent) => {
       const { w, h } = resizeSize(dir, (ev.clientX - sx) / scale, (ev.clientY - sy) / scale, startW, startH);
-      const cw = Math.min(MAX_W, Math.max(MIN_W, w));
+      const cw = Math.max(MIN_W, w);
       // Faced tile height = TITLE_H + face.height; clamp the face area itself.
-      const ch = Math.min(MAX_H + (face ? TITLE_H : 0), Math.max(MIN_H + (face ? TITLE_H : 0), h));
+      const ch = Math.max(MIN_H + (face ? TITLE_H : 0), h);
       if (face) {
         face.width = cw;
         face.height = ch - TITLE_H;

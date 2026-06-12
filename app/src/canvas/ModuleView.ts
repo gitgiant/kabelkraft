@@ -185,11 +185,15 @@ export class ModuleView extends Container {
     return this.clampSize(this.instance.h ?? this.def.height, this.def.height);
   }
 
+  /** Container tiles host nested editors/canvases — no upper size cap. */
+  private static readonly UNBOUNDED_TYPES = new Set(['composer', 'visualizer']);
+
   private clampSize(v: number, base: number): number {
     const lo = ModuleView.FIXED_MIN_TYPES.has(this.instance.type)
       ? base
       : Math.max(80, base * 0.7);
-    return Math.min(base * 3, Math.max(lo, this.rollMin(base), v));
+    const min = Math.max(lo, this.rollMin(base), v);
+    return ModuleView.UNBOUNDED_TYPES.has(this.instance.type) ? min : Math.min(base * 3, min);
   }
 
   /** While the piano roll is open inside a composer, the tile can't shrink
