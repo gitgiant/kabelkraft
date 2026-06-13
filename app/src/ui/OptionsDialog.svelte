@@ -143,6 +143,30 @@
     appState.engine.setMasterGain(cfg.audio.muted ? 0 : cfg.audio.masterGain);
   }
 
+  /**
+   * Short 440 Hz beep through the live output chain (engine → master gain →
+   * selected device) — answers "is anything reaching the speakers?" without
+   * needing a patch or the transport.
+   */
+  async function playTestTone(): Promise<void> {
+    try {
+      await appState.ensureEngine();
+    } catch (err) {
+      alert(`Audio failed to start:\n${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    engineUp = appState.engine.started;
+    const sr = appState.engine.sampleRate;
+    const len = Math.floor(sr * 0.6);
+    const ch = new Float32Array(len);
+    for (let i = 0; i < len; i++) {
+      // 10 ms fade-in / 100 ms fade-out so the beep never clicks.
+      const env = Math.min(1, i / (sr * 0.01)) * Math.min(1, (len - i) / (sr * 0.1));
+      ch[i] = Math.sin((2 * Math.PI * 440 * i) / sr) * 0.4 * env;
+    }
+    appState.engine.preview(sr, [ch, ch.slice()]);
+  }
+
   const latency = $derived.by(() => {
     void open;
     return appState.engine.latencyInfo();
@@ -513,9 +537,9 @@
                 </span>
               </div>
             {/if}
-            {#if sinkSelectable}
-              <label class="row">
-                <span>Output device</span>
+            <label class="row">
+              <span>Output device</span>
+              {#if sinkSelectable}
                 <select class="opt-sink grow" bind:value={cfg.audio.sinkId}
                   onchange={() => { save((s) => { s.audio.sinkId = cfg.audio.sinkId; }); applyAudioRestart(); }}>
                   <option value="">System default</option>
@@ -524,12 +548,19 @@
                 {#if engineUp}
                   <span class="dim opt-out-channels">{outputChannels} ch</span>
                 {/if}
-              </label>
-              {#if engineUp && outputChannels > 2}
-                <p class="pane-note dim">Multichannel output active — Audio Out modules pick their hardware pair (1-2 / 3-4 / …) with the Pair knob.</p>
+              {:else}
+                <span class="dim grow">system default — device selection isn't supported by this browser (Chrome/Edge/Firefox)</span>
               {/if}
-            {:else}
-              <p class="pane-note dim">Output device selection isn't supported by this browser (Chrome/Edge only).</p>
+              <button class="opt-test-tone" onclick={() => void playTestTone()}
+                title="Play a short beep through the current output — goes through master volume and mute, so it tests the whole chain">
+                ▶ Test
+              </button>
+            </label>
+            {#if sinkSelectable && engineUp && outputChannels > 2}
+              <p class="pane-note dim">Multichannel output active — Audio Out modules pick their hardware pair (1-2 / 3-4 / …) with the Pair knob.</p>
+            {/if}
+            {#if cfg.audio.muted}
+              <p class="pane-note opt-muted-note">🔇 Output is muted — the test tone and all patches are silent until Mute is unchecked above.</p>
             {/if}
             <label class="row">
               <span>Input device</span>
