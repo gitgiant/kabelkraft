@@ -1,10 +1,29 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { MODULE_DEFS } from '../core/registry';
   import { patchCanvas } from '../canvas/PatchCanvas';
+  import { isTouchMode, onTouchModeChange } from '../core/mobile';
   import { appState } from '../state';
   import { STARTERS } from './starters';
 
   const defs = [...MODULE_DEFS.values()];
+
+  // Touch mode: the palette becomes an overlay drawer (closed by default)
+  // instead of pushing the canvas aside. Edge swipe / the grip opens it.
+  let touch = $state(isTouchMode());
+
+  onMount(() => {
+    const offTouch = onTouchModeChange((on) => {
+      touch = on;
+      paletteWidth = on ? 0 : FULL_WIDTH;
+    });
+    const onOpen = () => (paletteWidth = FULL_WIDTH);
+    window.addEventListener('kk-open-palette', onOpen);
+    return () => {
+      offTouch();
+      window.removeEventListener('kk-open-palette', onOpen);
+    };
+  });
 
   let query = $state('');
   let collapsed = $state(new Set<string>());
@@ -36,6 +55,7 @@
     const inst = appState.addModule(type, c.x + jitter(), c.y + jitter());
     // A fresh Composer goes straight into the piano roll.
     if (type === 'composer') appState.openComposer(inst.id);
+    if (touch) paletteWidth = 0; // drawer closes so the new module is visible
   }
 
   function onDragStart(e: DragEvent, type: string) {
@@ -46,7 +66,7 @@
   // -- Drag-to-hide: grip on the right edge slides the palette away ---------
 
   const FULL_WIDTH = 170;
-  let paletteWidth = $state(FULL_WIDTH);
+  let paletteWidth = $state(isTouchMode() ? 0 : FULL_WIDTH);
   let dragging = $state(false);
   let dragStartX = 0;
   let dragStartWidth = 0;
@@ -71,11 +91,16 @@
     if (!dragging) return;
     dragging = false;
     if (!dragMoved) paletteWidth = paletteWidth > 0 ? 0 : FULL_WIDTH;
-    else paletteWidth = paletteWidth < FULL_WIDTH / 2 ? 0 : FULL_WIDTH;
+    // Touch: the grip doubles as the left-edge swipe surface — a short
+    // inward swipe should open the drawer, not snap back shut.
+    else paletteWidth = paletteWidth < (touch ? 40 : FULL_WIDTH / 2) ? 0 : FULL_WIDTH;
   }
 </script>
 
-<div class="palette-outer">
+{#if touch && paletteWidth > 0}
+  <div class="palette-scrim" onpointerdown={() => (paletteWidth = 0)}></div>
+{/if}
+<div class="palette-outer" class:touch>
 <div class="palette-clip" class:dragging style="width: {paletteWidth}px">
 <div class="palette">
   <div class="palette-title">Modules</div>
@@ -147,6 +172,20 @@
     flex-shrink: 0;
     min-height: 0;
   }
+  /* Touch mode: drawer floats over the canvas — no layout reflow on toggle. */
+  .palette-outer.touch {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 60;
+  }
+  .palette-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 59;
+    background: rgba(0, 0, 0, 0.35);
+  }
   .palette-clip {
     overflow: hidden;
     transition: width 0.15s ease;
@@ -179,6 +218,12 @@
   .palette-grip:hover {
     background: var(--control);
     color: var(--text);
+  }
+  /* Touch mode: the grip is the drawer handle — make it a real thumb target. */
+  :global(html.kk-touch) .palette-grip {
+    width: 28px;
+    font-size: 16px;
+    border-radius: 0 8px 8px 0;
   }
   .palette-title {
     font-weight: 700;

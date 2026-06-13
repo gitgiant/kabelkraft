@@ -20,6 +20,7 @@ import {
 } from '../core/registry';
 import { clipFromData } from '../core/composer';
 import { bandCoefs, biquadResponseDb, chainResponseDb, vcfCoefs } from '../core/eqmath';
+import { isTouchMode } from '../core/mobile';
 import { appState } from '../state';
 import { ensureAudioPermission, listAudioDevices } from '../engine/devices';
 import { theme } from '../theme';
@@ -472,8 +473,13 @@ export class ModuleView extends Container {
         dot.position.set(x, y);
         dot.eventMode = 'static';
         dot.cursor = 'crosshair';
-        // Generous hit area — PRD §13 touch targets.
-        dot.hitArea = { contains: (px: number, py: number) => px * px + py * py < 20 * 20 };
+        // Generous hit area — PRD §13 touch targets; fatter in touch mode.
+        dot.hitArea = {
+          contains: (px: number, py: number) => {
+            const r = isTouchMode() ? 28 : 20;
+            return px * px + py * py < r * r;
+          },
+        };
         dot.on('pointerdown', (e) => {
           e.stopPropagation();
           this.handlers.onPortDown(this.instance.id, port.id, e);

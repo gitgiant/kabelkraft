@@ -349,6 +349,11 @@
     background: var(--control);
     color: var(--text);
   }
+  /* Touch mode: make the hide/show grip a real thumb target. */
+  :global(html.kk-touch) .toolbar-grip {
+    height: 22px;
+    font-size: 13px;
+  }
   .toolbar {
     display: flex;
     align-items: center;

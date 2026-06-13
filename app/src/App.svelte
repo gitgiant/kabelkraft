@@ -3,6 +3,7 @@
   import { patchCanvas } from './canvas/PatchCanvas';
   import { appState } from './state';
   import { appSettings, onSettingsChange, type AppSettings } from './core/settings';
+  import { isTouchMode, onTouchModeChange } from './core/mobile';
   import { clearAutosave, readAutosave, writeAutosave } from './core/autosave';
   import AiImport from './ui/AiImport.svelte';
   import OptionsDialog from './ui/OptionsDialog.svelte';
@@ -64,6 +65,11 @@
     appState.midi.disabledInputs = new Set(s.midi.disabledInputs);
   }
 
+  // Touch mode flag on <html> — component CSS keys fat grips/targets off it.
+  function applyTouchClass(on: boolean) {
+    document.documentElement.classList.toggle('kk-touch', on);
+  }
+
   function onBeforeUnload(e: BeforeUnloadEvent) {
     if (appSettings().general.confirmLeave) e.preventDefault();
   }
@@ -87,7 +93,9 @@
   onMount(() => {
     const s = appSettings();
     applyChrome(s);
+    applyTouchClass(isTouchMode());
     const offSettings = onSettingsChange(applyChrome);
+    const offTouch = onTouchModeChange(applyTouchClass);
     window.addEventListener('beforeunload', onBeforeUnload);
 
     void patchCanvas.mount(canvasContainer).then(() => {
@@ -135,6 +143,7 @@
       window.removeEventListener('beforeunload', onBeforeUnload);
       offComposer();
       offSettings();
+      offTouch();
       for (const off of offDirty) off();
       clearInterval(saver);
     };
@@ -194,11 +203,14 @@
     display: flex;
     flex-direction: column;
     height: 100vh;
+    /* Mobile: track the *visible* viewport so browser chrome never crops us. */
+    height: 100dvh;
   }
   .main {
     display: flex;
     flex: 1;
     min-height: 0;
+    position: relative; /* anchor for touch-mode overlay drawers */
   }
   .canvas-container {
     position: relative;

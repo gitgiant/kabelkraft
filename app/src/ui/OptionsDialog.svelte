@@ -637,6 +637,16 @@
               </select>
             </label>
             <label class="row">
+              <span>Touch controls</span>
+              <select class="opt-touch-mode" bind:value={cfg.display.touchMode}
+                onchange={() => save((s) => { s.display.touchMode = cfg.display.touchMode; })}>
+                <option value="auto">Auto (detect)</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+              <span class="dim">drawers, bigger targets &amp; touch gestures — see Shortcuts</span>
+            </label>
+            <label class="row">
               <span>Visualizer FPS cap</span>
               <select class="opt-vis-fps" bind:value={cfg.display.visMaxFps}
                 onchange={() => save((s) => { s.display.visMaxFps = cfg.display.visMaxFps; })}>
@@ -702,6 +712,18 @@
                 <tr><td class="mono">Shift + click / drag</td><td>Multi-select modules</td></tr>
                 <tr><td class="mono">A W S E D F T G Y H U J K O L</td><td>QWERTY piano (relative to each keyboard's octave)</td></tr>
                 <tr><td class="mono">Double-press Stop</td><td>Panic — kill voices &amp; feedback loops</td></tr>
+              </tbody>
+            </table>
+            <h3>Touch gestures</h3>
+            <table class="shortcuts">
+              <tbody>
+                <tr><td class="mono">Two-finger tap</td><td>Undo</td></tr>
+                <tr><td class="mono">Three-finger tap</td><td>Redo</td></tr>
+                <tr><td class="mono">Pinch</td><td>Zoom &amp; pan the canvas</td></tr>
+                <tr><td class="mono">Long-press module</td><td>Add / remove it from the multi-selection</td></tr>
+                <tr><td class="mono">Long-press canvas</td><td>Rubber-band multi-select</td></tr>
+                <tr><td class="mono">Double-tap canvas</td><td>Zoom to fit the patch (again: 100%)</td></tr>
+                <tr><td class="mono">Swipe in from left / right edge</td><td>Open module palette / sample library</td></tr>
               </tbody>
             </table>
 

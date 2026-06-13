@@ -15,6 +15,7 @@
     type DirHandle,
     type LibraryEntry,
   } from '../core/library';
+  import { isTouchMode, onTouchModeChange } from '../core/mobile';
   import { appState } from '../state';
 
   // PRD §8.2 Sample Library: user's own folders, audition, favorites, search,
@@ -48,13 +49,25 @@
       .slice(0, MAX_ROWS),
   );
 
+  // Touch mode: the library floats over the canvas as a right-side drawer.
+  let touch = $state(isTouchMode());
+
   onMount(() => {
     const onToggle = () => {
       open = !open;
       if (open && folders.length === 0) void restoreFolders();
     };
+    const onOpen = () => {
+      if (!open) onToggle(); // edge swipe (PatchCanvas) — open only
+    };
+    const offTouch = onTouchModeChange((on) => (touch = on));
     window.addEventListener('kk-toggle-library', onToggle);
-    return () => window.removeEventListener('kk-toggle-library', onToggle);
+    window.addEventListener('kk-open-library', onOpen);
+    return () => {
+      offTouch();
+      window.removeEventListener('kk-toggle-library', onToggle);
+      window.removeEventListener('kk-open-library', onOpen);
+    };
   });
 
   /** Persisted handles: scan granted ones, list the rest with a re-grant button. */
@@ -176,8 +189,12 @@
 </script>
 
 {#if open}
+  {#if touch}
+    <div class="lib-scrim" onpointerdown={() => (open = false)}></div>
+  {/if}
   <div
     class="library"
+    class:touch
     role="region"
     aria-label="Sample Library"
     ondragover={(e) => e.preventDefault()}
@@ -202,6 +219,9 @@
         hidden
         onchange={addFiles}
       />
+      {#if touch}
+        <button class="lib-close" onclick={() => (open = false)} aria-label="Close sample library">✕</button>
+      {/if}
     </div>
 
     <div class="lib-controls">
@@ -275,6 +295,24 @@
     border-left: 1px solid var(--panel-border);
     user-select: none;
     min-height: 0;
+  }
+  /* Touch mode: drawer floats over the canvas — no layout reflow on toggle. */
+  .library.touch {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 60;
+    width: min(80vw, 280px);
+  }
+  .lib-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 59;
+    background: rgba(0, 0, 0, 0.35);
+  }
+  .lib-close {
+    padding: 2px 10px;
   }
   .lib-header,
   .lib-controls {

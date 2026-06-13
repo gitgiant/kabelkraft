@@ -81,7 +81,7 @@ describe('unified settings store', () => {
 
   it('sanitize clamps ranges and rejects foreign values', () => {
     const s = sanitizeSettings({
-      display: { theme: 'neon', uiScale: 99, visMaxFps: -5, visMaxRes: 2 },
+      display: { theme: 'neon', uiScale: 99, visMaxFps: -5, visMaxRes: 2, touchMode: 'sideways' },
       general: { defaultTempo: 10000, confirmLeave: 'yes', autosaveInterval: 1 },
       audio: { latencyHint: 'turbo', sampleRate: 12345, masterGain: 9, muted: 1 },
       midi: { disabledInputs: ['a', 7, 'b'] },
@@ -90,6 +90,7 @@ describe('unified settings store', () => {
     expect(s.display.uiScale).toBe(1.5);
     expect(s.display.visMaxFps).toBe(1);
     expect(s.display.visMaxRes).toBe(1);
+    expect(s.display.touchMode).toBe('auto'); // foreign value → default
     expect(s.general.defaultTempo).toBe(300);
     expect(s.general.confirmLeave).toBe(false);
     expect(s.general.autosaveInterval).toBe(5);
