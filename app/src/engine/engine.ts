@@ -127,13 +127,23 @@ export class Engine {
       if (this.ctx.state === 'suspended') await this.ctx.resume();
       return;
     }
-    this.ctx = new AudioContext({
+    const baseOpts: AudioContextOptions = {
       latencyHint: opts?.latencyHint ?? 'interactive',
       ...(opts?.sampleRate ? { sampleRate: opts.sampleRate } : {}),
+    };
+    try {
       // Constructor-time sink (Chrome 110+) so maxChannelCount reflects the
       // chosen interface, not the system default device.
-      ...(opts?.sinkId ? { sinkId: opts.sinkId } : {}),
-    } as AudioContextOptions);
+      this.ctx = new AudioContext({
+        ...baseOpts,
+        ...(opts?.sinkId ? { sinkId: opts.sinkId } : {}),
+      } as AudioContextOptions);
+    } catch (err) {
+      // A persisted output device that's gone (unplugged interface, other
+      // machine) must never brick audio — fall back to the system default.
+      if (!opts?.sinkId) throw err;
+      this.ctx = new AudioContext(baseOpts);
+    }
     if (!this.ctx.audioWorklet) {
       throw new Error(
         'AudioWorklet unavailable — page must be served over HTTPS or localhost (secure context).',
