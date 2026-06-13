@@ -21,6 +21,7 @@ import {
 } from './core/face';
 import { MidiManager } from './core/midi';
 import { SttManager } from './core/stt';
+import type { LyricsLine } from './core/ailyrics';
 import { formatTransportText, noteName } from './core/texttools';
 import { DEFAULT_TRANSPORT, type TextEvent, type TransportState } from './core/types';
 import { Engine } from './engine/engine';
@@ -51,6 +52,8 @@ export type StateEvent =
   | 'faceLearnChanged' // face learn armed/canceled/completed
   | 'composerChanged' // piano-roll editor opened/closed
   | 'composerAiRequest' // container 🤖 button: open a composer's AI popup
+  | 'lyricsChanged' // lyrics editor opened/closed
+  | 'lyricsAiRequest' // container 🤖 button: open a lyrics editor's AI popup
   | 'rangeConfigChanged' // knob/slider range popup opened/closed
   | 'projectMetaChanged'; // name/artists/description/picture edited
 
@@ -124,6 +127,10 @@ export class AppState {
   textValues: Record<string, TextEvent> = {};
   /** Last emitted transport readout per transporttext module (change detection). */
   private transportTextLast = new Map<string, string>();
+  /** Song position at the previous lyrics tick — detects line crossings. */
+  private lyricsPrevPos = 0;
+  /** Was the transport playing last lyrics tick — (re)arms line 0 on play-start. */
+  private lyricsWasPlaying = false;
 
   /**
    * Emit a text event from a producer module and route it along text wires
@@ -169,6 +176,37 @@ export class AppState {
     for (const [id, pitches] of Object.entries(textNotes)) {
       if (pitches.length > 0) this.emitText(id, pitches.map(noteName).join(' '), true);
     }
+    this.tickLyrics();
+  }
+
+  /**
+   * Timed lyrics: emit a line on the Text out as the transport's song position
+   * crosses its `start` beat. Song-absolute (no loop); a backward jump or a
+   * fresh play re-arms so re-crossing replays the line in sync.
+   */
+  private tickLyrics(): void {
+    const playing = this.transport.playing;
+    const cur = this.transport.songPosition;
+    if (playing) {
+      // (Re)start or a backward seek/loop: arm the window so a line sitting
+      // exactly at the current position still fires.
+      let lo = this.lyricsPrevPos;
+      if (!this.lyricsWasPlaying || cur < lo) lo = cur - 1e-9;
+      for (const mod of this.graph.modules.values()) {
+        if (mod.type !== 'lyrics') continue;
+        const lines = mod.data?.lines as LyricsLine[] | undefined;
+        if (!Array.isArray(lines)) continue;
+        // Lines are stored sorted ascending; the last match in (lo, cur] wins.
+        let pick: LyricsLine | undefined;
+        for (const ln of lines) {
+          if (typeof ln?.start !== 'number') continue;
+          if (ln.start > lo && ln.start <= cur) pick = ln;
+        }
+        if (pick) this.emitText(mod.id, pick.text, true);
+      }
+      this.lyricsPrevPos = cur;
+    }
+    this.lyricsWasPlaying = playing;
   }
   // -- derived tints (frame color → UI accents) -----------------------------
 
@@ -452,6 +490,38 @@ export class AppState {
   closeRangeConfig(): void {
     this.rangeConfigOpen = null;
     this.emit('rangeConfigChanged');
+  }
+
+  /** Lyrics module whose timed-sheet editor is open; null = closed. */
+  lyricsEditorOpen: string | null = null;
+  /** Container 🤖: open the lyrics editor with its AI popup up. */
+  lyricsAiRequest: string | null = null;
+
+  openLyrics(moduleId: string): void {
+    if (this.graph.modules.get(moduleId)?.type !== 'lyrics') return;
+    this.lyricsEditorOpen = moduleId;
+    this.emit('lyricsChanged');
+  }
+
+  closeLyrics(): void {
+    this.lyricsEditorOpen = null;
+    this.emit('lyricsChanged');
+  }
+
+  requestLyricsAi(moduleId: string): void {
+    this.openLyrics(moduleId);
+    if (this.lyricsEditorOpen !== moduleId) return; // not a lyrics module
+    this.lyricsAiRequest = moduleId;
+    this.emit('lyricsAiRequest');
+  }
+
+  /** Replace a lyrics module's timed sheet (one undo step). */
+  setLyricsClip(moduleId: string, lines: LyricsLine[], name?: string): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (mod?.type !== 'lyrics') return;
+    this.beginUndoable();
+    mod.data = { ...mod.data, kind: 'kklyrics', lines, ...(name ? { name } : {}) };
+    this.emit('graphChanged');
   }
   /** moduleId → performance.now() of last note-on, for data-wire pulses. */
   noteFlash = new Map<string, number>();

@@ -19,6 +19,7 @@ import { MODULE_DEFS } from './registry';
 import { generateSpecPack } from './aispec';
 import { parseKkGroup } from './aiimport';
 import { MIDI_SPEC, parseKkMidi } from './aimidi';
+import { generateLyricsSpecPack, parseKkLyrics, type LyricsSongContext } from './ailyrics';
 import { generateFaceSpecPack, parseKkFace } from './aiface';
 import { generateProjectSpecPack, parseKkProject } from './aiproject';
 import { generateVisualSpecPack, parseKkVis } from './aivisual';
@@ -364,6 +365,28 @@ export function generateMidiClip(
     MIDI_SPEC,
     'MIDI clip',
     parseKkMidi,
+    userPrompt,
+    settings,
+    maxAttempts,
+    onProgress,
+  );
+}
+
+/** Lyrics flavour: timed .kklyrics sheet; live BPM + time signature ride in the spec. */
+export function generateLyricsClip(
+  userPrompt: string,
+  ctx: LyricsSongContext,
+  settings: AiSettings,
+  maxAttempts = 3,
+  onProgress?: (status: string) => void,
+): Promise<GenerateResult> {
+  return generateWithSpec(
+    generateLyricsSpecPack(undefined, ctx),
+    'lyrics',
+    (text) => {
+      const r = parseKkLyrics(text);
+      return { ok: r.ok, errors: r.errors };
+    },
     userPrompt,
     settings,
     maxAttempts,

@@ -10,6 +10,7 @@
   import FaceEditor from './ui/FaceEditor.svelte';
   import ModulePalette from './ui/ModulePalette.svelte';
   import PianoRoll from './ui/PianoRoll.svelte';
+  import LyricsEditor from './ui/LyricsEditor.svelte';
   import RangeConfig from './ui/RangeConfig.svelte';
   import SampleEditor from './ui/SampleEditor.svelte';
   import SampleLibrary from './ui/SampleLibrary.svelte';
@@ -176,6 +177,7 @@
     <PianoRoll moduleId={id} />
   {/each}
   <RangeConfig />
+  <LyricsEditor />
   <VisEditor />
   <VisualizerOverlay />
   <AiImport />

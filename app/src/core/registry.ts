@@ -1139,6 +1139,22 @@ const textinput: ModuleDef = {
   height: 140,
 };
 
+const lyrics: ModuleDef = {
+  type: 'lyrics',
+  name: 'Lyrics',
+  category: 'data',
+  description:
+    'Timed lyric sheet — generate lines from a prompt with AI (gets the song BPM + time signature), ' +
+    'or write them by hand. Each line emits on the Text out as the transport reaches its beat, so ' +
+    'lyrics play back in sync like a song. Wire Text into a Visualizer for karaoke.',
+  ports: [
+    { id: 'out', label: 'Text', type: 'text', direction: 'out', description: 'The current lyric line, emitted as the song reaches it.' },
+  ],
+  params: [],
+  width: 250,
+  height: 150,
+};
+
 const notenames: ModuleDef = {
   type: 'notenames',
   name: 'Note Names',
@@ -1159,6 +1175,6 @@ export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
     voice, osc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
     mixer, recorder, audioInDef, audioOut, levels, visualizer,
-    stt, transporttext, textinput, notenames, intelligence,
+    stt, transporttext, textinput, lyrics, notenames, intelligence,
   ].map((d) => [d.type, d]),
 );

@@ -403,6 +403,13 @@ export class ModuleView extends Container {
       );
     }
 
+    // Lyrics: AI line writing — opens the timed-sheet editor with its AI popup.
+    if (this.instance.type === 'lyrics') {
+      titleButton('🤖', this.w - 8, ['AI lyrics', 'Describe a song — the AI writes timed lyric lines.'], () =>
+        appState.requestLyricsAi(this.instance.id),
+      );
+    }
+
     // Visualizer: AI scene writing — opens the graph editor, whose AI bar
     // carries the container's full configuration (inputs + current graph).
     if (this.instance.type === 'visualizer') {
@@ -1120,7 +1127,7 @@ export class ModuleView extends Container {
       this.buildVisFace(x, top + band + 4, gw);
       return;
     }
-    if (type === 'stt' || type === 'textinput' || type === 'transporttext' || type === 'notenames') {
+    if (type === 'stt' || type === 'textinput' || type === 'transporttext' || type === 'notenames' || type === 'lyrics') {
       const band = this.ctrlBandH(ctrls.length, gw);
       this.buildCtrlGrid(ctrls, x, top, gw, band);
       this.buildTextFace(x, top + band + 4, gw);
@@ -1987,7 +1994,7 @@ export class ModuleView extends Container {
     this.updateTextFace();
 
     const type = this.instance.type;
-    if (type === 'stt' || type === 'textinput') {
+    if (type === 'stt' || type === 'textinput' || type === 'lyrics') {
       bg.eventMode = 'static';
       bg.cursor = 'pointer';
       bg.on('pointerdown', (e) => {
@@ -1997,6 +2004,8 @@ export class ModuleView extends Container {
           if (!on && !appState.stt.supported()) {
             this.tooltip.show(['Speech to Text', 'Speech recognition is not available in this browser.'], e.clientX, e.clientY);
           }
+        } else if (type === 'lyrics') {
+          appState.openLyrics(this.instance.id);
         } else {
           const last = (this.instance.data?.lastText as string) ?? '';
           const text = window.prompt('Text to send', last);
@@ -2008,7 +2017,9 @@ export class ModuleView extends Container {
         this.tooltip.show(
           type === 'stt'
             ? ['Speech to Text', 'Click to start/stop listening (mic permission).']
-            : ['Text Input', 'Click to type a line; it is sent on OK.'],
+            : type === 'lyrics'
+              ? ['Lyrics', 'Click to open the timed-lyrics editor (AI or hand-write).']
+              : ['Text Input', 'Click to type a line; it is sent on OK.'],
           e.clientX,
           e.clientY,
         ),
@@ -2035,9 +2046,11 @@ export class ModuleView extends Container {
             : 'speech recognition unavailable'
         : type === 'textinput'
           ? 'click to type'
-          : type === 'transporttext'
-            ? 'transport readout'
-            : 'last notes';
+          : type === 'lyrics'
+            ? `${((this.instance.data?.lines as unknown[])?.length ?? 0)} lines · click to edit`
+            : type === 'transporttext'
+              ? 'transport readout'
+              : 'last notes';
   }
 
   // -- MIDI device row (midiIn/midiOut) ----------------------------------------
