@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
+  import { appSettings, updateSettings } from '../core/settings';
   import { appState } from '../state';
   import { downloadProject } from './project-io';
 
@@ -8,6 +9,7 @@
   let tempo = $state(appState.transport.tempo);
   let playing = $state(appState.transport.playing);
   let audioOn = $state(false);
+  let muted = $state(false);
   let canUndo = $state(false);
   let canRedo = $state(false);
   let canGroup = $state(false);
@@ -57,7 +59,11 @@
     });
     const offG = appState.on('graphChanged', refreshEditState);
     const offS = appState.on('selectionChanged', refreshEditState);
-    const poll = setInterval(() => (audioOn = appState.engine.running), 500);
+    const poll = setInterval(() => {
+      audioOn = appState.engine.running;
+      const a = appSettings().audio;
+      muted = a.muted || a.masterGain === 0;
+    }, 500);
     return () => {
       offM();
       window.removeEventListener('keydown', onLearnKey);
@@ -71,8 +77,24 @@
   });
 
   async function enableAudio() {
-    await appState.ensureEngine();
+    try {
+      await appState.ensureEngine();
+    } catch (err) {
+      // Never fail silently — surface why the engine couldn't start
+      // (insecure context, device trouble, worklet load failure…).
+      alert(`Audio failed to start:\n${err instanceof Error ? err.message : String(err)}`);
+    }
     audioOn = appState.engine.running;
+  }
+
+  function unmute() {
+    updateSettings((s) => {
+      s.audio.muted = false;
+      if (s.audio.masterGain === 0) s.audio.masterGain = 1;
+    });
+    const a = appSettings().audio;
+    appState.engine.setMasterGain(a.masterGain);
+    muted = false;
   }
 
   function saveProject() {
@@ -289,6 +311,11 @@
 
     {#if !audioOn}
       <button class="enable-audio" onclick={enableAudio}>🔊 Enable Audio</button>
+    {:else if muted}
+      <button class="muted-warn" onclick={unmute}
+        title="Output is muted in Options → Audio — click to unmute">
+        🔇 Muted
+      </button>
     {:else}
       <span class="audio-on" title="Audio engine running">🔊</span>
     {/if}
@@ -419,6 +446,12 @@
   .enable-audio {
     background: #ffb13d;
     color: #1a1a20;
+    font-weight: 600;
+  }
+  .muted-warn {
+    background: #3a1414;
+    border-color: #ff5a5a;
+    color: #ff8a8a;
     font-weight: 600;
   }
   .midi-learn {
