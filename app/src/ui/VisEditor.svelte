@@ -488,7 +488,9 @@
 
   /** Container state (poles + current graph), gated by the user's AI-input prefs. */
   function visContext(): string {
-    return aiInputEnabled('visual', 'container') ? buildVisContext(appState.graph, moduleId) : '';
+    return aiInputEnabled('visual', 'container') && moduleId
+      ? buildVisContext(appState.graph, moduleId)
+      : '';
   }
 
   async function copyVisSpec(): Promise<void> {
