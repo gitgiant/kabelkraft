@@ -1,7 +1,31 @@
 import { patchCanvas } from '../canvas/PatchCanvas';
 import { appState } from '../state';
 import { DRUM_BASE_NOTE, renderDefaultKit } from '../core/drumkit';
-import { OSC_WAVES, VCF_MODES } from '../core/registry';
+import { OSC_WAVES, VCF_MODES, REVERB_ALGOS } from '../core/registry';
+import type { FaceSpec } from '../core/face';
+
+/** Uniform shrink applied to every built-in face: smaller knobs + tighter spacing. */
+const FACE_SCALE = 0.75;
+function scaleFace(f: FaceSpec, k = FACE_SCALE): FaceSpec {
+  const s = (v: number) => Math.round(v * k);
+  return {
+    ...f,
+    width: s(f.width),
+    height: s(f.height),
+    elements: f.elements.map((e) => ({
+      ...e,
+      x: s(e.x),
+      y: s(e.y),
+      w: s(e.w),
+      h: s(e.h),
+      ...(e.size !== undefined ? { size: Math.max(8, s(e.size)) } : {}),
+    })),
+  };
+}
+/** setGroupFace, pre-scaled — every starter face routes through here. */
+function setFace(groupId: string, face: FaceSpec): void {
+  appState.setGroupFace(groupId, scaleFace(face));
+}
 
 type FaceKnob = { id: string; kind: 'knob'; x: number; y: number; w: number; h: number; label: string; moduleId: string; paramId: string };
 type FaceLabel = { id: string; kind: 'label'; x: number; y: number; w: number; h: number; text: string; size: number };
@@ -84,7 +108,7 @@ export function addPolySynth(cx = POLY_CX, cy = POLY_CY): void {
     ['Wave', 'wave'], ['Octave', 'octave'], ['Semi', 'semi'], ['Fine', 'fine'],
     ['PWM', 'pwm'], ['Sub', 'subLevel'], ['Level', 'level'],
   ];
-  appState.setGroupFace(oscGroup.id, {
+  setFace(oscGroup.id, {
     width: 580,
     height: 460,
     grid: 10,
@@ -99,7 +123,7 @@ export function addPolySynth(cx = POLY_CX, cy = POLY_CY): void {
   const envGroup = appState.graph.createGroup(
     'Envelopes', [adsrA.id, adsrF.id], [], ...at(-640, 40),
   );
-  appState.setGroupFace(envGroup.id, {
+  setFace(envGroup.id, {
     width: 340,
     height: 240,
     grid: 10,
@@ -121,7 +145,7 @@ export function addPolySynth(cx = POLY_CX, cy = POLY_CY): void {
   const fxGroup = appState.graph.createGroup(
     'FX', [delay.id, reverb.id], [], ...at(560, -120),
   );
-  appState.setGroupFace(fxGroup.id, {
+  setFace(fxGroup.id, {
     width: 340,
     height: 240,
     grid: 10,
@@ -152,7 +176,7 @@ export function addPolySynth(cx = POLY_CX, cy = POLY_CY): void {
     id: string, x: number, y: number, w: number, h: number, label: string,
     target: { moduleId?: string; groupId?: string },
   ) => ({ id, kind: 'view' as const, x, y, w, h, label, ...target });
-  appState.setGroupFace(group.id, {
+  setFace(group.id, {
     width: 660,
     height: 600,
     grid: 10,
@@ -224,7 +248,7 @@ export function addMonoSynth(cx: number, cy: number): void {
     [],
     cx - 100, cy + 45,
   );
-  appState.setGroupFace(group.id, {
+  setFace(group.id, {
     width: 580,
     height: 350,
     grid: 10,
@@ -270,7 +294,7 @@ export function addSampler(cx: number, cy: number): void {
   wire(smpl.id, 'out', audioOut.id, 'in');
 
   const group = appState.graph.createGroup('Sampler', [smpl.id], [], cx - 100, cy + 45);
-  appState.setGroupFace(group.id, {
+  setFace(group.id, {
     width: 340,
     height: 230,
     grid: 10,
@@ -336,7 +360,7 @@ export function addDrumKit(cx: number, cy: number): void {
     elements.push(knob(`k${i}`, 10 + col * 72, 36 + r * 96, kit[i]?.name ?? `${i + 1}`, smplIds[i], 'level'));
   }
   elements.push({ id: 'm', kind: 'meter', x: 10, y: 240, w: 560, h: 16, label: 'Out', moduleId: mixer.id });
-  appState.setGroupFace(group.id, { width: 590, height: 280, grid: 10, snap: true, elements });
+  setFace(group.id, { width: 590, height: 280, grid: 10, snap: true, elements });
 }
 
 /**
@@ -498,7 +522,7 @@ export function addDrumSynth(cx: number, cy: number): void {
   );
   const view = (id: string, x: number, y: number, label: string, moduleId: string) =>
     ({ id, kind: 'view' as const, x, y, w: 320, h: 104, label, moduleId });
-  appState.setGroupFace(group.id, {
+  setFace(group.id, {
     width: 660,
     height: 830,
     grid: 10,
@@ -540,6 +564,87 @@ export function addDrumSynth(cx: number, cy: number): void {
       view('v6', 340, 598, 'Tom L', tomL.seq.id),
       view('v7', 10, 712, 'Tom H', tomH.seq.id),
       { id: 'm1', kind: 'meter' as const, x: 340, y: 760, w: 310, h: 16, label: 'Out', moduleId: mixer.id },
+    ],
+  });
+}
+
+/**
+ * pluckYea: a showcase of the two new physical-model primitives chained in one
+ * signal path — Karplus Pluck → tuned Resonator (long feedback ring) → hall
+ * reverb. Voice gives poly pluck (the resonator tracks the same pitch, so it
+ * rings in tune); the composer plays it on press-play. The pluck excites the
+ * resonator's near-max feedback waveguide for an evolving, shimmering strung-
+ * out tail.
+ */
+export function addPluckYea(cx: number, cy: number): void {
+  const at = (x: number, y: number): [number, number] => [cx + x, cy + y];
+  const wire = (fromId: string, fromPort: string, toId: string, toPort: string) =>
+    appState.connect({ moduleId: fromId, portId: fromPort }, { moduleId: toId, portId: toPort });
+
+  const composer = appState.addModule('composer', ...at(-820, -180));
+  const voice = appState.addModule('voice', ...at(-560, -160));
+  const pluck = appState.addModule('pluck', ...at(-300, -280));
+  const resonator = appState.addModule('resonator', ...at(-40, -180));
+  const reverb = appState.addModule('reverb', ...at(280, -180));
+  const vca = appState.addModule('vca', ...at(560, -120));
+  const audioOut = appState.ensureAudioOut(...at(800, -120));
+
+  // notes → poly voice → pluck exciter
+  wire(composer.id, 'notes', voice.id, 'notes');
+  wire(voice.id, 'pitch', pluck.id, 'pitch');
+  wire(voice.id, 'gate', pluck.id, 'gate');
+  // pluck → resonator (tracks the same pitch) → hall tail
+  wire(pluck.id, 'out', resonator.id, 'in');
+  wire(voice.id, 'pitch', resonator.id, 'pitch');
+  wire(resonator.id, 'out', reverb.id, 'in');
+  wire(reverb.id, 'out', vca.id, 'in');
+  wire(vca.id, 'out', audioOut.id, 'in');
+
+  // pluck: soft pick, bright position, long ring, slight inharmonic metal
+  appState.setParam(pluck.id, 'tone', 0.35);
+  appState.setParam(pluck.id, 'pos', 0.15);
+  appState.setParam(pluck.id, 'decay', 4);
+  appState.setParam(pluck.id, 'damp', 0.5);
+  appState.setParam(pluck.id, 'stretch', 0.12);
+  // resonator: near-max feedback ring + shimmer
+  appState.setParam(resonator.id, 'decay', 0.995);
+  appState.setParam(resonator.id, 'damp', 0.4);
+  appState.setParam(resonator.id, 'stretch', 0.2);
+  // big hall tail
+  appState.setParam(reverb.id, 'algo', REVERB_ALGOS.indexOf('hall'));
+  appState.setParam(reverb.id, 'size', 0.8);
+  appState.setParam(reverb.id, 'decay', 0.7);
+  appState.setParam(reverb.id, 'mix', 0.45);
+
+  const group = appState.graph.createGroup(
+    'pluckYea',
+    [composer.id, voice.id, pluck.id, resonator.id, reverb.id, vca.id],
+    [],
+    cx - 100, cy + 45,
+  );
+  setFace(group.id, {
+    width: 500,
+    height: 360,
+    grid: 10,
+    snap: true,
+    elements: [
+      caption('p0', 10, 10, 'PLUCK'),
+      knob('p1', 10, 28, 'Tone', pluck.id, 'tone'),
+      knob('p2', 90, 28, 'Pos', pluck.id, 'pos'),
+      knob('p3', 170, 28, 'Decay', pluck.id, 'decay'),
+      knob('p4', 250, 28, 'Damp', pluck.id, 'damp'),
+      knob('p5', 330, 28, 'Stretch', pluck.id, 'stretch'),
+      caption('r0', 10, 120, 'RESONATOR'),
+      knob('r1', 10, 138, 'Ring', resonator.id, 'decay'),
+      knob('r2', 90, 138, 'Damp', resonator.id, 'damp'),
+      knob('r3', 170, 138, 'Stretch', resonator.id, 'stretch'),
+      knob('r4', 250, 138, 'Mix', resonator.id, 'mix'),
+      caption('m0', 10, 230, 'REVERB / OUT'),
+      knob('m1', 10, 248, 'Rev Mix', reverb.id, 'mix'),
+      knob('m2', 90, 248, 'Rev Size', reverb.id, 'size'),
+      knob('m3', 170, 248, 'Rev Decay', reverb.id, 'decay'),
+      knob('m4', 250, 248, 'Level', vca.id, 'level'),
+      { id: 'mtr', kind: 'meter' as const, x: 330, y: 278, w: 160, h: 16, label: 'Out', moduleId: vca.id },
     ],
   });
 }
@@ -589,6 +694,14 @@ export const STARTERS: StarterPatch[] = [
     add: () => {
       const c = patchCanvas.viewCenter();
       addDrumSynth(c.x, c.y);
+    },
+  },
+  {
+    name: 'pluckYea',
+    description: 'Pluck → Resonator → hall: a Karplus string excites a long near-max-feedback resonator for a shimmering strung-out tail; press play',
+    add: () => {
+      const c = patchCanvas.viewCenter();
+      addPluckYea(c.x, c.y);
     },
   },
 ];

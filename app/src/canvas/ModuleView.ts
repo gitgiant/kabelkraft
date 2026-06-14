@@ -119,8 +119,8 @@ export const PORT_RADIUS = 7;
 const TITLE_H = 24;
 export { TITLE_H as MODULE_TITLE_H };
 /** Minimum knob-grid cell width / nominal fixed-band cell height. */
-const CELL_W = 64;
-const CELL_H = 60;
+const CELL_W = 52;
+const CELL_H = 48;
 
 /** Display width (seconds) of the sustain plateau in the envelope contour. */
 const SUSTAIN_DISPLAY_S = 0.4;
@@ -1032,7 +1032,7 @@ export class ModuleView extends Container {
     const rows = Math.ceil(ctrls.length / cols);
     const cellW = w / cols;
     const cellH = h / rows;
-    const r = Math.max(10, Math.min(20, (Math.min(cellW, cellH) - 28) / 2));
+    const r = Math.max(9, Math.min(16, (Math.min(cellW, cellH) - 26) / 2));
     ctrls.forEach((c, i) => {
       const cx = x + (i % cols) * cellW + cellW / 2;
       const cy = y + Math.floor(i / cols) * cellH + cellH / 2 + 2;

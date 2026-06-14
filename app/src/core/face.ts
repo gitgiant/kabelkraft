@@ -67,19 +67,19 @@ export interface FaceSpec {
 }
 
 export function defaultFace(): FaceSpec {
-  return { width: 320, height: 220, grid: 10, snap: true, elements: [] };
+  return { width: 320, height: 220, grid: 8, snap: true, elements: [] };
 }
 
 export const ELEMENT_DEFAULTS: Record<FaceElementKind, { w: number; h: number }> = {
-  knob: { w: 70, h: 86 },
-  slider: { w: 36, h: 120 },
-  xy: { w: 120, h: 120 },
-  button: { w: 70, h: 44 },
-  label: { w: 120, h: 20 },
+  knob: { w: 52, h: 64 },
+  slider: { w: 28, h: 92 },
+  xy: { w: 96, h: 96 },
+  button: { w: 54, h: 36 },
+  label: { w: 96, h: 18 },
   image: { w: 100, h: 100 },
-  meter: { w: 90, h: 16 },
-  readout: { w: 90, h: 22 },
-  view: { w: 160, h: 120 },
+  meter: { w: 72, h: 14 },
+  readout: { w: 72, h: 18 },
+  view: { w: 128, h: 96 },
 };
 
 export function newFaceElement(face: FaceSpec, kind: FaceElementKind, x: number, y: number): FaceElement {
