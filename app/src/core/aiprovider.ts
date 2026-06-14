@@ -184,7 +184,11 @@ async function callClaude(
     body: JSON.stringify({
       model: s.claude.model,
       max_tokens: maxTokens,
-      system,
+      // Cache the spec (stable prefix) so the repair loop's retries and rapid
+      // re-generations read it at ~0.1× instead of paying full price each call.
+      // Specs under the model's min cacheable prefix (~4096 tok on Opus) simply
+      // won't cache — no error, just no hit.
+      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
       messages,
     }),
   });
@@ -210,6 +214,14 @@ async function callOpenAiCompatible(
 ): Promise<string> {
   const base = target.baseUrl.trim().replace(/\/$/, '');
   const key = target.apiKey.trim();
+  // Anthropic models served via an OpenAI-compatible gateway (OpenRouter) honor
+  // a `cache_control` breakpoint on a structured system message — cache the spec
+  // prefix the same way as the direct Claude path. OpenAI/Ollama/etc. auto-cache
+  // (or keep a local KV cache), so a plain string system message is enough.
+  const cacheable = /anthropic|claude/i.test(target.model);
+  const systemMessage = cacheable
+    ? { role: 'system', content: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] }
+    : { role: 'system', content: system };
   const res = await fetch(`${base}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -219,7 +231,7 @@ async function callOpenAiCompatible(
     },
     body: JSON.stringify({
       model: target.model,
-      messages: [{ role: 'system', content: system }, ...messages],
+      messages: [systemMessage, ...messages],
       stream: false,
       temperature: 0.7,
     }),

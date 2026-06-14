@@ -42,6 +42,14 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 export interface LyricsSongContext {
   tempo: number;
   timeSignature: { num: number; denom: number };
+  /**
+   * Target song length in beats to pace lines against. There is no hard song
+   * length in the app, so callers derive one (e.g. longest clip × 4); omit to
+   * leave it out.
+   */
+  songLengthBeats?: number;
+  /** The dominant loop length in beats (longest clip), for "music loops every N". */
+  loopBeats?: number;
 }
 
 const FIELDS = `- \`start\`: beats from the SONG start (absolute, not a loop offset), >= 0.
@@ -65,11 +73,22 @@ function songContextLine(ctx?: LyricsSongContext): string {
   if (!ctx) return '';
   const num = ctx.timeSignature.num;
   const denom = ctx.timeSignature.denom;
-  return (
-    `## Song context\n\n` +
-    `- Tempo: ${Math.round(ctx.tempo)} BPM.\n` +
-    `- Time signature: ${num}/${denom} — one bar = ${num} beat${num === 1 ? '' : 's'}.\n`
-  );
+  const lines = [
+    `## Song context`,
+    ``,
+    `- Tempo: ${Math.round(ctx.tempo)} BPM.`,
+    `- Time signature: ${num}/${denom} — one bar = ${num} beat${num === 1 ? '' : 's'}.`,
+  ];
+  if (ctx.songLengthBeats && ctx.songLengthBeats > 0) {
+    const bars = Math.max(1, Math.round(ctx.songLengthBeats / num));
+    const loop =
+      ctx.loopBeats && ctx.loopBeats > 0 ? ` The music loops every ${ctx.loopBeats} beats.` : '';
+    lines.push(
+      `- Target song length: ~${bars} bars (${Math.round(ctx.songLengthBeats)} beats).${loop} ` +
+        `Space lines across this span; the user may state a different length in the prompt.`,
+    );
+  }
+  return lines.join('\n') + '\n';
 }
 
 export const LYRICS_SPEC = `# KabelKraft AI lyrics spec
@@ -104,9 +123,9 @@ ${GUIDANCE}
 export function generateLyricsSpecPack(userPrompt?: string, ctx?: LyricsSongContext): string {
   const prompt = userPrompt?.trim();
   const ctxBlock = songContextLine(ctx);
-  return [LYRICS_SPEC, ctxBlock, prompt ? `USER PROMPT: ${prompt}` : '']
+  return [prompt ? `USER PROMPT: ${prompt}` : '', LYRICS_SPEC, ctxBlock]
     .filter(Boolean)
-    .join('\n');
+    .join('\n\n');
 }
 
 export interface ParseLyricsResult {

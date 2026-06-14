@@ -11,6 +11,11 @@ export interface AiSettings {
   claude: { apiKey: string; model: string };
   openrouter: { apiKey: string; model: string };
   custom: { baseUrl: string; apiKey: string; model: string };
+  /**
+   * Per-flavor optional-input overrides: inputs[flavorId][inputId] = enabled.
+   * Sparse — absent keys fall back to the registry default (see aiflavors.ts).
+   */
+  inputs?: Record<string, Record<string, boolean>>;
 }
 
 /** Claude models worth offering for patch generation (best JSON adherence first). */
@@ -48,10 +53,27 @@ export function sanitizeAiSettings(raw: unknown): AiSettings {
       : PROVIDER_KINDS.includes(saved.provider as ProviderKind)
         ? (saved.provider as ProviderKind)
         : DEFAULT_SETTINGS.provider;
+  const inputs = sanitizeInputs(saved.inputs);
   return {
     provider,
     claude: { ...DEFAULT_SETTINGS.claude, ...saved.claude },
     openrouter: { ...DEFAULT_SETTINGS.openrouter, ...saved.openrouter },
     custom: { ...DEFAULT_SETTINGS.custom, ...saved.local, ...saved.custom },
+    ...(inputs ? { inputs } : {}),
   };
+}
+
+/** Keep only nested boolean entries; return undefined if nothing usable. */
+function sanitizeInputs(raw: unknown): Record<string, Record<string, boolean>> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out: Record<string, Record<string, boolean>> = {};
+  for (const [flavor, inputs] of Object.entries(raw as Record<string, unknown>)) {
+    if (!inputs || typeof inputs !== 'object') continue;
+    const f: Record<string, boolean> = {};
+    for (const [id, val] of Object.entries(inputs as Record<string, unknown>)) {
+      if (typeof val === 'boolean') f[id] = val;
+    }
+    if (Object.keys(f).length) out[flavor] = f;
+  }
+  return Object.keys(out).length ? out : undefined;
 }

@@ -150,7 +150,67 @@ export function buildGroupContext(graph: Graph, groupId: string): string {
   ].join('\n');
 }
 
-/** Prefix a user request with context, clearly separated. */
+/** Cap on drum voices listed in MIDI target context, to bound prompt size. */
+const MIDI_DRUM_CAP = 8;
+
+/**
+ * What a Composer clip feeds downstream — the single biggest steer for MIDI
+ * generation. Walks the `notes` output: `smpl` voices with `fixedPitch` on are
+ * a drum kit (pitch selects a drum), so emit their EXACT wired trigger pitches;
+ * anything else is melodic (pitch is the note). Returns '' when nothing is
+ * wired, so the model falls back to the spec's generic guidance.
+ */
+export function buildMidiTargetContext(graph: Graph, moduleId: string): string {
+  const consumers = graph.wiresOutOf({ moduleId, portId: 'notes' }).flatMap((w) => {
+    const m = graph.modules.get(w.to.moduleId);
+    if (!m) return [];
+    const trig = m.params.trigNote;
+    return [
+      {
+        type: m.type,
+        label: m.label,
+        trigNote: typeof trig === 'number' ? trig : undefined,
+        fixedPitch: m.params.fixedPitch === 1,
+      },
+    ];
+  });
+  if (consumers.length === 0) return '';
+
+  const drums = consumers.filter(
+    (c) => c.type === 'smpl' && c.fixedPitch && c.trigNote !== undefined,
+  );
+  const melodic = consumers.filter((c) => !(c.type === 'smpl' && c.fixedPitch));
+
+  const lines: string[] = [];
+  if (drums.length) {
+    const map = drums
+      .slice(0, MIDI_DRUM_CAP)
+      .sort((a, b) => a.trigNote! - b.trigNote!)
+      .map((d) => `${d.trigNote}=${d.label ?? d.type}`)
+      .join(', ');
+    const more = drums.length > MIDI_DRUM_CAP ? `, …(+${drums.length - MIDI_DRUM_CAP} more)` : '';
+    lines.push(
+      `This clip drives a DRUM KIT — each note's pitch selects a drum voice. ` +
+        `Use these exact trigger pitches (they override the generic drum map): ${map}${more}.`,
+    );
+  }
+  if (melodic.length) {
+    const via = melodic.map((m) => m.label ?? m.type).join(', ');
+    lines.push(
+      `This clip feeds a melodic instrument (via ${via}) — write pitched notes/chords; ` +
+        `pitch is the actual note, so stay in a musical register.`,
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * The user's request FIRST, then supporting context — the ask up front so the
+ * model doesn't have to dig past a large context dump to find it (a long
+ * context blob ahead of the prompt is why generations sometimes "couldn't see"
+ * the request). Context is uncached either way, so order here is free.
+ */
 export function withContext(context: string, prompt: string): string {
-  return `${context}\n\nRequest: ${prompt}`;
+  if (!context.trim()) return prompt;
+  return `Request: ${prompt}\n\n--- Context ---\n${context}`;
 }

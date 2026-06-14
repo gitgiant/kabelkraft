@@ -36,10 +36,11 @@ export const MIDI_GUIDANCE = `- Times are in beats, tempo-independent — the ap
 - Chords = several notes sharing the same \`start\`.
 - Keep velocities varied (accents ~0.9, ghosts ~0.3) so lines breathe.
 - \`prob\` < 1 on ornaments/fills makes loops evolve; keep structural notes at 1.
-- Stay inside a stated key/scale unless asked otherwise; land phrase endings
+- If the prompt names a key or scale, stay inside it and land phrase endings
   on chord tones.
-- Drum-map convention if asked for beats: kick 36, snare 38, closed hat 42,
-  open hat 46, clap 39, low/mid/high toms 41/45/48, ride 51, crash 49.`;
+- Default drum map if asked for beats (overridden by any wired-target pitches
+  given in the context): kick 36, snare 38, closed hat 42, open hat 46,
+  clap 39, low/mid/high toms 41/45/48, ride 51, crash 49.`;
 
 export const MIDI_SPEC = `# KabelKraft AI MIDI clip spec
 
@@ -70,7 +71,27 @@ ${MIDI_GUIDANCE}
 /** Spec + optional user prompt in one paste-able block (external chatbot flow). */
 export function generateMidiSpecPack(userPrompt?: string): string {
   const prompt = userPrompt?.trim();
-  return prompt ? `${MIDI_SPEC}\nUSER PROMPT: ${prompt}` : MIDI_SPEC;
+  return prompt ? `USER PROMPT: ${prompt}\n\n${MIDI_SPEC}` : MIDI_SPEC;
+}
+
+/**
+ * Render the clip's current notes as a "variate on these" instruction block —
+ * same JSON shape the model writes, so it can build on what's already there.
+ * Default per-note fields are omitted to keep the prompt small.
+ */
+export function existingNotesPrompt(clip: ComposerClip): string {
+  const r = (v: number) => Math.round(v * 1000) / 1000;
+  const notes = clip.notes.map((n) => {
+    const o: Record<string, number> = { start: r(n.start), length: r(n.length), pitch: n.pitch, vel: r(n.vel) };
+    if (n.pan !== 0) o.pan = r(n.pan);
+    if (n.release !== 0.5) o.release = r(n.release);
+    if (n.modX !== 0) o.modX = r(n.modX);
+    if (n.modY !== 0) o.modY = r(n.modY);
+    if (n.prob !== 1) o.prob = r(n.prob);
+    return o;
+  });
+  const doc = JSON.stringify({ kind: 'kkmidi', length: clip.length, notes });
+  return `Variate on existing notes — here is the current clip, build on it:\n\`\`\`json\n${doc}\n\`\`\``;
 }
 
 export interface ParseMidiResult {

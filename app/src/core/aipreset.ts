@@ -127,7 +127,7 @@ export function generatePresetSpecPack(graph: Graph, target: PresetTarget): stri
 export function generatePresetSpecPackWithPrompt(graph: Graph, target: PresetTarget, prompt?: string): string {
   const spec = generatePresetSpecPack(graph, target);
   const p = prompt?.trim();
-  return p ? `${spec}\n\nRequest: ${p}` : spec;
+  return p ? `Request: ${p}\n\n${spec}` : spec;
 }
 
 function asPortRef(v: unknown): { moduleId: string; portId: string } | null {
