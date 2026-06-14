@@ -279,6 +279,26 @@ const visualizer: ModuleDef = {
   height: 280,
 };
 
+const bgVisual: ModuleDef = {
+  type: 'bgvisual',
+  name: 'Background',
+  category: 'visual',
+  description:
+    'Background sink: paints a wired visualizer frame across the whole app window, ' +
+    'behind the patch (the patch canvas goes transparent while it is on). Wire any ' +
+    'visualizer’s Vis Out into Vis In — layer/chain scenes upstream first. Opacity ' +
+    'fades it; turn On off to restore the normal canvas background.',
+  ports: [
+    { id: 'vin', label: 'Vis In', type: 'visual', direction: 'in', description: 'Visualizer frame to paint full-window behind the patch.' },
+  ],
+  params: [
+    { id: 'enabled', label: 'On', min: 0, max: 1, default: 1, options: ['off', 'on'], randomizable: false },
+    { id: 'opacity', label: 'Opacity', min: 0, max: 1, default: 1, randomizable: false },
+  ],
+  width: 200,
+  height: 130,
+};
+
 // TODO(intelligence): placeholder module — the face shows one AI prompt
 // window per wired input type, but nothing is generated yet. Planned: each
 // prompt drives an input-aware AI flow (audio → analysis/description, notes →
@@ -1358,6 +1378,6 @@ export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
     voice, osc, fmosc, wtosc, smpl, pluck, resonator, addosc, granular, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
     mixer, recorder, audioInDef, audioOut, levels, visualizer,
-    stt, transporttext, textinput, lyrics, notenames, intelligence,
+    stt, transporttext, textinput, lyrics, notenames, intelligence, bgVisual,
   ].map((d) => [d.type, d]),
 );

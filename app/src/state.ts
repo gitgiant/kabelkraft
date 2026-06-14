@@ -108,6 +108,12 @@ export class AppState {
     return this.visHub.features(moduleId, performance.now());
   }
 
+  /** One visual-feature snapshot per rendered frame: the patch-canvas ticker
+   *  calls this so tiles, overlay and background share the same drained data. */
+  advanceVisFrame(): void {
+    this.visHub.advanceFrame();
+  }
+
   /** Total frames the WebGPU visual runtime rendered (e2e progress probe). */
   visFramesRendered(): number {
     return visFramesRendered();
@@ -136,6 +142,24 @@ export class AppState {
       if (up) upstream.push(up);
     }
     return { id: moduleId, graph, features: this.visFeatures(moduleId), upstream };
+  }
+
+  /**
+   * The visualizer currently routed to the window background, plus its opacity.
+   * Scans bgvisual modules (first enabled one wins) for a visual wire into Vis
+   * In and returns the source visualizer id. Null = no active background.
+   */
+  backgroundTarget(): { sourceId: string; opacity: number } | null {
+    for (const m of this.graph.modules.values()) {
+      if (m.type !== 'bgvisual') continue;
+      if ((m.params['enabled'] ?? 1) < 0.5) continue;
+      for (const w of this.graph.wires.values()) {
+        if (w.type !== 'visual' || w.to.moduleId !== m.id || w.to.portId !== 'vin') continue;
+        const src = this.graph.modules.get(w.from.moduleId);
+        if (src?.type === 'visualizer') return { sourceId: src.id, opacity: m.params['opacity'] ?? 1 };
+      }
+    }
+    return null;
   }
 
   // -- text streams (VISUALIZER_ENGINE_PLAN.md Phase 3) -----------------------

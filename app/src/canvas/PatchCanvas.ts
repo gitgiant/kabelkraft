@@ -35,8 +35,14 @@ interface ExpandedFrame {
   swatch: Graphics;
 }
 
+/** Pixi color number (0xRRGGBB) → CSS hex string for DOM background. */
+function cssHex(n: number): string {
+  return `#${(n >>> 0).toString(16).padStart(6, '0').slice(-6)}`;
+}
+
 export class PatchCanvas {
   private app = new Application();
+  private container: HTMLElement | null = null;
   private world = new Container();
   private frameLayer = new Container(); // expanded group frames (back)
   private wireLayer = new Graphics(); // wires (middle)
@@ -115,13 +121,20 @@ export class PatchCanvas {
     // Bake text/textures at >1× device pixels so labels stay crisp when zoomed
     // in (max zoom 2.5×). autoDensity keeps CSS size correct; app.screen stays
     // in CSS px, so all coordinate math below is unaffected.
+    // The renderer is permanently transparent so a BackgroundVisual canvas
+    // mounted behind it (z 0, same container) can show through; the normal grey
+    // is painted as the container's CSS background instead of by Pixi.
     await this.app.init({
-      background: theme.canvasBg,
+      backgroundAlpha: 0,
       resizeTo: container,
       antialias: true,
       resolution: Math.max(2.5, window.devicePixelRatio || 1),
       autoDensity: true,
     });
+    this.container = container;
+    container.style.backgroundColor = cssHex(theme.canvasBg);
+    this.app.canvas.style.position = 'relative';
+    this.app.canvas.style.zIndex = '1';
     container.appendChild(this.app.canvas);
     this.tooltip = new Tooltip(container);
 
@@ -194,13 +207,14 @@ export class PatchCanvas {
       for (const [id, v] of this.views) v.setSelected(appState.selectedModuleIds.has(id));
     });
     onThemeChange(() => {
-      this.app.renderer.background.color = theme.canvasBg;
+      if (this.container) this.container.style.backgroundColor = cssHex(theme.canvasBg);
       this.rebuildAll();
     });
 
     this.app.ticker.add(() => this.tick());
     this.syncViews();
   }
+
 
   private onKeyDown(e: KeyboardEvent): void {
     const tag = (document.activeElement?.tagName ?? '').toLowerCase();
@@ -1396,6 +1410,8 @@ export class PatchCanvas {
 
   private tick(): void {
     const now = performance.now();
+    // One shared visual-feature snapshot per frame (sync tiles/overlay/bg).
+    appState.advanceVisFrame();
     this.advanceTweens(now);
     this.wireLayer.clear();
     this.drawFrames();

@@ -126,6 +126,7 @@ class ContainerFeed {
   textStack: string[] = [];
   cached: VisFeatures | null = null;
   cachedAt = -1;
+  cachedFrame = -1;
 }
 
 /**
@@ -136,9 +137,21 @@ class ContainerFeed {
 export class VisFeatureHub {
   private feeds = new Map<string, ContainerFeed>();
   private sampleRate = 48000;
+  private frame = 0;
 
   setSampleRate(sr: number): void {
     this.sampleRate = sr;
+  }
+
+  /**
+   * Advance the shared frame counter — call once per rendered frame (the patch
+   * canvas ticker drives it). All features() calls between two advances return
+   * the same drained snapshot, so every consumer this frame (tiles, overlay,
+   * background) sees identical notes/onset and stays in sync. Until the first
+   * advance (headless tests) features() falls back to its ~2 ms time cache.
+   */
+  advanceFrame(): void {
+    this.frame++;
   }
 
   private feed(moduleId: string): ContainerFeed {
@@ -204,7 +217,13 @@ export class VisFeatureHub {
   features(moduleId: string, now: number): VisFeatures | null {
     const f = this.feeds.get(moduleId);
     if (!f) return null;
-    if (f.cached && now - f.cachedAt < 2) return f.cached;
+    if (f.cached) {
+      // With a heartbeat (frame > 0): one compute per frame, drained once,
+      // shared by every consumer — no fps cap, no cross-loop event stealing.
+      // Without one (tests): the original ~2 ms time window.
+      const sameFrame = this.frame > 0 ? f.cachedFrame === this.frame : now - f.cachedAt < 2;
+      if (sameFrame) return f.cached;
+    }
 
     // No audio yet (text-only containers, engine not started) → silent
     // windows; the feed existing at all means someone is feeding this module.
@@ -263,6 +282,7 @@ export class VisFeatureHub {
     f.onset = 0;
     f.cached = out;
     f.cachedAt = now;
+    f.cachedFrame = this.frame;
     return out;
   }
 }

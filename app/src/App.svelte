@@ -19,6 +19,7 @@
   import Tutorial from './ui/Tutorial.svelte';
   import VisEditor from './ui/VisEditor.svelte';
   import VisualizerOverlay from './ui/VisualizerOverlay.svelte';
+  import BackgroundVisual from './ui/BackgroundVisual.svelte';
   import { addPolySynth } from './ui/starters';
 
   let canvasContainer: HTMLDivElement;
@@ -193,7 +194,9 @@
         // A fresh Composer opens its anchored piano-roll panel.
         if (type === 'composer') appState.openComposer(inst.id);
       }}
-    ></div>
+    >
+      <BackgroundVisual />
+    </div>
     <Tutorial />
   </div>
   <SampleEditor />
