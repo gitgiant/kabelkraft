@@ -112,7 +112,7 @@ test('AI dialog copies spec + context + request', async ({ page, context }) => {
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   expect(clip).toContain('KabelKraft'); // the spec pack
   expect(clip).toContain('Current project:'); // live context rides along
-  expect(clip.trim().endsWith('Request: a warm dub bassline')).toBe(true);
+  expect(clip.trim().startsWith('Request: a warm dub bassline')).toBe(true); // prompt-first
 });
 
 test('container tiles (composer, visualizer) stretch beyond the 3× cap', async ({ page }) => {

@@ -21,7 +21,7 @@ describe('aiInputEnabled', () => {
   it('falls back to the registry default when unset', () => {
     expect(aiInputEnabled('midi', 'transport')).toBe(true);
     expect(aiInputEnabled('midi', 'existingNotes')).toBe(false);
-    expect(aiInputEnabled('patch', 'canvas')).toBe(false);
+    expect(aiInputEnabled('patch', 'canvas')).toBe(true);
     expect(aiInputEnabled('patch', 'groupConfig')).toBe(true);
   });
 
@@ -32,8 +32,8 @@ describe('aiInputEnabled', () => {
   it('honors a stored override over the default', () => {
     setAiInputEnabled('midi', 'transport', false);
     expect(aiInputEnabled('midi', 'transport')).toBe(false);
-    setAiInputEnabled('patch', 'canvas', true);
-    expect(aiInputEnabled('patch', 'canvas')).toBe(true);
+    setAiInputEnabled('patch', 'canvas', false);
+    expect(aiInputEnabled('patch', 'canvas')).toBe(false);
   });
 
   it('persists overrides through the settings store', () => {

@@ -40,8 +40,8 @@ export const AI_FLAVORS: AiFlavorDef[] = [
       {
         id: 'canvas',
         label: 'Canvas summary',
-        description: 'A count of the modules already on the canvas. Rarely useful — a patch is self-contained.',
-        default: false,
+        description: 'A count of the modules already on the canvas, so the patch can fit what is there.',
+        default: true,
       },
       {
         id: 'groupConfig',
