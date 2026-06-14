@@ -7,6 +7,8 @@
     type LyricsLine,
     type LyricsSongContext,
   } from '../core/ailyrics';
+  import { aiInputEnabled } from '../core/aiflavors';
+  import { clipFromData } from '../core/composer';
   import {
     generateLyricsClip,
     loadSettings,
@@ -33,8 +35,31 @@
   let aiReplace = $state(true);
   let aiSuccess = $state('');
 
-  function songCtx(): LyricsSongContext {
-    return { tempo: appState.transport.tempo, timeSignature: appState.transport.timeSignature };
+  /** Longest composer clip length in beats (the dominant loop), 0 if none. */
+  function longestClipBeats(): number {
+    let max = 0;
+    for (const m of appState.graph.modules.values()) {
+      if (m.type === 'composer') max = Math.max(max, clipFromData(m.data).length);
+    }
+    return max;
+  }
+
+  /**
+   * Song context for generation, gated by AI-input prefs. There is no hard song
+   * length in the app, so the target = longest clip × 4 (fallback 32 bars).
+   */
+  function songCtx(): LyricsSongContext | undefined {
+    const wantCtx = aiInputEnabled('lyrics', 'songContext');
+    const wantLen = aiInputEnabled('lyrics', 'songLength');
+    if (!wantCtx && !wantLen) return undefined;
+    const base: LyricsSongContext = {
+      tempo: appState.transport.tempo,
+      timeSignature: appState.transport.timeSignature,
+    };
+    if (!wantLen) return base;
+    const loop = longestClipBeats();
+    const songLengthBeats = loop > 0 ? loop * 4 : appState.transport.timeSignature.num * 32;
+    return { ...base, songLengthBeats, ...(loop > 0 ? { loopBeats: loop } : {}) };
   }
 
   function load() {

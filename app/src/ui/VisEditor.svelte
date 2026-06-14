@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
   import { buildVisContext, withContext } from '../core/aicontext';
+  import { aiInputEnabled } from '../core/aiflavors';
   import { loadSettings, providerReady, generateVisual } from '../core/aiprovider';
   import { generateVisualSpecPack, parseKkVis } from '../core/aivisual';
   import { appState } from '../state';
@@ -473,7 +474,7 @@
     }
     aiBusy = true;
     try {
-      const contextual = withContext(buildVisContext(appState.graph, moduleId), prompt);
+      const contextual = withContext(visContext(), prompt);
       const result = await generateVisual(contextual, settings, 3, (s) => (aiStatus = s));
       if (!applyKkVis(result.text)) aiStatus = 'Generation failed validation — errors below.';
       else aiStatus = '';
@@ -485,12 +486,18 @@
     }
   }
 
+  /** Container state (poles + current graph), gated by the user's AI-input prefs. */
+  function visContext(): string {
+    return aiInputEnabled('visual', 'container') ? buildVisContext(appState.graph, moduleId) : '';
+  }
+
   async function copyVisSpec(): Promise<void> {
     if (!moduleId) return;
     const prompt = aiPrompt.trim();
     const spec = generateVisualSpecPack();
-    const context = buildVisContext(appState.graph, moduleId);
-    const payload = prompt ? `${spec}\n\n${withContext(context, prompt)}` : `${spec}\n\n${context}`;
+    const context = visContext();
+    const head = prompt ? withContext(context, prompt) : context;
+    const payload = head ? `${head}\n\n${spec}` : spec;
     await navigator.clipboard.writeText(payload);
     aiCopied = true;
     aiPasteOpen = true;

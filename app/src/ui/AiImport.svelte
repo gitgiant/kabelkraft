@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { patchCanvas } from '../canvas/PatchCanvas';
   import { buildAiContext, buildGroupContext, withContext } from '../core/aicontext';
+  import { aiInputEnabled } from '../core/aiflavors';
 import { extractJson } from '../core/aiimport';
   import { generateProjectSpecPack, parseKkProject } from '../core/aiproject';
   import { MODULE_DEFS } from '../core/registry';
@@ -178,11 +179,7 @@ import { extractJson } from '../core/aiimport';
     readyPatch = '';
     try {
       const gen = mode === 'project' ? generateProject : generatePatch;
-      const context =
-        mode === 'group'
-          ? `${buildAiContext(appState.graph)}\n\n${buildGroupContext(appState.graph, groupId)}`
-          : buildAiContext(appState.graph);
-      const contextual = withContext(context, prompt);
+      const contextual = withContext(genContext(), prompt);
       const result = await gen(contextual, settings, 3, (s) => (genStatus = s));
       text = result.text;
       if (!result.ok) {
@@ -204,15 +201,24 @@ import { extractJson } from '../core/aiimport';
     }
   }
 
+  /** Optional context for this generation, gated by the user's AI-input prefs. */
+  function genContext(): string {
+    const flavor = mode === 'project' ? 'project' : 'patch';
+    const parts: string[] = [];
+    if (aiInputEnabled(flavor, 'canvas')) parts.push(buildAiContext(appState.graph));
+    if (mode === 'group' && aiInputEnabled('patch', 'groupConfig')) {
+      parts.push(buildGroupContext(appState.graph, groupId));
+    }
+    return parts.join('\n\n');
+  }
+
   async function copySpec() {
-    // Spec + live context + the user's request in one paste-able block.
+    // The user's request + live context + spec in one paste-able block (prompt first).
     const prompt = userPrompt.trim();
     const spec = mode === 'project' ? generateProjectSpecPack() : generateSpecPack();
-    const context =
-      mode === 'group'
-        ? `${buildAiContext(appState.graph)}\n\n${buildGroupContext(appState.graph, groupId)}`
-        : buildAiContext(appState.graph);
-    const payload = prompt ? `${spec}\n\n${withContext(context, prompt)}` : `${spec}\n\n${context}`;
+    const context = genContext();
+    const head = prompt ? withContext(context, prompt) : context;
+    const payload = head ? `${head}\n\n${spec}` : spec;
     await navigator.clipboard.writeText(payload);
     copied = true;
     setTimeout(() => (copied = false), 2000);

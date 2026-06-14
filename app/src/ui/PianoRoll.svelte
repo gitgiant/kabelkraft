@@ -18,8 +18,9 @@
     type ComposerNote,
   } from '../core/composer';
   import type { ComposerClip } from '../core/composer';
-  import { buildAiContext, withContext } from '../core/aicontext';
-import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
+  import { buildAiContext, buildMidiTargetContext, withContext } from '../core/aicontext';
+  import { aiInputEnabled } from '../core/aiflavors';
+  import { existingNotesPrompt, generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
   import {
     generateMidiClip,
     loadSettings,
@@ -743,10 +744,38 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
   let aiGenStatus = $state('');
   let aiCopied = $state(false);
   let aiReplace = $state(true);
+  let aiIncludeNotes = $state(false);
   let aiSuccess = $state('');
+
+  /** User prompt, optionally carrying the current clip's notes for variation. */
+  function aiUserPrompt(): string {
+    const base = aiPrompt.trim();
+    if (!aiIncludeNotes || notes.length === 0) return base;
+    const ex = existingNotesPrompt({ notes, length: clipLength });
+    return base ? `${base}\n\n${ex}` : ex;
+  }
+
+  /** Optional MIDI context (transport + downstream target), gated by AI-input prefs. */
+  function aiMidiContext(): string {
+    const parts: string[] = [];
+    if (aiInputEnabled('midi', 'canvas')) parts.push(buildAiContext(appState.graph));
+    if (aiInputEnabled('midi', 'transport')) {
+      parts.push(
+        `Transport: ${appState.transport.tempo} BPM, ` +
+          `${appState.transport.timeSignature.num}/${appState.transport.timeSignature.denom}; ` +
+          `this clip is ${clipLength} beats long.`,
+      );
+    }
+    if (aiInputEnabled('midi', 'targetInstrument')) {
+      const t = buildMidiTargetContext(appState.graph, moduleId);
+      if (t) parts.push(t);
+    }
+    return parts.join('\n');
+  }
 
   function openAi() {
     aiSettings = loadSettings(); // pick up changes made in the AI Patch dialog
+    aiIncludeNotes = aiInputEnabled('midi', 'existingNotes') && notes.length > 0;
     aiErrors = [];
     aiWarnings = [];
     aiSuccess = '';
@@ -754,7 +783,9 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
   }
 
   async function aiCopySpec() {
-    await navigator.clipboard.writeText(generateMidiSpecPack(aiPrompt));
+    await navigator.clipboard.writeText(
+      generateMidiSpecPack(withContext(aiMidiContext(), aiUserPrompt())),
+    );
     aiCopied = true;
     setTimeout(() => (aiCopied = false), 2000);
   }
@@ -799,12 +830,7 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
     aiWarnings = [];
     aiSuccess = '';
     try {
-      // Tempo/length context helps the model write a clip that fits the song.
-      const context =
-        `${buildAiContext(appState.graph)} Transport: ${appState.transport.tempo} BPM, ` +
-        `${appState.transport.timeSignature.num}/${appState.transport.timeSignature.denom}; ` +
-        `this clip is ${clipLength} beats long.`;
-      const result = await generateMidiClip(withContext(context, prompt), aiSettings, 3, (s) => (aiGenStatus = s));
+      const result = await generateMidiClip(withContext(aiMidiContext(), aiUserPrompt()), aiSettings, 3, (s) => (aiGenStatus = s));
       aiText = result.text;
       const parsed = parseKkMidi(result.text);
       aiErrors = parsed.errors;
@@ -1033,6 +1059,9 @@ import { generateMidiSpecPack, parseKkMidi } from '../core/aimidi';
             <div class="ai-messages ai-success">{aiSuccess}</div>
           {/if}
 
+          <label title={notes.length === 0 ? 'Clip is empty — nothing to variate on' : 'Sends the current notes to the AI and asks it to variate on them'}>
+            <input type="checkbox" bind:checked={aiIncludeNotes} disabled={notes.length === 0} /> Include existing notes as input (variate on them)
+          </label>
           <label><input type="checkbox" bind:checked={aiReplace} /> Replace existing notes (off = merge)</label>
           <div class="popup-actions">
             <button class="primary" onclick={aiImport} disabled={aiText.trim().length === 0}>Import</button>

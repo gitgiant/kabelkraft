@@ -445,7 +445,7 @@ export function generateMidiClip(
 /** Lyrics flavour: timed .kklyrics sheet; live BPM + time signature ride in the spec. */
 export function generateLyricsClip(
   userPrompt: string,
-  ctx: LyricsSongContext,
+  ctx: LyricsSongContext | undefined,
   settings: AiSettings,
   maxAttempts = 3,
   onProgress?: (status: string) => void,
