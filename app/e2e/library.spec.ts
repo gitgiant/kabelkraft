@@ -28,7 +28,8 @@ function wavBuffer(freq = 440, seconds = 0.1): Buffer {
 /** Open the panel and add two files through the fallback picker. */
 async function openWithFiles(page: Page): Promise<void> {
   await bootWithAudio(page);
-  await page.locator('.library-toggle').click();
+  // Samples now live in the module palette's "Samples" tab (1515c55).
+  await page.getByRole('tab', { name: 'Samples' }).click();
   await expect(page.locator('.library')).toBeVisible();
   await page.locator('.library input[type="file"]').setInputFiles([
     { name: 'kickme.wav', mimeType: 'audio/wav', buffer: wavBuffer(60) },
@@ -46,8 +47,8 @@ test('panel toggles, files add via fallback, search filters', async ({ page }) =
   await page.locator('.library .search').fill('');
   await expect(page.locator('.library .entry')).toHaveCount(2);
 
-  // Toggle closed again.
-  await page.locator('.library-toggle').click();
+  // Switch back to the Modules tab; the library unmounts.
+  await page.getByRole('tab', { name: 'Modules' }).click();
   await expect(page.locator('.library')).toBeHidden();
 });
 
