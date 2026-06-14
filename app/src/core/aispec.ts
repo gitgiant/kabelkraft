@@ -52,8 +52,10 @@ Wire types: notes (cyan), control (magenta, single fan-in), audio (amber, sums).
   sweep. Set \`voice.voices\` to 1 for a mono/bass patch, higher for polyphony.
 - **Two-oscillator / detune**: two \`osc\` both fed \`voice.pitch\`, both \`→ vcf.in\`
   (audio sums). Detune one with its \`fine\` param.
-- **FM**: wire one \`osc.out → another osc.fm\` (audio). The carrier's \`fmAmt\` sets
-  depth; the modulator's \`semi\`/\`fine\` set the ratio. Chain more for complex FM.
+- **FM**: use the \`fmosc\` component (2-op cell: built-in sine modulator → carrier).
+  \`Coarse\`/\`Detune\` set the ratio, \`Index\` the depth (wire an envelope to \`idxMod\`
+  for evolving brightness), \`Feedback\` adds grit. Chain \`fmosc.out → fmosc.fm\` for
+  deeper serial towers.
 - **Wavetable**: use \`wtosc\` (Position param + posMod input) in place of \`osc\`.
 - **Sampler**: \`note source → smpl → audioOut\`. \`smpl\` has its own amp envelope.
 - **Drum kit**: one \`composer\` (its \`data.notes\` are the beat; each note's \`pitch\`
@@ -144,35 +146,37 @@ const EXAMPLES = `
 One \`voice\` (mono) drives the \`osc\`; the amp \`envelope\` shapes the \`vca\`, a second
 \`envelope\` sweeps the \`vcf\` cutoff. This is the core subtractive recipe.
 
-### 2. FM pad (osc → osc.fm)
+### 2. FM pad (fmosc)
 \`\`\`json
 {
   "kind": "kkgroup", "formatVersion": 1, "name": "FM Pad",
   "modules": [
     { "id": "kb", "type": "keyboard" },
     { "id": "voice", "type": "voice", "params": { "voices": 8, "glide": 0 } },
-    { "id": "modop", "type": "osc", "params": { "wave": 0, "semi": 12 } },
-    { "id": "carrier", "type": "osc", "params": { "wave": 0, "fmAmt": 0.5 } },
+    { "id": "fm", "type": "fmosc", "params": { "coarse": 2, "index": 3, "feedback": 0.1 } },
     { "id": "env", "type": "envelope", "params": { "attack": 0.8, "decay": 0.5, "sustain": 0.7, "release": 2.5 } },
+    { "id": "ienv", "type": "envelope", "params": { "attack": 0.01, "decay": 1.5, "sustain": 0.2, "release": 1.5 } },
     { "id": "vca", "type": "vca" },
     { "id": "verb", "type": "reverb", "params": { "algo": 1, "decay": 0.8, "mix": 0.45 } },
     { "id": "out", "type": "audioOut" }
   ],
   "wires": [
     { "from": { "module": "kb", "port": "notes" }, "to": { "module": "voice", "port": "notes" } },
-    { "from": { "module": "voice", "port": "pitch" }, "to": { "module": "modop", "port": "pitch" } },
-    { "from": { "module": "voice", "port": "pitch" }, "to": { "module": "carrier", "port": "pitch" } },
-    { "from": { "module": "modop", "port": "out" }, "to": { "module": "carrier", "port": "fm" } },
+    { "from": { "module": "voice", "port": "pitch" }, "to": { "module": "fm", "port": "pitch" } },
     { "from": { "module": "voice", "port": "gate" }, "to": { "module": "env", "port": "gate" } },
-    { "from": { "module": "carrier", "port": "out" }, "to": { "module": "vca", "port": "in" } },
+    { "from": { "module": "voice", "port": "gate" }, "to": { "module": "ienv", "port": "gate" } },
+    { "from": { "module": "ienv", "port": "out" }, "to": { "module": "fm", "port": "idxMod" } },
+    { "from": { "module": "fm", "port": "out" }, "to": { "module": "vca", "port": "in" } },
     { "from": { "module": "env", "port": "out" }, "to": { "module": "vca", "port": "cv" } },
     { "from": { "module": "vca", "port": "out" }, "to": { "module": "verb", "port": "in" } },
     { "from": { "module": "verb", "port": "out" }, "to": { "module": "out", "port": "in" } }
   ]
 }
 \`\`\`
-\`modop\` (one octave up) phase-modulates \`carrier\` through its \`fm\` audio input —
-that is FM, no special module needed. Polyphonic via an 8-voice \`voice\`.
+The \`fmosc\` is a self-contained 2-op FM cell (built-in sine modulator → carrier).
+\`coarse\`/\`detune\` set the ratio, \`index\` the depth; a second envelope into \`idxMod\`
+gives the classic FM brightness-decay. Chain \`fmosc.out → fmosc.fm\` for deeper towers.
+Polyphonic via an 8-voice \`voice\`.
 
 ### 3. Drum kit (composer → sample voices)
 \`\`\`json

@@ -754,10 +754,11 @@ const osc: ModuleDef = {
   description:
     'Single oscillator voice component. Pitch input (MIDI/127) sets the frequency — wire a ' +
     'Voice module for polyphony or any control source for drones; unwired it plays C4. ' +
-    'FM input phase-modulates from another audio signal.',
+    'Pulse width is modulatable (PWM Mod); a built-in sub oscillator adds weight. ' +
+    'For frequency modulation use the FM Osc component.',
   ports: [
     { id: 'pitch', label: 'Pitch', type: 'control', direction: 'in', description: 'Pitch as MIDI/127. Polyphonic from a Voice module.' },
-    { id: 'fm', label: 'FM', type: 'audio', direction: 'in', description: 'Phase modulation input; depth set by the FM parameter.' },
+    { id: 'pwmMod', label: 'PWM Mod', type: 'control', direction: 'in', description: 'Pulse-width modulation, added to the PWM parameter. Wire an LFO/Envelope.' },
     audioOutPort('Oscillator output (per-voice lanes when the pitch input is polyphonic).'),
   ],
   params: [
@@ -766,11 +767,47 @@ const osc: ModuleDef = {
     { id: 'semi', label: 'Semi', min: -12, max: 12, default: 0, unit: 'st', randomizable: true },
     { id: 'fine', label: 'Fine', min: -100, max: 100, default: 0, unit: 'ct', randomizable: true },
     { id: 'pwm', label: 'PWM', min: 0.05, max: 0.95, default: 0.5, randomizable: true },
-    { id: 'fmAmt', label: 'FM Amt', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'subLevel', label: 'Sub', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'subOct', label: 'Sub Oct', min: 0, max: 1, default: 0, options: ['-1', '-2'], randomizable: false },
+    { id: 'subWave', label: 'Sub Wave', min: 0, max: 1, default: 0, options: ['sine', 'square'], randomizable: false },
     { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
   ],
   width: 240,
   height: 230,
+};
+
+export const FM_CARRIER_WAVES = ['sine', 'triangle', 'square', 'sawtooth'] as const;
+
+const fmosc: ModuleDef = {
+  type: 'fmosc',
+  name: 'FM Osc',
+  category: 'component',
+  description:
+    'Two-operator FM cell: a built-in sine modulator phase-modulates the carrier. ' +
+    'Pitch input (MIDI/127) sets the frequency; Coarse/Detune set the modulator ratio, ' +
+    'Index the depth (wire an envelope to Idx Mod for evolving brightness), Feedback adds ' +
+    'grit (sine→saw→noise). The FM input feeds the modulator — chain FM Osc → FM Osc.fm ' +
+    'for deeper serial operator towers.',
+  ports: [
+    { id: 'pitch', label: 'Pitch', type: 'control', direction: 'in', description: 'Pitch as MIDI/127. Polyphonic from a Voice module.' },
+    { id: 'fm', label: 'FM', type: 'audio', direction: 'in', description: 'External phase modulation into the modulator; depth set by FM Amt.' },
+    { id: 'idxMod', label: 'Idx Mod', type: 'control', direction: 'in', description: 'Modulation index, added to the Index parameter. Wire an Envelope/LFO.' },
+    audioOutPort('Carrier output (per-voice lanes when the pitch input is polyphonic).'),
+  ],
+  params: [
+    { id: 'coarse', label: 'Coarse', min: 0.5, max: 16, default: 1, randomizable: true },
+    { id: 'detune', label: 'Detune', min: -1, max: 1, default: 0, randomizable: true },
+    { id: 'index', label: 'Index', min: 0, max: 10, default: 1, randomizable: true },
+    { id: 'feedback', label: 'Feedback', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'cwave', label: 'Carrier', min: 0, max: FM_CARRIER_WAVES.length - 1, default: 0, options: [...FM_CARRIER_WAVES], randomizable: true },
+    { id: 'octave', label: 'Octave', min: -3, max: 3, default: 0, randomizable: true },
+    { id: 'semi', label: 'Semi', min: -12, max: 12, default: 0, unit: 'st', randomizable: true },
+    { id: 'fine', label: 'Fine', min: -100, max: 100, default: 0, unit: 'ct', randomizable: true },
+    { id: 'fmAmt', label: 'FM Amt', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
+  ],
+  width: 240,
+  height: 250,
 };
 
 export const VCF_MODES = ['lowpass', 'highpass', 'bandpass', 'notch'] as const;
@@ -813,25 +850,31 @@ const wtosc: ModuleDef = {
   category: 'component',
   description:
     'Wavetable oscillator component. Pitch input (MIDI/127) sets the frequency; Position scans ' +
-    'through the loaded table (2048-frame split), and Pos Mod modulates it. Load a sample as the ' +
-    'table, or use the built-in 4-frame default (sine/tri/saw/square). FM input phase-modulates.',
+    'through the loaded table (2048-frame split), and Pos Mod modulates it. Loads TWO tables (A/B) — ' +
+    'Morph crossfades between them (wire Morph Mod for movement). Built-in 8-frame harmonic-sweep ' +
+    'default when nothing is loaded. FM input phase-modulates; a sub oscillator adds weight.',
   ports: [
     { id: 'pitch', label: 'Pitch', type: 'control', direction: 'in', description: 'Pitch as MIDI/127. Polyphonic from a Voice module.' },
     { id: 'posMod', label: 'Pos Mod', type: 'control', direction: 'in', description: 'Wavetable position modulation.' },
+    { id: 'morphMod', label: 'Morph Mod', type: 'control', direction: 'in', description: 'A↔B morph modulation, added to the Morph parameter.' },
     { id: 'fm', label: 'FM', type: 'audio', direction: 'in', description: 'Phase modulation input; depth set by the FM parameter.' },
     audioOutPort('Wavetable oscillator output (per-voice lanes when the pitch input is polyphonic).'),
   ],
   params: [
     { id: 'wtPos', label: 'Position', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'morph', label: 'Morph', min: 0, max: 1, default: 0, randomizable: true },
     { id: 'octave', label: 'Octave', min: -3, max: 3, default: 0, randomizable: true },
     { id: 'semi', label: 'Semi', min: -12, max: 12, default: 0, unit: 'st', randomizable: true },
     { id: 'fine', label: 'Fine', min: -100, max: 100, default: 0, unit: 'ct', randomizable: true },
     { id: 'fmAmt', label: 'FM Amt', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'subLevel', label: 'Sub', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'subOct', label: 'Sub Oct', min: 0, max: 1, default: 0, options: ['-1', '-2'], randomizable: false },
+    { id: 'subWave', label: 'Sub Wave', min: 0, max: 1, default: 0, options: ['sine', 'square'], randomizable: false },
     { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
   ],
-  width: 240,
-  height: 230,
-  defaultData: () => ({ sampleName: '' }),
+  width: 260,
+  height: 360,
+  defaultData: () => ({ sampleName: '', sampleNameA: '', sampleNameB: '' }),
 };
 
 const vcf: ModuleDef = {
@@ -1190,7 +1233,7 @@ const notenames: ModuleDef = {
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
     transport, sequencer, arp, composer, notethru, lfo, envelope, random, keyboard, midiIn, midiOut,
-    voice, osc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
+    voice, osc, fmosc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
     mixer, recorder, audioInDef, audioOut, levels, visualizer,
     stt, transporttext, textinput, lyrics, notenames, intelligence,

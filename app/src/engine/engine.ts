@@ -52,6 +52,7 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'recorder',
   'voice',
   'osc',
+  'fmosc',
   'wtosc',
   'smpl',
   'vcf',

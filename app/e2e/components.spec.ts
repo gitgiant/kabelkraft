@@ -95,6 +95,62 @@ test('unwired-pitch osc free-runs at C4 and the filter mod input shifts cutoff',
   await pollPeakUntil(page, ids.vcf, (peak) => peak > closed * 1.5);
 });
 
+test('fmosc free-runs at C4 and stays healthy when idxMod is driven', async ({ page }) => {
+  const errors = captureErrors(page);
+  await start(page);
+  const ids = await page.evaluate(() => {
+    const s = window.__kk;
+    const out = [...s.graph.modules.values()].find((m) => m.type === 'audioOut')!;
+    const fm = s.addModule('fmosc', 0, 0);
+    const knob = s.addModule('knob', 0, 200);
+    s.connect({ moduleId: fm.id, portId: 'out' }, { moduleId: out.id, portId: 'in' });
+    s.connect({ moduleId: knob.id, portId: 'out' }, { moduleId: fm.id, portId: 'idxMod' });
+    s.setParam(fm.id, 'coarse', 2);
+    s.setParam(fm.id, 'index', 3);
+    return { fm: fm.id, knob: knob.id };
+  });
+
+  // Unwired pitch → free-runs at C4 (FM is constant-amplitude, so just assert tone).
+  await pollPeak(page, ids.fm, 0.001);
+
+  // Sweeping idxMod must not glitch or kill the carrier (it stays bounded/sounding).
+  await page.evaluate((i) => window.__kk.setParam(i.knob, 'value', 1), ids);
+  await pollControl(page, ids.knob).toBeGreaterThan(0.99);
+  await pollPeak(page, ids.fm, 0.001);
+  expect(await peakOf(page, ids.fm)).toBeLessThan(2);
+
+  expect(errors).toEqual([]);
+});
+
+test('wtosc morph crossfades from the built-in table A to a loaded table B', async ({ page }) => {
+  const errors = captureErrors(page);
+  await start(page);
+  const ids = await page.evaluate(() => {
+    const s = window.__kk;
+    const out = [...s.graph.modules.values()].find((m) => m.type === 'audioOut')!;
+    const wt = s.addModule('wtosc', 0, 0);
+    s.connect({ moduleId: wt.id, portId: 'out' }, { moduleId: out.id, portId: 'in' });
+    // Slot B = one frame of silence (2048 zeros). Morphing to B = fade to quiet.
+    s.setSample(wt.id, { name: 'silent.wav', sampleRate: 44100, channels: [new Float32Array(2048)] }, 1);
+    s.setParam(wt.id, 'morph', 0);
+    return { wt: wt.id };
+  });
+
+  // Morph at A: built-in harmonic table sounds (unwired pitch free-runs at C4).
+  await pollPeak(page, ids.wt, 0.01);
+
+  // Morph fully to the silent B table → output collapses to near-silence.
+  await page.evaluate((i) => window.__kk.setParam(i.wt, 'morph', 1), ids);
+  await pollPeakBelow(page, ids.wt, 0.02);
+
+  // The worklet reports live display state (voice-0 pos/morph) for the tile face.
+  await expect
+    .poll(async () => page.evaluate((i) => window.__kk.wtData[i.wt]?.morph ?? -1, ids))
+    .toBeGreaterThan(0.99);
+
+  expect(errors).toEqual([]);
+});
+
 test('controllers report live values; quantizer snaps a knob to C major', async ({ page }) => {
   await start(page);
   const ids = await page.evaluate(() => {

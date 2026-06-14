@@ -82,7 +82,7 @@ export function addPolySynth(cx = POLY_CX, cy = POLY_CY): void {
   const oscNames = ['OSC A', 'OSC B', 'OSC C', 'OSC D'];
   const oscParams: Array<[string, string]> = [
     ['Wave', 'wave'], ['Octave', 'octave'], ['Semi', 'semi'], ['Fine', 'fine'],
-    ['PWM', 'pwm'], ['FM', 'fmAmt'], ['Level', 'level'],
+    ['PWM', 'pwm'], ['Sub', 'subLevel'], ['Level', 'level'],
   ];
   appState.setGroupFace(oscGroup.id, {
     width: 580,

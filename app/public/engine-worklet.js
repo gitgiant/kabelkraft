@@ -527,52 +527,59 @@ class OscModule {
     this.type = 'osc';
     this.params = params;
     this.controlIn = {};
-    this.polyIn = { fm: makePolyIn() };
     this.outL = new Float32Array(128);
     this.outR = new Float32Array(128);
     this.polyL = [];
     this.polyR = [];
     this.polyLanes = 0;
     this.phases = new Float64Array(MAX_VOICES);
+    this.subPhases = new Float64Array(MAX_VOICES);
   }
 
   render(blockSize) {
     const p = this.params;
     const wave = Math.round(p.wave ?? WAVE_SAW);
     const offs = Math.round(p.octave ?? 0) * 12 + Math.round(p.semi ?? 0) + (p.fine ?? 0) / 100;
-    const pwm = p.pwm ?? 0.5;
-    const fmAmt = p.fmAmt ?? 0;
+    const pwmBase = p.pwm ?? 0.5;
     const level = p.level ?? 0.8;
+    const subLevel = p.subLevel ?? 0;
+    const subOctShift = -(Math.round(p.subOct ?? 0) + 1); // 0 -> -1 oct, 1 -> -2 oct
+    const subSquare = Math.round(p.subWave ?? 0) === 1;
+    const subStepMul = Math.pow(2, subOctShift);
 
     const pitchIn = this.controlIn.pitch;
+    const pwmModIn = this.controlIn.pwmMod;
     const lanes = Math.min(MAX_VOICES, cwidth(pitchIn));
     this.polyLanes = lanes;
     const n = Math.max(1, lanes);
     ensureLanes(this, n);
     this.outL.fill(0);
 
-    const fm = this.polyIn.fm;
     for (let v = 0; v < n; v++) {
       const base = lanes > 0 ? pitchIn[v] * 127 : pitchIn !== undefined ? pitchIn * 127 : 60;
       const freq = 440 * Math.pow(2, (base + offs - 69) / 12);
       const phaseStep = freq / sampleRate;
-      const fmBuf = fm.lanes > 0 ? fm.L[Math.min(v, fm.lanes - 1)] : SILENT_BLOCK;
+      const subStep = phaseStep * subStepMul;
+      const pm = cval(pwmModIn, v);
+      let pwm = pwmBase + (pm !== undefined ? pm : 0);
+      if (pwm < 0.05) pwm = 0.05; else if (pwm > 0.95) pwm = 0.95;
       const L = this.polyL[v];
       let ph = this.phases[v];
+      let sub = this.subPhases[v];
       for (let i = 0; i < blockSize; i++) {
-        let pp = ph;
-        if (fmAmt > 0) {
-          pp += fmAmt * fmBuf[i];
-          pp -= Math.floor(pp);
-        }
         let s;
         switch (wave) {
-          case WAVE_SINE: s = Math.sin(2 * Math.PI * pp); break;
-          case WAVE_TRIANGLE: s = 4 * Math.abs(pp - 0.5) - 1; break;
-          case WAVE_SQUARE: s = pp < pwm ? 1 : -1; break;
+          case WAVE_SINE: s = Math.sin(2 * Math.PI * ph); break;
+          case WAVE_TRIANGLE: s = 4 * Math.abs(ph - 0.5) - 1; break;
+          case WAVE_SQUARE: s = ph < pwm ? 1 : -1; break;
           case WAVE_NOISE: s = Math.random() * 2 - 1; break;
           case WAVE_SAW:
-          default: s = 2 * pp - 1; break;
+          default: s = 2 * ph - 1; break;
+        }
+        if (subLevel > 0) {
+          s += subLevel * (subSquare ? (sub < 0.5 ? 1 : -1) : Math.sin(2 * Math.PI * sub));
+          sub += subStep;
+          if (sub >= 1) sub -= 1;
         }
         s *= level;
         L[i] = s;
@@ -582,6 +589,95 @@ class OscModule {
       }
       this.polyR[v].set(L);
       this.phases[v] = ph;
+      this.subPhases[v] = sub;
+    }
+    this.outR.set(this.outL);
+  }
+}
+
+/**
+ * 2-operator FM cell: a sine modulator phase-modulates the carrier.
+ * Serial tower: external fm-in feeds the MODULATOR (fmosc.out -> fmosc.fm).
+ * Per-lane state: carrier phase, modulator phase, last modulator output (feedback).
+ */
+class FmoscModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'fmosc';
+    this.params = params;
+    this.controlIn = {};
+    this.polyIn = { fm: makePolyIn() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.polyL = [];
+    this.polyR = [];
+    this.polyLanes = 0;
+    this.carPhases = new Float64Array(MAX_VOICES);
+    this.modPhases = new Float64Array(MAX_VOICES);
+    this.lastMod = new Float64Array(MAX_VOICES);
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const offs = Math.round(p.octave ?? 0) * 12 + Math.round(p.semi ?? 0) + (p.fine ?? 0) / 100;
+    const cwave = Math.round(p.cwave ?? WAVE_SINE);
+    // Snap coarse ratio to half-integer steps; add fine detune.
+    const ratio = Math.max(0.0625, Math.round((p.coarse ?? 1) * 2) / 2 + (p.detune ?? 0));
+    const indexBase = p.index ?? 1;
+    const feedback = p.feedback ?? 0;
+    const fmAmt = p.fmAmt ?? 0;
+    const level = p.level ?? 0.8;
+
+    const pitchIn = this.controlIn.pitch;
+    const idxModIn = this.controlIn.idxMod;
+    const lanes = Math.min(MAX_VOICES, cwidth(pitchIn));
+    this.polyLanes = lanes;
+    const n = Math.max(1, lanes);
+    ensureLanes(this, n);
+    this.outL.fill(0);
+
+    const fm = this.polyIn.fm;
+    for (let v = 0; v < n; v++) {
+      const base = lanes > 0 ? pitchIn[v] * 127 : pitchIn !== undefined ? pitchIn * 127 : 60;
+      const carFreq = 440 * Math.pow(2, (base + offs - 69) / 12);
+      const carStep = carFreq / sampleRate;
+      const modStep = (carFreq * ratio) / sampleRate;
+      const im = cval(idxModIn, v);
+      let index = indexBase + (im !== undefined ? im : 0);
+      if (index < 0) index = 0;
+      const fmBuf = fm.lanes > 0 ? fm.L[Math.min(v, fm.lanes - 1)] : SILENT_BLOCK;
+      const L = this.polyL[v];
+      let carPh = this.carPhases[v];
+      let modPh = this.modPhases[v];
+      let last = this.lastMod[v];
+      for (let i = 0; i < blockSize; i++) {
+        // Modulator (sine) with self-feedback + external fm injected here.
+        const mPhase = modPh + feedback * last + fmAmt * fmBuf[i];
+        const mod = Math.sin(2 * Math.PI * mPhase);
+        last = mod;
+        // Carrier phase modulated by the modulator scaled by index.
+        let cp = carPh + (index * mod) / (2 * Math.PI);
+        cp -= Math.floor(cp);
+        let s;
+        switch (cwave) {
+          case WAVE_TRIANGLE: s = 4 * Math.abs(cp - 0.5) - 1; break;
+          case WAVE_SQUARE: s = cp < 0.5 ? 1 : -1; break;
+          case WAVE_SAW: s = 2 * cp - 1; break;
+          case WAVE_SINE:
+          default: s = Math.sin(2 * Math.PI * cp); break;
+        }
+        s *= level;
+        L[i] = s;
+        this.outL[i] += s;
+        carPh += carStep;
+        if (carPh >= 1) carPh -= 1;
+        modPh += modStep;
+        if (modPh >= 1) modPh -= 1;
+      }
+      this.polyR[v].set(L);
+      this.carPhases[v] = carPh;
+      this.modPhases[v] = modPh;
+      this.lastMod[v] = last;
     }
     this.outR.set(this.outL);
   }
@@ -592,6 +688,34 @@ class OscModule {
  * Per-voice phase like OscModule; Position (wtPos param + posMod control)
  * scans across the loaded table's frames. FM audio input phase-modulates.
  */
+/** Build a {data, frames} table from raw PCM (>=1 frame, or resample short to one cycle). */
+function buildWavetable(pcm) {
+  if (!pcm || pcm.length === 0) return null;
+  if (pcm.length >= WT_FRAME) {
+    const frames = Math.max(1, Math.floor(pcm.length / WT_FRAME));
+    return { data: pcm.subarray(0, frames * WT_FRAME), frames };
+  }
+  const data = new Float32Array(WT_FRAME);
+  for (let i = 0; i < WT_FRAME; i++) {
+    const pos = (i / WT_FRAME) * pcm.length;
+    const i0 = Math.floor(pos);
+    const frac = pos - i0;
+    data[i] = pcm[i0] * (1 - frac) + pcm[(i0 + 1) % pcm.length] * frac;
+  }
+  return { data, frames: 1 };
+}
+
+/** Within-frame linear read at fractional sample index, frames f0/f1 lerped by fFrac. */
+function readWt(wt, f0Base, f1Base, fFrac, pp) {
+  const idx = pp * WT_FRAME;
+  const i0 = idx | 0;
+  const i1 = (i0 + 1) % WT_FRAME;
+  const frac = idx - i0;
+  const a = wt.data[f0Base + i0] * (1 - frac) + wt.data[f0Base + i1] * frac;
+  const b = wt.data[f1Base + i0] * (1 - frac) + wt.data[f1Base + i1] * frac;
+  return a * (1 - fFrac) + b * fFrac;
+}
+
 class WtoscModule {
   constructor(id, params) {
     this.id = id;
@@ -605,40 +729,44 @@ class WtoscModule {
     this.polyR = [];
     this.polyLanes = 0;
     this.phases = new Float64Array(MAX_VOICES);
-    this.wavetable = null;
+    this.subPhases = new Float64Array(MAX_VOICES);
+    this.wtA = null;
+    this.wtB = null;
+    // Live readout for the display (voice 0 resolved frame pos + morph).
+    this.dispPos = 0;
+    this.dispMorph = 0;
   }
 
-  /** Loadable wavetable: PCM split into 2048-sample frames (mirrors Synth). */
-  setWavetable(channels) {
-    const pcm = channels[0];
-    if (!pcm || pcm.length === 0) return;
-    if (pcm.length >= WT_FRAME) {
-      const frames = Math.max(1, Math.floor(pcm.length / WT_FRAME));
-      this.wavetable = { data: pcm.subarray(0, frames * WT_FRAME), frames };
-    } else {
-      const data = new Float32Array(WT_FRAME);
-      for (let i = 0; i < WT_FRAME; i++) {
-        const pos = (i / WT_FRAME) * pcm.length;
-        const i0 = Math.floor(pos);
-        const frac = pos - i0;
-        data[i] = pcm[i0] * (1 - frac) + pcm[(i0 + 1) % pcm.length] * frac;
-      }
-      this.wavetable = { data, frames: 1 };
-    }
+  /** Loadable wavetable per slot: 0/undefined = A, 1 = B. 2048-sample frames. */
+  setWavetable(channels, slot) {
+    const wt = buildWavetable(channels[0]);
+    if (!wt) return;
+    if (slot === 1) this.wtB = wt;
+    else this.wtA = wt;
   }
 
+  /** 8-frame harmonic sweep: sine → progressively richer sawtooth-ish spectra. */
   defaultWavetable() {
-    const frames = 4;
+    const frames = 8;
     const data = new Float32Array(frames * WT_FRAME);
-    for (let i = 0; i < WT_FRAME; i++) {
-      const ph = i / WT_FRAME;
-      data[i] = Math.sin(2 * Math.PI * ph);
-      data[WT_FRAME + i] = 4 * Math.abs(ph - 0.5) - 1;
-      data[2 * WT_FRAME + i] = 2 * ph - 1;
-      data[3 * WT_FRAME + i] = ph < 0.5 ? 1 : -1;
+    for (let f = 0; f < frames; f++) {
+      const harmonics = 1 + f * 3; // 1, 4, 7 ... 22
+      let peak = 0;
+      for (let i = 0; i < WT_FRAME; i++) {
+        const ph = (i / WT_FRAME) * 2 * Math.PI;
+        let s = 0;
+        for (let h = 1; h <= harmonics; h++) s += Math.sin(h * ph) / h;
+        data[f * WT_FRAME + i] = s;
+        const a = Math.abs(s);
+        if (a > peak) peak = a;
+      }
+      if (peak > 0) {
+        const g = 0.9 / peak;
+        for (let i = 0; i < WT_FRAME; i++) data[f * WT_FRAME + i] *= g;
+      }
     }
-    this.wavetable = { data, frames };
-    return this.wavetable;
+    this.wtA = { data, frames };
+    return this.wtA;
   }
 
   render(blockSize) {
@@ -647,10 +775,15 @@ class WtoscModule {
     const fmAmt = p.fmAmt ?? 0;
     const level = p.level ?? 0.8;
     const wtPos = p.wtPos ?? 0;
-    const wt = this.wavetable || this.defaultWavetable();
+    const subLevel = p.subLevel ?? 0;
+    const subStepMul = Math.pow(2, -(Math.round(p.subOct ?? 0) + 1));
+    const subSquare = Math.round(p.subWave ?? 0) === 1;
+    const wtA = this.wtA || this.defaultWavetable();
+    const wtB = this.wtB; // null until a B table is loaded
 
     const pitchIn = this.controlIn.pitch;
     const posModIn = this.controlIn.posMod;
+    const morphModIn = this.controlIn.morphMod;
     const lanes = Math.min(MAX_VOICES, cwidth(pitchIn));
     this.polyLanes = lanes;
     const n = Math.max(1, lanes);
@@ -662,27 +795,43 @@ class WtoscModule {
       const base = lanes > 0 ? pitchIn[v] * 127 : pitchIn !== undefined ? pitchIn * 127 : 60;
       const freq = 440 * Math.pow(2, (base + offs - 69) / 12);
       const phaseStep = freq / sampleRate;
+      const subStep = phaseStep * subStepMul;
       const pm = cval(posModIn, v);
-      const framePos = Math.min(1, Math.max(0, wtPos + (pm !== undefined ? pm : 0))) * (wt.frames - 1);
-      const f0 = Math.floor(framePos);
-      const f1 = Math.min(wt.frames - 1, f0 + 1);
-      const fFrac = framePos - f0;
+      const posNorm = Math.min(1, Math.max(0, wtPos + (pm !== undefined ? pm : 0)));
+      const mmod = cval(morphModIn, v);
+      const morph = wtB ? Math.min(1, Math.max(0, (p.morph ?? 0) + (mmod !== undefined ? mmod : 0))) : 0;
+      // Per-table frame interpolation setup (constant across the block).
+      const aPos = posNorm * (wtA.frames - 1);
+      const aF0 = Math.floor(aPos), aF1 = Math.min(wtA.frames - 1, aF0 + 1), aFrac = aPos - aF0;
+      const aF0B = aF0 * WT_FRAME, aF1B = aF1 * WT_FRAME;
+      let bF0B = 0, bF1B = 0, bFrac = 0;
+      if (wtB) {
+        const bPos = posNorm * (wtB.frames - 1);
+        const bF0 = Math.floor(bPos), bF1 = Math.min(wtB.frames - 1, bF0 + 1);
+        bFrac = bPos - bF0;
+        bF0B = bF0 * WT_FRAME; bF1B = bF1 * WT_FRAME;
+      }
       const fmBuf = fm.lanes > 0 ? fm.L[Math.min(v, fm.lanes - 1)] : SILENT_BLOCK;
       const L = this.polyL[v];
       let ph = this.phases[v];
+      let sub = this.subPhases[v];
       for (let i = 0; i < blockSize; i++) {
         let pp = ph;
         if (fmAmt > 0) {
           pp += fmAmt * fmBuf[i];
           pp -= Math.floor(pp);
         }
-        const idx = pp * WT_FRAME;
-        const i0 = Math.floor(idx);
-        const i1 = (i0 + 1) % WT_FRAME;
-        const frac = idx - i0;
-        const a = wt.data[f0 * WT_FRAME + i0] * (1 - frac) + wt.data[f0 * WT_FRAME + i1] * frac;
-        const b = wt.data[f1 * WT_FRAME + i0] * (1 - frac) + wt.data[f1 * WT_FRAME + i1] * frac;
-        const s = (a * (1 - fFrac) + b * fFrac) * level;
+        let s = readWt(wtA, aF0B, aF1B, aFrac, pp);
+        if (morph > 0) {
+          const sb = readWt(wtB, bF0B, bF1B, bFrac, pp);
+          s = s * (1 - morph) + sb * morph;
+        }
+        if (subLevel > 0) {
+          s += subLevel * (subSquare ? (sub < 0.5 ? 1 : -1) : Math.sin(2 * Math.PI * sub));
+          sub += subStep;
+          if (sub >= 1) sub -= 1;
+        }
+        s *= level;
         L[i] = s;
         this.outL[i] += s;
         ph += phaseStep;
@@ -690,6 +839,8 @@ class WtoscModule {
       }
       this.polyR[v].set(L);
       this.phases[v] = ph;
+      this.subPhases[v] = sub;
+      if (v === 0) { this.dispPos = posNorm; this.dispMorph = morph; }
     }
     this.outR.set(this.outL);
   }
@@ -2653,6 +2804,8 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new VoiceModule(m.id, m.params));
           } else if (m.type === 'osc') {
             next.set(m.id, new OscModule(m.id, m.params));
+          } else if (m.type === 'fmosc') {
+            next.set(m.id, new FmoscModule(m.id, m.params));
           } else if (m.type === 'vcf') {
             next.set(m.id, new VcfModule(m.id, m.params));
           } else if (m.type === 'vca') {
@@ -2748,7 +2901,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       case 'sample': {
         const mod = this.modules.get(msg.moduleId);
         if (mod && mod.type === 'smpl') mod.setSample(msg.sampleRate, msg.channels, msg.loopStart, msg.loopEnd);
-        else if (mod && mod.type === 'wtosc') mod.setWavetable(msg.channels);
+        else if (mod && mod.type === 'wtosc') mod.setWavetable(msg.channels, msg.pad);
         break;
       }
       case 'control': {
@@ -3232,12 +3385,14 @@ class EngineProcessor extends AudioWorkletProcessor {
     const spectra = {};
     const visData = {};
     const textNotes = {};
+    const wtData = {};
     for (const mod of this.modules.values()) {
       if (mod.type === 'sequencer') seqSteps[mod.id] = mod.currentStep;
       if (mod.value !== undefined) controlValues[mod.id] = mod.value;
       if (mod.grDb !== undefined) gainReduction[mod.id] = mod.grDb;
       if (mod.type === 'peq') spectra[mod.id] = mod.spectrum();
       if (mod.type === 'visualizer') visData[mod.id] = mod.visData();
+      if (mod.type === 'wtosc') wtData[mod.id] = { pos: mod.dispPos, morph: mod.dispMorph };
       if (mod.type === 'notenames') {
         const notes = mod.drainNotes();
         if (notes.length > 0) textNotes[mod.id] = notes;
@@ -3253,6 +3408,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       spectra,
       visData,
       textNotes,
+      wtData,
       noteActivity: [...this.noteActivity],
       songPosition: this.transport.posBeats,
       perf,

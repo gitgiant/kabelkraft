@@ -94,6 +94,8 @@ export class AppState {
   spectra: Record<string, number[]> = {};
   /** Live visualizer feeds (notes/ctrl/onset; raw windows only without SAB). */
   visData: StatusMessage['visData'] = {};
+  /** Live Wavetable Osc display state (voice-0 frame pos + morph) per module. */
+  wtData: NonNullable<StatusMessage['wtData']> = {};
   /** Per-frame audio analysis for visual containers (FFT etc. run UI-side). */
   private readonly visHub = new VisFeatureHub();
 
@@ -589,6 +591,7 @@ export class AppState {
       this.gainReduction = status.gainReduction ?? {};
       this.spectra = status.spectra ?? {};
       this.visData = status.visData ?? {};
+      this.wtData = status.wtData ?? {};
       for (const [id, feed] of Object.entries(this.visData)) this.visHub.pushStatus(id, feed);
       const now = performance.now();
       for (const id of status.noteActivity) this.noteFlash.set(id, now);
@@ -668,7 +671,11 @@ export class AppState {
     const mod = this.graph.modules.get(moduleId);
     if (!mod) return;
     this.samples.set(sampleKey(moduleId, pad), sample);
-    mod.data = { ...mod.data, sampleName: sample.name };
+    if (mod.type === 'wtosc') {
+      mod.data = { ...mod.data, [pad === 1 ? 'sampleNameB' : 'sampleNameA']: sample.name };
+    } else {
+      mod.data = { ...mod.data, sampleName: sample.name };
+    }
     if (this.engine.running) {
       this.engine.sendSample(moduleId, sample, pad);
     }

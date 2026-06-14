@@ -37,6 +37,7 @@ export type EngineModuleType =
   | 'recorder'
   | 'voice'
   | 'osc'
+  | 'fmosc'
   | 'wtosc'
   | 'smpl'
   | 'vcf'
@@ -202,6 +203,8 @@ export interface StatusMessage {
   >;
   /** Pitches that reached each Note Names module since the last post. */
   textNotes?: Record<string, number[]>;
+  /** Wavetable Osc live display: voice-0 resolved frame position + morph (0–1). */
+  wtData?: Record<string, { pos: number; morph: number }>;
   /** Module ids that emitted notes since the last post (for wire flashes). */
   noteActivity: string[];
   /** Transport position in beats (worklet is the clock while playing). */
