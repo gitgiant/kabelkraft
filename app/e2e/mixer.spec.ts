@@ -24,7 +24,7 @@ async function mixerRig(page: Page): Promise<{ mixer: string; send: string }> {
     },
     { synth: rig.synth, out: rig.out },
   );
-  await page.locator('.transport button[title="Play"]').click();
+  await page.locator('.transport button[title^="Play"]').click();
   return ids;
 }
 

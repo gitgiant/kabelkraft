@@ -8,7 +8,7 @@ async function startWithAudio(page: Page): Promise<ClassicRig> {
 
 test('component voice chain produces audio', async ({ page }) => {
   const rig = await startWithAudio(page);
-  await page.locator('.transport button[title="Play"]').click();
+  await page.locator('.transport button[title^="Play"]').click();
   await pollPeak(page, rig.synth);
   expect(await peakOf(page, rig.synth)).toBeLessThan(10);
 });
@@ -23,7 +23,7 @@ test('FM: one oscillator phase-modulates another, output stays finite', async ({
     s.setParam(r.osc, 'fmAmt', 0.6);
     s.setParam(mod.id, 'semi', 12); // modulator one octave up
   }, rig);
-  await page.locator('.transport button[title="Play"]').click();
+  await page.locator('.transport button[title^="Play"]').click();
   await pollPeak(page, rig.synth);
   expect(await peakOf(page, rig.synth)).toBeLessThan(10);
 });
@@ -37,7 +37,7 @@ test('filter (vcf) stays stable at extreme settings', async ({ page }) => {
     s.setParam(r.vcf, 'res', 0.95);
     s.setParam(r.vcf, 'amt', 6);
   }, rig);
-  await page.locator('.transport button[title="Play"]').click();
+  await page.locator('.transport button[title^="Play"]').click();
   // Wait until signal flows, then sample the meter a few times: every reading
   // must stay finite and bounded (filter must not blow up).
   await pollPeak(page, rig.synth, 0.0001);
@@ -59,7 +59,7 @@ test('wavetable oscillator plays the built-in table and scans position', async (
     s.setParam(wt.id, 'wtPos', 0.7);
     return wt.id;
   }, rig);
-  await page.locator('.transport button[title="Play"]').click();
+  await page.locator('.transport button[title^="Play"]').click();
   await pollPeak(page, wt);
 });
 

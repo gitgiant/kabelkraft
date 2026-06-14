@@ -4,7 +4,7 @@ import { bootWithAudio, classicRig, peakOf, pollPeak } from './util';
 async function startPlaying(page: Page): Promise<{ synth: string; out: string }> {
   await bootWithAudio(page);
   const rig = await classicRig(page);
-  await page.locator('.transport button[title="Play"]').click();
+  await page.locator('.transport button[title^="Play"]').click();
   return { synth: rig.synth, out: rig.out };
 }
 

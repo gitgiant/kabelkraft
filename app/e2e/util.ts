@@ -152,11 +152,11 @@ export async function moduleByType(page: Page, type: string): Promise<string> {
  * ------------------------------------------------------------------ */
 
 export async function play(page: Page): Promise<void> {
-  await page.locator('.transport button[title="Play"]').click();
+  await page.locator('.transport button[title^="Play"]').click();
 }
 
 export async function stop(page: Page): Promise<void> {
-  await page.locator('.transport button[title="Stop"]').click();
+  await page.locator('.transport button[title^="Stop"]').click();
 }
 
 /* ------------------------------------------------------------------ *

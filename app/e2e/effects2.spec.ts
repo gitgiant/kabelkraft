@@ -15,7 +15,7 @@ async function insertFx(page: Page, type: string): Promise<{ fx: string; synth: 
     s.connect({ moduleId: fx.id, portId: 'out' }, { moduleId: out, portId: 'in' });
     return { fx: fx.id, synth };
   }, { fxType: type, synth: rig.synth, out: rig.out });
-  await page.locator('.transport button[title="Play"]').click();
+  await page.locator('.transport button[title^="Play"]').click();
   return ids;
 }
 
