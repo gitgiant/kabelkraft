@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { buildAiContext, buildGroupContext, buildVisContext, withContext } from './aicontext';
+import {
+  buildAiContext,
+  buildGroupContext,
+  buildMidiTargetContext,
+  buildVisContext,
+  withContext,
+} from './aicontext';
 import { Graph } from './graph';
 import { createInstance } from './module';
 import { MODULE_DEFS } from './registry';
@@ -112,7 +118,67 @@ describe('buildGroupContext', () => {
 });
 
 describe('withContext', () => {
-  it('separates context from the request', () => {
-    expect(withContext('CTX', 'do it')).toBe('CTX\n\nRequest: do it');
+  it('puts the request first, context after', () => {
+    expect(withContext('CTX', 'do it')).toBe('Request: do it\n\n--- Context ---\nCTX');
+  });
+
+  it('returns the bare prompt when there is no context', () => {
+    expect(withContext('', 'do it')).toBe('do it');
+    expect(withContext('   ', 'do it')).toBe('do it');
+  });
+});
+
+describe('buildMidiTargetContext', () => {
+  /** Composer wired to the given consumers via its `notes` output. */
+  function setup(consumers: Array<{ type: string; params?: Record<string, number> }>) {
+    const graph = new Graph(MODULE_DEFS);
+    const comp = createInstance(MODULE_DEFS.get('composer')!, 0, 0);
+    graph.addModule(comp);
+    const ids: string[] = [];
+    for (const c of consumers) {
+      const m = createInstance(MODULE_DEFS.get(c.type)!, 200, 0);
+      graph.addModule(m);
+      Object.assign(graph.modules.get(m.id)!.params, c.params ?? {});
+      graph.connect({ moduleId: comp.id, portId: 'notes' }, { moduleId: m.id, portId: 'notes' });
+      ids.push(m.id);
+    }
+    return { graph, compId: comp.id, ids };
+  }
+
+  it('returns empty when nothing is wired to the notes output', () => {
+    const graph = new Graph(MODULE_DEFS);
+    const comp = createInstance(MODULE_DEFS.get('composer')!, 0, 0);
+    graph.addModule(comp);
+    expect(buildMidiTargetContext(graph, comp.id)).toBe('');
+  });
+
+  it('describes a drum kit with the exact wired trigger pitches', () => {
+    const { graph, compId, ids } = setup([
+      { type: 'smpl', params: { trigNote: 38, fixedPitch: 1 } },
+      { type: 'smpl', params: { trigNote: 36, fixedPitch: 1 } },
+    ]);
+    graph.modules.get(ids[0])!.label = 'Snare';
+    graph.modules.get(ids[1])!.label = 'Kick';
+    const ctx = buildMidiTargetContext(graph, compId);
+    expect(ctx).toContain('DRUM KIT');
+    expect(ctx).toContain('36=Kick'); // sorted by pitch
+    expect(ctx).toContain('38=Snare');
+    expect(ctx.indexOf('36=Kick')).toBeLessThan(ctx.indexOf('38=Snare'));
+  });
+
+  it('describes a melodic target when the voice is not fixed-pitch', () => {
+    const { graph, compId } = setup([{ type: 'voice' }]);
+    const ctx = buildMidiTargetContext(graph, compId);
+    expect(ctx).toContain('melodic instrument');
+    expect(ctx).not.toContain('DRUM KIT');
+  });
+
+  it('caps the drum list and reports the overflow', () => {
+    const many = Array.from({ length: 10 }, (_, i) => ({
+      type: 'smpl',
+      params: { trigNote: 36 + i, fixedPitch: 1 },
+    }));
+    const { graph, compId } = setup(many);
+    expect(buildMidiTargetContext(graph, compId)).toContain('+2 more');
   });
 });

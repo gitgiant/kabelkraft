@@ -77,7 +77,7 @@ describe('parseKkLyrics', () => {
 });
 
 describe('generateLyricsSpecPack', () => {
-  it('embeds the song context and appends the user prompt', () => {
+  it('embeds the song context and puts the user prompt first', () => {
     const pack = generateLyricsSpecPack('a summer pop song', {
       tempo: 128,
       timeSignature: { num: 3, denom: 4 },
@@ -85,5 +85,23 @@ describe('generateLyricsSpecPack', () => {
     expect(pack).toContain('128 BPM');
     expect(pack).toContain('3/4');
     expect(pack).toContain('USER PROMPT: a summer pop song');
+    expect(pack.startsWith('USER PROMPT: a summer pop song')).toBe(true);
+  });
+
+  it('reports the target song length in bars and the loop unit', () => {
+    const pack = generateLyricsSpecPack('write a verse', {
+      tempo: 120,
+      timeSignature: { num: 4, denom: 4 },
+      songLengthBeats: 64,
+      loopBeats: 16,
+    });
+    expect(pack).toContain('Target song length: ~16 bars'); // 64 beats / 4 = 16 bars
+    expect(pack).toContain('64 beats');
+    expect(pack).toContain('loops every 16 beats');
+  });
+
+  it('omits the length line when no song length is supplied', () => {
+    const pack = generateLyricsSpecPack('x', { tempo: 120, timeSignature: { num: 4, denom: 4 } });
+    expect(pack).not.toContain('Target song length');
   });
 });

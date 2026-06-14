@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { COMPOSER_MAX_LENGTH } from './composer';
-import { generateMidiSpecPack, parseKkMidi } from './aimidi';
+import { COMPOSER_MAX_LENGTH, defaultNote, type ComposerClip } from './composer';
+import { existingNotesPrompt, generateMidiSpecPack, parseKkMidi } from './aimidi';
 
 const clip = (over: Record<string, unknown> = {}) =>
   JSON.stringify({
@@ -82,9 +82,41 @@ describe('parseKkMidi', () => {
 });
 
 describe('generateMidiSpecPack', () => {
-  it('mentions the beat cap and appends the user prompt', () => {
+  it('mentions the beat cap and puts the user prompt first', () => {
     const pack = generateMidiSpecPack('a funky bassline');
     expect(pack).toContain(String(COMPOSER_MAX_LENGTH));
     expect(pack).toContain('USER PROMPT: a funky bassline');
+    // Prompt at the very top so the model doesn't have to dig past the spec.
+    expect(pack.startsWith('USER PROMPT: a funky bassline')).toBe(true);
+  });
+});
+
+describe('existingNotesPrompt', () => {
+  const clipOf = (notes: ComposerClip['notes']): ComposerClip => ({ notes, length: 8 });
+
+  it('emits a kkmidi block carrying the notes', () => {
+    const out = existingNotesPrompt(clipOf([defaultNote(0, 60)]));
+    expect(out).toContain('Variate on existing notes');
+    const json = JSON.parse(out.match(/```json\n(.*?)\n```/s)![1]);
+    expect(json.kind).toBe('kkmidi');
+    expect(json.length).toBe(8);
+    expect(json.notes[0]).toMatchObject({ start: 0, pitch: 60, vel: 0.8 });
+  });
+
+  it('omits per-note fields left at their defaults', () => {
+    const out = existingNotesPrompt(clipOf([defaultNote(0, 60)]));
+    const n = JSON.parse(out.match(/```json\n(.*?)\n```/s)![1]).notes[0];
+    expect(n).not.toHaveProperty('pan');
+    expect(n).not.toHaveProperty('prob');
+    expect(n).not.toHaveProperty('release');
+  });
+
+  it('includes non-default per-note fields', () => {
+    const note = { ...defaultNote(0, 60), pan: -0.5, prob: 0.7 };
+    const n = JSON.parse(
+      existingNotesPrompt(clipOf([note])).match(/```json\n(.*?)\n```/s)![1],
+    ).notes[0];
+    expect(n.pan).toBe(-0.5);
+    expect(n.prob).toBe(0.7);
   });
 });
