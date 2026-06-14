@@ -29,6 +29,10 @@
     count: number;
   }
 
+  // `embedded` = rendered inside the module palette (left panel) rather than as
+  // its own drawer. The parent controls visibility; we always render content.
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   let open = $state(false);
   let search = $state('');
   let favsOnly = $state(false);
@@ -53,6 +57,12 @@
   let touch = $state(isTouchMode());
 
   onMount(() => {
+    // Embedded: the palette owns visibility; just load folders once.
+    if (embedded) {
+      if (folders.length === 0) void restoreFolders();
+      const offTouch = onTouchModeChange((on) => (touch = on));
+      return () => offTouch();
+    }
     const onToggle = () => {
       open = !open;
       if (open && folders.length === 0) void restoreFolders();
@@ -188,20 +198,21 @@
   }
 </script>
 
-{#if open}
-  {#if touch}
+{#if open || embedded}
+  {#if touch && !embedded}
     <div class="lib-scrim" onpointerdown={() => (open = false)}></div>
   {/if}
   <div
     class="library"
-    class:touch
+    class:touch={touch && !embedded}
+    class:embedded
     role="region"
     aria-label="Sample Library"
     ondragover={(e) => e.preventDefault()}
     ondrop={onPanelDrop}
   >
     <div class="lib-header">
-      <span class="lib-title">Samples</span>
+      {#if !embedded}<span class="lib-title">Samples</span>{/if}
       <span class="spacer"></span>
       {#if canPickFolders}
         <button class="add-folder" onclick={addFolder} title="Add a local sample folder (read-only access)">
@@ -219,7 +230,7 @@
         hidden
         onchange={addFiles}
       />
-      {#if touch}
+      {#if touch && !embedded}
         <button class="lib-close" onclick={() => (open = false)} aria-label="Close sample library">✕</button>
       {/if}
     </div>
@@ -295,6 +306,13 @@
     border-left: 1px solid var(--panel-border);
     user-select: none;
     min-height: 0;
+  }
+  /* Embedded in the module palette: fill the host, drop the drawer chrome. */
+  .library.embedded {
+    width: 100%;
+    flex: 1;
+    border-left: none;
+    background: transparent;
   }
   /* Touch mode: drawer floats over the canvas — no layout reflow on toggle. */
   .library.touch {

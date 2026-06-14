@@ -15,7 +15,6 @@
   import RangeConfig from './ui/RangeConfig.svelte';
   import PresetMenu from './ui/PresetMenu.svelte';
   import SampleEditor from './ui/SampleEditor.svelte';
-  import SampleLibrary from './ui/SampleLibrary.svelte';
   import Toolbar from './ui/Toolbar.svelte';
   import Tutorial from './ui/Tutorial.svelte';
   import VisEditor from './ui/VisEditor.svelte';
@@ -195,7 +194,6 @@
         if (type === 'composer') appState.openComposer(inst.id);
       }}
     ></div>
-    <SampleLibrary />
     <Tutorial />
   </div>
   <SampleEditor />

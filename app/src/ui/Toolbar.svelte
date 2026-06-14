@@ -285,7 +285,7 @@
       onclick={() => window.dispatchEvent(new CustomEvent('kk-ai-import'))}
       title="AI patches: generate in-app with Claude, OpenRouter, or any OpenAI-compatible endpoint — or copy the spec for any chatbot"
     >
-      🤖 AI
+      🤖 AI Patch
     </button>
     <button
       class="ai-project-toggle"
@@ -293,13 +293,6 @@
       title="AI project: generate a complete project — composers, synths, effects, mixer, output — with the music embedded"
     >
       🪄 AI Project
-    </button>
-    <button
-      class="library-toggle"
-      onclick={() => window.dispatchEvent(new CustomEvent('kk-toggle-library'))}
-      title="Sample Library: browse your own folders, audition, drag onto Sampler/Drum pads"
-    >
-      🗂 Samples
     </button>
     <button
       class="options-toggle"

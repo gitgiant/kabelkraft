@@ -5,8 +5,12 @@
   import { isTouchMode, onTouchModeChange } from '../core/mobile';
   import { appState } from '../state';
   import { STARTERS } from './starters';
+  import SampleLibrary from './SampleLibrary.svelte';
 
   const defs = [...MODULE_DEFS.values()];
+
+  /** Left panel shows either the module picker or the embedded sample library. */
+  let view = $state<'modules' | 'samples'>('modules');
 
   // Touch mode: the palette becomes an overlay drawer (closed by default)
   // instead of pushing the canvas aside. Edge swipe / the grip opens it.
@@ -18,10 +22,19 @@
       paletteWidth = on ? 0 : FULL_WIDTH;
     });
     const onOpen = () => (paletteWidth = FULL_WIDTH);
+    // Samples now live in this palette; open it on the Samples view.
+    const onOpenLibrary = () => {
+      paletteWidth = FULL_WIDTH;
+      view = 'samples';
+    };
     window.addEventListener('kk-open-palette', onOpen);
+    window.addEventListener('kk-toggle-library', onOpenLibrary);
+    window.addEventListener('kk-open-library', onOpenLibrary);
     return () => {
       offTouch();
       window.removeEventListener('kk-open-palette', onOpen);
+      window.removeEventListener('kk-toggle-library', onOpenLibrary);
+      window.removeEventListener('kk-open-library', onOpenLibrary);
     };
   });
 
@@ -103,7 +116,14 @@
 <div class="palette-outer" class:touch>
 <div class="palette-clip" class:dragging style="width: {paletteWidth}px">
 <div class="palette">
-  <div class="palette-title">Modules</div>
+  <div class="palette-tabs" role="tablist">
+    <button class="palette-tab" class:active={view === 'modules'} role="tab" aria-selected={view === 'modules'} onclick={() => (view = 'modules')}>Modules</button>
+    <button class="palette-tab" class:active={view === 'samples'} role="tab" aria-selected={view === 'samples'} onclick={() => (view = 'samples')}>Samples</button>
+  </div>
+
+  {#if view === 'samples'}
+    <SampleLibrary embedded />
+  {:else}
   <input
     class="palette-search"
     type="search"
@@ -150,6 +170,7 @@
   {/each}
   {#if visible.length === 0}
     <div class="no-match">No modules match "{query}".</div>
+  {/if}
   {/if}
 </div>
 </div>
@@ -201,6 +222,30 @@
     padding: 10px;
     overflow-y: auto;
     user-select: none;
+    display: flex;
+    flex-direction: column;
+  }
+  .palette-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 8px;
+    flex-shrink: 0;
+  }
+  .palette-tab {
+    flex: 1;
+    padding: 4px 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    background: var(--control);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .palette-tab.active {
+    color: var(--text);
+    background: var(--button);
+    border-color: var(--accent, var(--panel-border));
   }
   .palette-grip {
     width: 14px;
