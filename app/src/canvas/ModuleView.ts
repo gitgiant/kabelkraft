@@ -1193,6 +1193,25 @@ export class ModuleView extends Container {
       this.buildWtDisplay(x, top + band + 4, gw, bottom - (top + band + 4));
       return;
     }
+    if (type === 'pluck' || type === 'resonator') {
+      const band = this.ctrlBandH(ctrls.length, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      this.buildStringDisplay(x, top + band + 4, gw, bottom - (top + band + 4));
+      return;
+    }
+    if (type === 'addosc') {
+      const band = this.ctrlBandH(ctrls.length, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      this.buildSpectrumDisplay(x, top + band + 4, gw, bottom - (top + band + 4));
+      return;
+    }
+    if (type === 'granular') {
+      const band = this.ctrlBandH(ctrls.length, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      this.buildGrainDisplay(x, top + band + 4, gw, bottom - (top + band + 4) - 22);
+      this.buildGranularSample(x, bottom - 16, gw);
+      return;
+    }
 
     // Pure param modules: the knob grid stretches over the whole face.
     this.buildCtrlGrid(ctrls, x, top, gw, bottom - top);
@@ -2697,6 +2716,147 @@ export class ModuleView extends Container {
     g.stroke({ width: 1.8, color: 0xffb13d });
   }
 
+  // -- pluck / resonator string display --------------------------------------
+
+  private stringG: Graphics | null = null;
+  private stringRect = { x: 0, y: 0, w: 0, h: 0 };
+  private stringWasActive = false;
+
+  private buildStringDisplay(x: number, y: number, w: number, h: number): void {
+    this.stringRect = { x, y, w: Math.max(40, w), h: Math.max(30, h) };
+    this.stringG = new Graphics();
+    this.addChild(this.stringG);
+    this.drawString(null);
+  }
+
+  private drawString(data: { s: Float32Array; a: number } | null): void {
+    const g = this.stringG;
+    if (!g) return;
+    const { x, y, w, h } = this.stringRect;
+    g.clear();
+    g.roundRect(x, y, w, h, 4).fill({ color: 0x0d0d14 }).stroke({ width: 1, color: 0x2a2a36 });
+    const cy = y + h / 2;
+    const arr = data ? data.s : null;
+    if (!arr || arr.length === 0) {
+      g.moveTo(x + 6, cy).lineTo(x + w - 6, cy).stroke({ width: 1.5, color: 0x4a4a64 });
+      return;
+    }
+    const N = arr.length;
+    let peak = 1e-4;
+    for (let k = 0; k < N; k++) { const a = Math.abs(arr[k]); if (a > peak) peak = a; }
+    const amp = (h / 2 - 6) / Math.max(0.2, peak);
+    const active = !!(data && data.a > 0.5);
+    for (let k = 0; k < N; k++) {
+      const px = x + 6 + (k / (N - 1)) * (w - 12);
+      const py = cy - arr[k] * amp;
+      if (k === 0) g.moveTo(px, py); else g.lineTo(px, py);
+    }
+    g.stroke({ width: 1.8, color: active ? 0xffb13d : 0x6a6a84 });
+  }
+
+  // -- additive spectrum display (UI-computed from params) -------------------
+
+  private spectrumG: Graphics | null = null;
+  private spectrumRect = { x: 0, y: 0, w: 0, h: 0 };
+
+  private buildSpectrumDisplay(x: number, y: number, w: number, h: number): void {
+    this.spectrumRect = { x, y, w: Math.max(40, w), h: Math.max(30, h) };
+    this.spectrumG = new Graphics();
+    this.addChild(this.spectrumG);
+    this.drawSpectrum();
+  }
+
+  private drawSpectrum(): void {
+    const g = this.spectrumG;
+    if (!g) return;
+    const { x, y, w, h } = this.spectrumRect;
+    g.clear();
+    g.roundRect(x, y, w, h, 4).fill({ color: 0x0d0d14 }).stroke({ width: 1, color: 0x2a2a36 });
+    const p = this.instance.params;
+    const P = Math.max(1, Math.min(64, Math.round(Number(p.partials) || 16)));
+    const tExp = (Number(p.tilt) || 0) / 6.0206;
+    const b = Math.min(1, Math.max(0, Number(p.odd ?? 0.5))) * 2 - 1;
+    const gains: number[] = [];
+    let peak = 1e-4;
+    for (let hh = 1; hh <= P; hh++) {
+      let gv = Math.pow(hh, tExp);
+      if (b > 0) { if (hh % 2 === 0) gv *= 1 - b; }
+      else if (b < 0) { if (hh % 2 === 1) gv *= 1 + b; }
+      gains.push(gv);
+      if (gv > peak) peak = gv;
+    }
+    const bw = (w - 12) / P;
+    const base = y + h - 6;
+    for (let i = 0; i < P; i++) {
+      const bh = (gains[i] / peak) * (h - 12);
+      const bx = x + 6 + i * bw;
+      g.rect(bx, base - bh, Math.max(1, bw - 1), bh).fill({ color: this.accent(), alpha: 0.85 });
+    }
+  }
+
+  // -- granular grain cloud + sample load ------------------------------------
+
+  private grainG: Graphics | null = null;
+  private grainRect = { x: 0, y: 0, w: 0, h: 0 };
+  private grainSampleText: Text | null = null;
+
+  private buildGrainDisplay(x: number, y: number, w: number, h: number): void {
+    this.grainRect = { x, y, w: Math.max(40, w), h: Math.max(24, h) };
+    this.grainG = new Graphics();
+    this.addChild(this.grainG);
+    this.drawGrains(null);
+  }
+
+  private drawGrains(data: { g: Float32Array; c: number } | null): void {
+    const g = this.grainG;
+    if (!g) return;
+    const { x, y, w, h } = this.grainRect;
+    g.clear();
+    g.roundRect(x, y, w, h, 4).fill({ color: 0x0d0d14 }).stroke({ width: 1, color: 0x2a2a36 });
+    if (!data || data.c === 0) return;
+    const c = data.c;
+    for (let i = 0; i < c; i++) {
+      const gx = x + 4 + Math.min(1, Math.max(0, data.g[i * 3])) * (w - 8);
+      // y by playback rate (pitch): map ~0.25..4× across the height (log2)
+      const rate = data.g[i * 3 + 1] || 1;
+      const ny = Math.min(1, Math.max(0, (Math.log2(rate) + 2) / 4));
+      const gy = y + h - 4 - ny * (h - 8);
+      const phase = data.g[i * 3 + 2];
+      const a = Math.sin(Math.PI * Math.min(1, Math.max(0, phase))); // fade in/out
+      g.circle(gx, gy, 2).fill({ color: this.accent(), alpha: 0.25 + 0.6 * a });
+    }
+  }
+
+  private buildGranularSample(x: number, y: number, w: number): void {
+    this.grainSampleText = new Text({ text: '', style: { fontSize: 10, fill: theme.textDim } });
+    this.grainSampleText.position.set(x, y);
+    this.grainSampleText.eventMode = 'static';
+    this.grainSampleText.cursor = 'pointer';
+    this.grainSampleText.on('pointerdown', (e) => {
+      e.stopPropagation();
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'audio/*';
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (file) void appState.loadSampleFile(this.instance.id, file);
+      };
+      input.click();
+    });
+    this.grainSampleText.on('pointerover', (e) =>
+      this.tooltip.show(['Sample', 'Click to load an audio file to granulate (Source = sample).'], e.clientX, e.clientY),
+    );
+    this.grainSampleText.on('pointerout', () => this.tooltip.hide());
+    this.addChild(this.grainSampleText);
+    this.updateGrainSampleName();
+  }
+
+  private updateGrainSampleName(): void {
+    if (!this.grainSampleText) return;
+    const s = appState.samples.get(this.instance.id);
+    this.grainSampleText.text = s ? `♪ ${s.name}` : '＋ load sample…';
+  }
+
   // -- recorder face -----------------------------------------------------------
 
   private recButton: Graphics | null = null;
@@ -3156,6 +3316,7 @@ export class ModuleView extends Container {
     if (this.instance.type === 'xy') this.drawXy();
     if (this.instance.type === 'button') this.drawButton();
     if (this.instance.type === 'modmatrix') this.drawModMatrix();
+    if (this.instance.type === 'addosc') this.drawSpectrum();
   }
 
   // -- type-specific faces --------------------------------------------------
@@ -3256,6 +3417,17 @@ export class ModuleView extends Container {
         this.wtLastDraw = { pos, morph };
         this.drawWtDisplay(pos, morph);
       }
+    }
+    if (this.stringG) {
+      const d = appState.stringData[this.instance.id];
+      if (d || this.stringWasActive) {
+        this.drawString(d ?? null);
+        this.stringWasActive = !!(d && d.a > 0.5);
+      }
+    }
+    if (this.grainG) {
+      this.drawGrains(appState.grainData[this.instance.id] ?? null);
+      this.updateGrainSampleName();
     }
     if (this.textFaceLine) this.updateTextFace();
     if (this.compG) {

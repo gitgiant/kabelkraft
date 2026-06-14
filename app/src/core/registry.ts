@@ -877,6 +877,128 @@ const wtosc: ModuleDef = {
   defaultData: () => ({ sampleName: '', sampleNameA: '', sampleNameB: '' }),
 };
 
+const pluck: ModuleDef = {
+  type: 'pluck',
+  name: 'Pluck',
+  category: 'component',
+  description:
+    'Karplus-Strong / waveguide string. The Gate input fires a one-shot exciter (per voice) ' +
+    'that rings and decays — wire a Voice for poly plucks (Pitch + Gate). Tone sets the ' +
+    'excitation character (round noise → bright pick), Pos is the pluck position (bright/nasal ' +
+    'near the bridge → hollow in the middle), Decay is the ring time, Damp the brightness ' +
+    'falloff, Stretch adds inharmonic/metallic dispersion. Unwired Gate auto-plucks.',
+  ports: [
+    { id: 'pitch', label: 'Pitch', type: 'control', direction: 'in', description: 'Pitch as MIDI/127. Polyphonic from a Voice module.' },
+    { id: 'gate', label: 'Gate', type: 'control', direction: 'in', description: 'Rising edge fires the exciter (per voice). Wire a Voice Gate.' },
+    audioOutPort('Plucked string output (per-voice lanes when the pitch input is polyphonic).'),
+  ],
+  params: [
+    { id: 'tone', label: 'Tone', min: 0, max: 1, default: 0.5, randomizable: true },
+    { id: 'pos', label: 'Pos', min: 0, max: 0.95, default: 0.2, randomizable: true },
+    { id: 'decay', label: 'Decay', min: 0.05, max: 12, default: 2.5, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'damp', label: 'Damp', min: 0, max: 1, default: 0.3, randomizable: true },
+    { id: 'stretch', label: 'Stretch', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'octave', label: 'Octave', min: -3, max: 3, default: 0, randomizable: true },
+    { id: 'semi', label: 'Semi', min: -12, max: 12, default: 0, unit: 'st', randomizable: true },
+    { id: 'fine', label: 'Fine', min: -100, max: 100, default: 0, unit: 'ct', randomizable: true },
+    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
+  ],
+  width: 250,
+  height: 320,
+  twoColumn: true,
+};
+
+const resonator: ModuleDef = {
+  type: 'resonator',
+  name: 'Resonator',
+  category: 'component',
+  description:
+    'Generic tuned waveguide — resonates whatever audio is wired in. Pitch input transposes the ' +
+    'tuning (unwired = the Octave/Semi/Fine base, so it works as a fixed-tuned comb). Decay is ' +
+    'the feedback (ring length), Damp the brightness, Stretch the inharmonic dispersion, Mix the ' +
+    'dry/wet. Excite it with noise→Amp for bowed/struck strings, or feed a drum loop for a comb.',
+  ports: [
+    audioIn('Excitation audio to resonate (keeps per-voice lanes).'),
+    { id: 'pitch', label: 'Pitch', type: 'control', direction: 'in', description: 'Pitch as MIDI/127; transposes the resonance. Unwired = base tuning.' },
+    audioOutPort('Resonated audio.'),
+  ],
+  params: [
+    { id: 'decay', label: 'Decay', min: 0, max: 0.9995, default: 0.97, randomizable: true },
+    { id: 'damp', label: 'Damp', min: 0, max: 1, default: 0.3, randomizable: true },
+    { id: 'stretch', label: 'Stretch', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'octave', label: 'Octave', min: -3, max: 3, default: 0, randomizable: true },
+    { id: 'semi', label: 'Semi', min: -12, max: 12, default: 0, unit: 'st', randomizable: true },
+    { id: 'fine', label: 'Fine', min: -100, max: 100, default: 0, unit: 'ct', randomizable: true },
+    { id: 'mix', label: 'Mix', min: 0, max: 1, default: 1, randomizable: true },
+  ],
+  width: 240,
+  height: 300,
+  twoColumn: true,
+};
+
+const addosc: ModuleDef = {
+  type: 'addosc',
+  name: 'Additive Osc',
+  category: 'component',
+  description:
+    'Additive oscillator: a procedural bank of sine partials (no aliasing). Partials sets the ' +
+    'count, Tilt the spectral slope (brightness, dB/oct), Odd the odd/even balance ' +
+    '(saw↔square↔clarinet), Inharm stretches the partial frequencies (bell/metal). Wire an ' +
+    'LFO/Envelope to Tilt Mod for spectral motion. Partials above Nyquist are dropped.',
+  ports: [
+    { id: 'pitch', label: 'Pitch', type: 'control', direction: 'in', description: 'Pitch as MIDI/127. Polyphonic from a Voice module.' },
+    { id: 'tiltMod', label: 'Tilt Mod', type: 'control', direction: 'in', description: 'Spectral tilt modulation (brightness), added to the Tilt parameter.' },
+    audioOutPort('Additive output (per-voice lanes when the pitch input is polyphonic).'),
+  ],
+  params: [
+    { id: 'partials', label: 'Partials', min: 1, max: 64, default: 16, randomizable: true },
+    { id: 'tilt', label: 'Tilt', min: -24, max: 6, default: -6, unit: 'dB/oct', randomizable: true },
+    { id: 'odd', label: 'Odd/Even', min: 0, max: 1, default: 0.5, randomizable: true },
+    { id: 'inharm', label: 'Inharm', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'octave', label: 'Octave', min: -3, max: 3, default: 0, randomizable: true },
+    { id: 'semi', label: 'Semi', min: -12, max: 12, default: 0, unit: 'st', randomizable: true },
+    { id: 'fine', label: 'Fine', min: -100, max: 100, default: 0, unit: 'ct', randomizable: true },
+    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
+  ],
+  width: 250,
+  height: 310,
+  twoColumn: true,
+};
+
+const granular: ModuleDef = {
+  type: 'granular',
+  name: 'Granular',
+  category: 'component',
+  description:
+    'Granular cloud. Source = a loaded sample or the live audio input (circular buffer; Freeze ' +
+    'holds the captured slice). One paraphonic grain stream — grains are transposed per held note ' +
+    '(Notes in), or drone at Root when nothing is held. Pos scans the buffer, Size sets grain ' +
+    'length, Density the overlap, Spray/Jitter randomize position/pitch, Spread the stereo width.',
+  ports: [
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Held notes transpose the grains (paraphonic).' },
+    audioIn('Live source audio (when Source = live).'),
+    { id: 'posMod', label: 'Pos Mod', type: 'control', direction: 'in', description: 'Scan-position modulation, added to Pos.' },
+    audioOutPort('Granular output (stereo).'),
+  ],
+  params: [
+    { id: 'source', label: 'Source', min: 0, max: 1, default: 0, options: ['sample', 'live'], randomizable: false },
+    { id: 'freeze', label: 'Freeze', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
+    { id: 'pos', label: 'Pos', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'size', label: 'Size', min: 5, max: 500, default: 80, unit: 'ms', curve: 'exp', randomizable: true },
+    { id: 'density', label: 'Density', min: 1, max: 8, default: 4, randomizable: true },
+    { id: 'spray', label: 'Spray', min: 0, max: 1, default: 0.1, randomizable: true },
+    { id: 'jitter', label: 'Jitter', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'spread', label: 'Spread', min: 0, max: 1, default: 0.3, randomizable: true },
+    { id: 'shape', label: 'Shape', min: 0, max: 2, default: 0, options: ['hann', 'tukey', 'tri'], randomizable: true },
+    { id: 'root', label: 'Root', min: 24, max: 96, default: 60, randomizable: false },
+    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
+  ],
+  width: 260,
+  height: 360,
+  twoColumn: true,
+  defaultData: () => ({ sampleName: '' }),
+};
+
 const vcf: ModuleDef = {
   type: 'vcf',
   name: 'Filter',
@@ -1233,7 +1355,7 @@ const notenames: ModuleDef = {
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
     transport, sequencer, arp, composer, notethru, lfo, envelope, random, keyboard, midiIn, midiOut,
-    voice, osc, fmosc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
+    voice, osc, fmosc, wtosc, smpl, pluck, resonator, addosc, granular, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
     mixer, recorder, audioInDef, audioOut, levels, visualizer,
     stt, transporttext, textinput, lyrics, notenames, intelligence,

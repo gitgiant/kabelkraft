@@ -57,7 +57,21 @@ Wire types: notes (cyan), control (magenta, single fan-in), audio (amber, sums).
   for evolving brightness), \`Feedback\` adds grit. Chain \`fmosc.out → fmosc.fm\` for
   deeper serial towers.
 - **Wavetable**: use \`wtosc\` (Position param + posMod input) in place of \`osc\`.
+- **Additive**: use \`addosc\` (sine-partial bank) in place of \`osc\`. \`Partials\` count,
+  \`Tilt\` brightness slope, \`Odd\` odd/even balance, \`Inharm\` partial stretch. Wire an
+  \`lfo\`/\`envelope\` → \`addosc.tiltMod\` for spectral motion.
+- **Pluck / plucked string**: use \`pluck\` — it is self-exciting, NO \`osc\` needed.
+  \`voice.pitch → pluck.pitch\` AND \`voice.gate → pluck.gate\` (the gate's rising edge
+  fires the string). \`Tone\` = excitation character, \`Pos\` = pluck position, \`Decay\`
+  = ring time, \`Stretch\` = inharmonicity. \`pluck.out → vca\`/\`audioOut\`.
+- **Resonator (bowed/struck/comb)**: \`resonator\` resonates whatever audio is wired in.
+  For a bowed/struck string excite it: \`osc\` (noise wave) → \`vca\` (gated by an
+  \`envelope\`) → \`resonator.in\`, with \`voice.pitch → resonator.pitch\`. Feed a drum
+  loop or any audio instead for a tuned comb. \`Decay\` = feedback, \`Mix\` = dry/wet.
 - **Sampler**: \`note source → smpl → audioOut\`. \`smpl\` has its own amp envelope.
+- **Granular**: \`note source → granular → audioOut\` (Source = sample; load a sample,
+  held notes transpose the grains). Or Source = live: \`osc\`/\`audioIn\` → \`granular.in\`
+  to granulate any signal. \`Size\`/\`Density\`/\`Spray\` shape the cloud; \`pos\` scans.
 - **Drum kit**: one \`composer\` (its \`data.notes\` are the beat; each note's \`pitch\`
   selects a drum) fanned out to several \`smpl\`, one per drum. Give each \`smpl\` a
   \`trigNote\` (the pitch that fires it), \`fixedPitch\` = 1 (play at root, ignore

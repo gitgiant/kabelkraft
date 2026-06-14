@@ -96,6 +96,10 @@ export class AppState {
   visData: StatusMessage['visData'] = {};
   /** Live Wavetable Osc display state (voice-0 frame pos + morph) per module. */
   wtData: NonNullable<StatusMessage['wtData']> = {};
+  /** Live Pluck/Resonator string snapshots (48-point delay line) per module. */
+  stringData: NonNullable<StatusMessage['stringData']> = {};
+  /** Live Granular grain clouds ([x,rate,phase] triples) per module. */
+  grainData: NonNullable<StatusMessage['grainData']> = {};
   /** Per-frame audio analysis for visual containers (FFT etc. run UI-side). */
   private readonly visHub = new VisFeatureHub();
 
@@ -592,6 +596,8 @@ export class AppState {
       this.spectra = status.spectra ?? {};
       this.visData = status.visData ?? {};
       this.wtData = status.wtData ?? {};
+      this.stringData = status.stringData ?? {};
+      this.grainData = status.grainData ?? {};
       for (const [id, feed] of Object.entries(this.visData)) this.visHub.pushStatus(id, feed);
       const now = performance.now();
       for (const id of status.noteActivity) this.noteFlash.set(id, now);

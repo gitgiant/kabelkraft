@@ -953,6 +953,442 @@ class VcaModule {
   }
 }
 
+/**
+ * Shared waveguide core for pluck (allpass-interp, frozen per note) and
+ * resonator (linear interp, glide-safe). A tuned feedback delay with an
+ * in-loop damping one-pole (highs die faster than the fundamental) plus an
+ * optional first-order allpass for dispersion ("stretch" → inharmonic strings).
+ */
+const WG_LEN = 8192;
+const WG_MASK = WG_LEN - 1;
+class Waveguide {
+  constructor() {
+    this.buf = new Float32Array(WG_LEN);
+    this.scratch = new Float32Array(WG_LEN);
+    this.wp = 0;
+    this.lp = 0;          // damping lowpass state
+    this.dx1 = 0; this.dy1 = 0; // dispersion allpass state
+    this.apPrev = 0;      // allpass interpolation state
+    this.delay = 100;
+  }
+
+  /** One-shot pluck excitation: fill the delay span with shaped noise.
+   *  tone 0→dark filtered noise (nylon) … 1→bright (pick); pos = pluck
+   *  position comb (0 bridge/thin … ~1 middle/hollow). */
+  excite(delay, tone, pos) {
+    this.delay = delay;
+    this.buf.fill(0); this.lp = 0; this.dx1 = 0; this.dy1 = 0; this.apPrev = 0;
+    const D = Math.max(2, Math.min(WG_LEN - 2, Math.floor(delay)));
+    const lpc = 0.04 + 0.96 * (tone * tone); // brightness of the burst
+    const tmp = this.scratch;
+    let z = 0;
+    for (let k = 0; k < D; k++) {
+      const nz = Math.random() * 2 - 1;
+      z += lpc * (nz - z);
+      tmp[k] = z;
+    }
+    const cd = Math.max(1, Math.floor(pos * D));
+    for (let k = 0; k < D; k++) {
+      const c = k - cd >= 0 ? tmp[k - cd] : 0;
+      this.buf[(this.wp - 1 - k + WG_LEN) & WG_MASK] = tmp[k] - 0.95 * c;
+    }
+  }
+
+  /** Process one block. `input` null = pure recirculation (pluck); else its
+   *  samples drive the loop (resonator). `allpass` picks the interpolator. */
+  block(out, input, bs, fb, dampCoef, stretchC, delay, allpass) {
+    let wp = this.wp, lp = this.lp, apPrev = this.apPrev, dx1 = this.dx1, dy1 = this.dy1;
+    const buf = this.buf;
+    const intD = Math.floor(delay);
+    const frac = delay - intD;
+    const eta = (1 - frac) / (1 + frac);
+    const useDisp = stretchC > 1e-4;
+    for (let i = 0; i < bs; i++) {
+      const ri = (wp - intD + WG_LEN) & WG_MASK;
+      const ri1 = (ri - 1 + WG_LEN) & WG_MASK;
+      let s;
+      if (allpass) {
+        const cur = buf[ri];
+        s = eta * cur + buf[ri1] - eta * apPrev;
+        apPrev = s;
+      } else {
+        s = buf[ri] * (1 - frac) + buf[ri1] * frac;
+      }
+      lp += dampCoef * (s - lp);
+      s = lp;
+      if (useDisp) {
+        const d = stretchC * s + dx1 - stretchC * dy1;
+        dx1 = s; dy1 = d; s = d;
+      }
+      buf[wp] = (input ? input[i] : 0) + fb * s;
+      out[i] = s;
+      wp = (wp + 1) & WG_MASK;
+    }
+    this.wp = wp; this.lp = lp; this.apPrev = apPrev; this.dx1 = dx1; this.dy1 = dy1;
+  }
+
+  /** Sample N points across one delay span (most-recent end) for the display. */
+  snapshot(dst) {
+    const D = Math.max(2, Math.floor(this.delay));
+    const N = dst.length;
+    for (let j = 0; j < N; j++) {
+      const k = Math.floor((j / (N - 1)) * (D - 1));
+      dst[j] = this.buf[(this.wp - 1 - k + WG_LEN) & WG_MASK];
+    }
+  }
+}
+
+/**
+ * Karplus-Strong / waveguide pluck component. Built-in one-shot exciter fired
+ * by the Gate input's rising edge (per voice lane); rings + decays. Unwired
+ * gate → auto-plucks slowly so a bare module still sounds.
+ */
+class PluckModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'pluck';
+    this.params = params;
+    this.controlIn = {};
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.polyL = [];
+    this.polyR = [];
+    this.polyLanes = 0;
+    this.wg = [];
+    this.lastGate = new Float32Array(MAX_VOICES);
+    for (let i = 0; i < MAX_VOICES; i++) this.wg.push(new Waveguide());
+    this.dispString = new Float32Array(48);
+    this.dispActive = 0;
+    this.autoTimer = 0;
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const offs = Math.round(p.octave ?? 0) * 12 + Math.round(p.semi ?? 0) + (p.fine ?? 0) / 100;
+    const tone = Math.min(1, Math.max(0, p.tone ?? 0.5));
+    const pos = Math.min(0.95, Math.max(0, p.pos ?? 0.2));
+    const decaySec = Math.max(0.05, p.decay ?? 2);
+    const damp = Math.min(1, Math.max(0, p.damp ?? 0.3));
+    const stretch = Math.min(1, Math.max(0, p.stretch ?? 0));
+    const level = p.level ?? 0.8;
+    const dampCoef = 1 - damp * 0.985;
+    const stretchC = stretch * 0.5;
+
+    const pitchIn = this.controlIn.pitch;
+    const gateIn = this.controlIn.gate;
+    const lanes = Math.min(MAX_VOICES, cwidth(pitchIn));
+    this.polyLanes = lanes;
+    const n = Math.max(1, lanes);
+    ensureLanes(this, n);
+    this.outL.fill(0);
+
+    // Unwired gate: self-trigger lane 0 slowly so a bare pluck makes sound.
+    let autoFire = -1;
+    if (gateIn === undefined) {
+      this.autoTimer -= blockSize;
+      if (this.autoTimer <= 0) { autoFire = 0; this.autoTimer = Math.floor(sampleRate * 0.7); }
+    }
+
+    let dispLane = 0, dispMax = -1;
+    for (let v = 0; v < n; v++) {
+      const base = lanes > 0 ? pitchIn[v] * 127 : pitchIn !== undefined ? pitchIn * 127 : 60;
+      const freq = 440 * Math.pow(2, (base + offs - 69) / 12);
+      const delay = Math.min(WG_LEN - 2, Math.max(2, sampleRate / freq));
+      const g = cval(gateIn, v);
+      const gate = g !== undefined ? g : 0;
+      const wg = this.wg[v];
+      if ((gate > 0.5 && this.lastGate[v] <= 0.5) || v === autoFire) wg.excite(delay, tone, pos);
+      this.lastGate[v] = gate;
+      const fb = Math.min(0.9999, Math.exp(-6.9078 / (freq * decaySec)));
+      const L = this.polyL[v];
+      wg.block(L, null, blockSize, fb, dampCoef, stretchC, delay, true);
+      for (let i = 0; i < blockSize; i++) { L[i] *= level; this.outL[i] += L[i]; }
+      this.polyR[v].set(L);
+      let e = 0; for (let i = 0; i < blockSize; i += 16) e += Math.abs(L[i]);
+      if (e > dispMax) { dispMax = e; dispLane = v; }
+    }
+    this.wg[dispLane].snapshot(this.dispString);
+    this.dispActive = dispMax > 1e-4 ? 1 : 0;
+    this.outR.set(this.outL);
+  }
+}
+
+/**
+ * Generic waveguide resonator. Resonates whatever audio is wired in; `pitch`
+ * (unwired → base tuning, osc convention) transposes the delay. Per-voice lanes
+ * when the input carries them; stereo single line on a plain mix. Linear interp
+ * (glide-safe); `decay` = raw feedback loop-gain (comb FX convention).
+ */
+class ResonatorModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'resonator';
+    this.params = params;
+    this.controlIn = {};
+    this.polyIn = { in: makePolyIn() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.polyL = [];
+    this.polyR = [];
+    this.polyLanes = 0;
+    this.wgL = [];
+    this.wgR = [];
+    for (let i = 0; i < MAX_VOICES; i++) { this.wgL.push(new Waveguide()); this.wgR.push(new Waveguide()); }
+    this.dispString = new Float32Array(48);
+    this.dispActive = 0;
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const offs = Math.round(p.octave ?? 0) * 12 + Math.round(p.semi ?? 0) + (p.fine ?? 0) / 100;
+    const decay = Math.min(0.9995, Math.max(0, p.decay ?? 0.97));
+    const damp = Math.min(1, Math.max(0, p.damp ?? 0.3));
+    const stretch = Math.min(1, Math.max(0, p.stretch ?? 0));
+    const mix = Math.min(1, Math.max(0, p.mix ?? 1));
+    const dampCoef = 1 - damp * 0.985;
+    const stretchC = stretch * 0.5;
+
+    const pin = this.polyIn.in;
+    const pitchIn = this.controlIn.pitch;
+    const pLanes = Math.min(MAX_VOICES, cwidth(pitchIn));
+    const lanes = Math.max(pin.lanes, pLanes);
+    this.polyLanes = lanes > 0 ? lanes : 0;
+    const n = Math.max(1, lanes);
+    ensureLanes(this, n);
+    this.outL.fill(0); this.outR.fill(0);
+
+    let dispLane = 0, dispMax = -1;
+    for (let v = 0; v < n; v++) {
+      const pbase = pLanes > 0 ? pitchIn[v] * 127 : pitchIn !== undefined ? pitchIn * 127 : 60;
+      const freq = 440 * Math.pow(2, (pbase + offs - 69) / 12);
+      const delay = Math.min(WG_LEN - 2, Math.max(2, sampleRate / freq));
+      const srcL = pin.lanes > 0 ? pin.L[Math.min(v, pin.lanes - 1)] : SILENT_BLOCK;
+      const srcR = pin.lanes > 0 ? pin.R[Math.min(v, pin.lanes - 1)] : SILENT_BLOCK;
+      const L = this.polyL[v], R = this.polyR[v];
+      this.wgL[v].block(L, srcL, blockSize, decay, dampCoef, stretchC, delay, false);
+      this.wgR[v].block(R, srcR, blockSize, decay, dampCoef, stretchC, delay, false);
+      for (let i = 0; i < blockSize; i++) {
+        L[i] = srcL[i] * (1 - mix) + L[i] * mix;
+        R[i] = srcR[i] * (1 - mix) + R[i] * mix;
+        this.outL[i] += L[i]; this.outR[i] += R[i];
+      }
+      let e = 0; for (let i = 0; i < blockSize; i += 16) e += Math.abs(L[i]);
+      if (e > dispMax) { dispMax = e; dispLane = v; }
+    }
+    this.wgL[dispLane].snapshot(this.dispString);
+    this.dispActive = dispMax > 1e-4 ? 1 : 0;
+  }
+}
+
+/**
+ * Additive oscillator: procedural sine-partial bank. Spectrum from params
+ * (no asset) — `tilt` slope, `odd` odd/even balance, `inharm` partial stretch.
+ * Partials above Nyquist are dropped (anti-alias + CPU).
+ */
+const ADD_MAXP = 64;
+class AddoscModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'addosc';
+    this.params = params;
+    this.controlIn = {};
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.polyL = [];
+    this.polyR = [];
+    this.polyLanes = 0;
+    this.phases = new Float64Array(MAX_VOICES * ADD_MAXP);
+    this.gains = new Float64Array(ADD_MAXP);
+    this.steps = new Float64Array(ADD_MAXP);
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const offs = Math.round(p.octave ?? 0) * 12 + Math.round(p.semi ?? 0) + (p.fine ?? 0) / 100;
+    const P = Math.max(1, Math.min(ADD_MAXP, Math.round(p.partials ?? 16)));
+    const tilt = p.tilt ?? -6;
+    const odd = Math.min(1, Math.max(0, p.odd ?? 0.5));
+    const inharm = Math.min(1, Math.max(0, p.inharm ?? 0));
+    const level = p.level ?? 0.8;
+    const b = odd * 2 - 1; // -1 = boost even … +1 = boost odd
+
+    const pitchIn = this.controlIn.pitch;
+    const tiltModIn = this.controlIn.tiltMod;
+    const lanes = Math.min(MAX_VOICES, cwidth(pitchIn));
+    this.polyLanes = lanes;
+    const n = Math.max(1, lanes);
+    ensureLanes(this, n);
+    this.outL.fill(0);
+    const nyq = sampleRate * 0.5;
+    const gains = this.gains, steps = this.steps;
+
+    for (let v = 0; v < n; v++) {
+      const base = lanes > 0 ? pitchIn[v] * 127 : pitchIn !== undefined ? pitchIn * 127 : 60;
+      const f0 = 440 * Math.pow(2, (base + offs - 69) / 12);
+      const tm = cval(tiltModIn, v);
+      const tExp = (tilt + (tm !== undefined ? tm * 24 : 0)) / 6.0206;
+      let gsum = 0, active = 0;
+      for (let h = 1; h <= P; h++) {
+        const fh = f0 * h * (1 + inharm * 0.0015 * h * (h - 1));
+        if (fh >= nyq) break;
+        let g = Math.pow(h, tExp);
+        if (b > 0) { if (h % 2 === 0) g *= 1 - b; }
+        else if (b < 0) { if (h % 2 === 1) g *= 1 + b; }
+        gains[h - 1] = g; steps[h - 1] = fh / sampleRate; gsum += g; active = h;
+      }
+      const norm = gsum > 0 ? level / gsum : 0;
+      const idxBase = v * ADD_MAXP;
+      const L = this.polyL[v];
+      for (let i = 0; i < blockSize; i++) {
+        let s = 0;
+        for (let h = 1; h <= active; h++) {
+          const gi = gains[h - 1];
+          if (gi === 0) continue;
+          let ph = this.phases[idxBase + h - 1];
+          s += gi * Math.sin(2 * Math.PI * ph);
+          ph += steps[h - 1]; if (ph >= 1) ph -= 1;
+          this.phases[idxBase + h - 1] = ph;
+        }
+        s *= norm;
+        L[i] = s; this.outL[i] += s;
+      }
+      this.polyR[v].set(L);
+    }
+    this.outR.set(this.outL);
+  }
+}
+
+/**
+ * Granular component. Sample buffer or live circular buffer (`source`), one
+ * paraphonic grain scheduler (grains transposed per held note; bare/no-note →
+ * drones at root). Density = overlap ratio. Note-in like smpl (direct).
+ */
+const GR_MAXGRAINS = 48;
+class GranularModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'granular';
+    this.params = params;
+    this.controlIn = {};
+    this.inputs = { in: { L: new Float32Array(128), R: new Float32Array(128) } };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.polyLanes = 0;
+    this.sample = null;
+    this.recLen = Math.floor(sampleRate * 2);
+    this.recL = new Float32Array(this.recLen);
+    this.recR = new Float32Array(this.recLen);
+    this.recW = 0; this.recFilled = 0;
+    this.held = [];
+    this.everTriggered = false;
+    this.grains = [];
+    for (let i = 0; i < GR_MAXGRAINS; i++) this.grains.push({ active: false, pos: 0, rate: 1, phase: 0, plen: 1, panL: 1, panR: 1 });
+    this.spawnTimer = 0; this.rr = 0;
+    this.dispGrains = new Float32Array(GR_MAXGRAINS * 3);
+    this.dispCount = 0;
+  }
+
+  setSample(sr, channels) {
+    this.sample = { sr, chL: channels[0], chR: channels[1] || channels[0] };
+  }
+
+  noteOn(voiceId, pitch) {
+    this.everTriggered = true;
+    this.held.push({ voiceId, pitch });
+  }
+
+  noteOff(voiceId) {
+    this.held = this.held.filter((h) => h.voiceId !== voiceId);
+  }
+
+  panic() { this.held.length = 0; for (const g of this.grains) g.active = false; }
+
+  render(blockSize) {
+    const p = this.params;
+    this.outL.fill(0); this.outR.fill(0);
+    const live = Math.round(p.source ?? 0) === 1;
+    const freeze = (p.freeze ?? 0) >= 0.5;
+
+    let bufL, bufR, blen, bsr;
+    if (live) {
+      if (!freeze) {
+        const inL = this.inputs.in.L, inR = this.inputs.in.R;
+        for (let i = 0; i < blockSize; i++) {
+          this.recL[this.recW] = inL[i]; this.recR[this.recW] = inR[i];
+          this.recW++; if (this.recW >= this.recLen) this.recW = 0;
+          if (this.recFilled < this.recLen) this.recFilled++;
+        }
+      }
+      bufL = this.recL; bufR = this.recR; blen = this.recFilled; bsr = sampleRate;
+    } else if (this.sample) {
+      bufL = this.sample.chL; bufR = this.sample.chR; blen = bufL.length; bsr = this.sample.sr;
+    } else { this.dispCount = 0; return; }
+    if (blen < 16) { this.dispCount = 0; return; }
+
+    const root = p.root ?? 60;
+    const posN = Math.min(1, Math.max(0, (p.pos ?? 0) + (cval(this.controlIn.posMod, 0) ?? 0)));
+    const grainLen = Math.max(64, Math.floor(Math.max(5, p.size ?? 80) * 0.001 * sampleRate));
+    const overlap = Math.max(1, Math.min(8, p.density ?? 4));
+    const spray = Math.max(0, p.spray ?? 0);
+    const jitter = Math.max(0, p.jitter ?? 0);
+    const spread = Math.min(1, Math.max(0, p.spread ?? 0));
+    const shape = Math.round(p.shape ?? 0);
+    const level = p.level ?? 0.8;
+    const srcRate = bsr / sampleRate;
+    const spawnInterval = Math.max(32, Math.floor(grainLen / overlap));
+    const pitches = this.held.length > 0 ? this.held : (this.everTriggered ? null : [{ pitch: root }]);
+
+    for (let i = 0; i < blockSize; i++) {
+      this.spawnTimer--;
+      if (this.spawnTimer <= 0 && pitches && pitches.length > 0) {
+        this.spawnTimer = spawnInterval;
+        const pit = pitches[this.rr % pitches.length].pitch; this.rr++;
+        this._spawn(pit, root, posN, blen, grainLen, spray, jitter, spread, srcRate);
+      }
+      let sl = 0, sr = 0;
+      for (const g of this.grains) {
+        if (!g.active) continue;
+        const x = g.phase;
+        let w;
+        if (shape === 2) w = 1 - Math.abs(2 * x - 1);
+        else if (shape === 1) { const e = 0.25; w = x < e ? 0.5 - 0.5 * Math.cos(Math.PI * x / e) : x > 1 - e ? 0.5 - 0.5 * Math.cos(Math.PI * (1 - x) / e) : 1; }
+        else w = 0.5 - 0.5 * Math.cos(2 * Math.PI * x);
+        const ip = Math.floor(g.pos);
+        if (ip >= 0 && ip < blen - 1) {
+          const fr = g.pos - ip;
+          sl += (bufL[ip] * (1 - fr) + bufL[ip + 1] * fr) * w * g.panL;
+          sr += (bufR[ip] * (1 - fr) + bufR[ip + 1] * fr) * w * g.panR;
+        }
+        g.pos += g.rate; g.phase += 1 / g.plen;
+        if (g.phase >= 1) g.active = false;
+      }
+      this.outL[i] += sl * level; this.outR[i] += sr * level;
+    }
+
+    let k = 0;
+    for (const g of this.grains) {
+      if (!g.active || k >= GR_MAXGRAINS) continue;
+      this.dispGrains[k * 3] = blen > 0 ? g.pos / blen : 0;
+      this.dispGrains[k * 3 + 1] = g.rate;
+      this.dispGrains[k * 3 + 2] = g.phase;
+      k++;
+    }
+    this.dispCount = k;
+  }
+
+  _spawn(pitch, root, posN, blen, grainLen, spray, jitter, spread, srcRate) {
+    const g = this.grains.find((x) => !x.active);
+    if (!g) return;
+    let start = posN * blen + (Math.random() * 2 - 1) * spray * blen * 0.25;
+    start = Math.max(0, Math.min(blen - 2, start));
+    g.active = true; g.pos = start;
+    g.rate = Math.pow(2, (pitch - root) / 12) * srcRate * (1 + (Math.random() * 2 - 1) * jitter);
+    g.phase = 0; g.plen = grainLen;
+    const pan = (Math.random() * 2 - 1) * spread;
+    g.panL = Math.min(1, 1 - pan); g.panR = Math.min(1, 1 + pan);
+  }
+}
+
 /** Knob / Slider / Button (PRD §8.6): the UI writes the 'value' param; emit it. */
 class ControlSourceModule {
   constructor(id, params, type) {
@@ -2810,6 +3246,14 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new VcfModule(m.id, m.params));
           } else if (m.type === 'vca') {
             next.set(m.id, new VcaModule(m.id, m.params));
+          } else if (m.type === 'pluck') {
+            next.set(m.id, new PluckModule(m.id, m.params));
+          } else if (m.type === 'resonator') {
+            next.set(m.id, new ResonatorModule(m.id, m.params));
+          } else if (m.type === 'addosc') {
+            next.set(m.id, new AddoscModule(m.id, m.params));
+          } else if (m.type === 'granular') {
+            next.set(m.id, new GranularModule(m.id, m.params));
           } else if (m.type === 'knob' || m.type === 'slider' || m.type === 'button') {
             next.set(m.id, new ControlSourceModule(m.id, m.params, m.type));
           } else if (m.type === 'xy') {
@@ -2902,6 +3346,7 @@ class EngineProcessor extends AudioWorkletProcessor {
         const mod = this.modules.get(msg.moduleId);
         if (mod && mod.type === 'smpl') mod.setSample(msg.sampleRate, msg.channels, msg.loopStart, msg.loopEnd);
         else if (mod && mod.type === 'wtosc') mod.setWavetable(msg.channels, msg.pad);
+        else if (mod && mod.type === 'granular') mod.setSample(msg.sampleRate, msg.channels);
         break;
       }
       case 'control': {
@@ -3386,6 +3831,8 @@ class EngineProcessor extends AudioWorkletProcessor {
     const visData = {};
     const textNotes = {};
     const wtData = {};
+    const stringData = {};
+    const grainData = {};
     for (const mod of this.modules.values()) {
       if (mod.type === 'sequencer') seqSteps[mod.id] = mod.currentStep;
       if (mod.value !== undefined) controlValues[mod.id] = mod.value;
@@ -3393,6 +3840,8 @@ class EngineProcessor extends AudioWorkletProcessor {
       if (mod.type === 'peq') spectra[mod.id] = mod.spectrum();
       if (mod.type === 'visualizer') visData[mod.id] = mod.visData();
       if (mod.type === 'wtosc') wtData[mod.id] = { pos: mod.dispPos, morph: mod.dispMorph };
+      if (mod.type === 'pluck' || mod.type === 'resonator') stringData[mod.id] = { s: Float32Array.from(mod.dispString), a: mod.dispActive };
+      if (mod.type === 'granular') grainData[mod.id] = { g: mod.dispGrains.slice(0, mod.dispCount * 3), c: mod.dispCount };
       if (mod.type === 'notenames') {
         const notes = mod.drainNotes();
         if (notes.length > 0) textNotes[mod.id] = notes;
@@ -3409,6 +3858,8 @@ class EngineProcessor extends AudioWorkletProcessor {
       visData,
       textNotes,
       wtData,
+      stringData,
+      grainData,
       noteActivity: [...this.noteActivity],
       songPosition: this.transport.posBeats,
       perf,

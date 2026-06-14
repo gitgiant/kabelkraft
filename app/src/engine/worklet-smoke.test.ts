@@ -149,4 +149,55 @@ describe('engine worklet produces audio (boot starters, headless)', () => {
     const peak = renderPeak([composer, voice, ...oscs, adsrA, adsrF, vcf, vca, delay, reverb, out], wires);
     expect(peak).toBeGreaterThan(0.01);
   });
+
+  it('pluck: sequencer-gated Karplus string rings (voice pitch + gate)', () => {
+    const seq = mod('sequencer', 'seq1', { gate: 0.1 });
+    seq.data = { steps: Array.from({ length: 16 }, () => ({ on: true, pitch: 57 })) };
+    const voice = mod('voice', 'voi1', { voices: 2 });
+    const pluck = mod('pluck', 'plk1', { decay: 4, damp: 0.2 });
+    const out = mod('audioOut', 'out1');
+    const peak = renderPeak(
+      [seq, voice, pluck, out],
+      [
+        wire(seq, 'notes', voice, 'notes'),
+        wire(voice, 'pitch', pluck, 'pitch'),
+        wire(voice, 'gate', pluck, 'gate'),
+        wire(pluck, 'out', out, 'in'),
+      ],
+    );
+    expect(peak).toBeGreaterThan(0.01);
+  });
+
+  it('resonator: a noise oscillator drives a tuned waveguide comb', () => {
+    const osc = mod('osc', 'osc1', { wave: 4, level: 0.5 }); // noise
+    const res = mod('resonator', 'res1', { decay: 0.99, mix: 1 });
+    const out = mod('audioOut', 'out1');
+    const peak = renderPeak(
+      [osc, res, out],
+      [wire(osc, 'out', res, 'in'), wire(res, 'out', out, 'in')],
+      1,
+    );
+    expect(peak).toBeGreaterThan(0.01);
+  });
+
+  it('addosc: additive partial bank drones; high pitch stays finite (Nyquist drop)', () => {
+    const add = mod('addosc', 'add1', { partials: 64, octave: 3, semi: 11 });
+    const out = mod('audioOut', 'out1');
+    const peak = renderPeak([add, out], [wire(add, 'out', out, 'in')], 1);
+    expect(Number.isFinite(peak)).toBe(true);
+    expect(peak).toBeGreaterThan(0.01);
+    expect(peak).toBeLessThan(2); // normalized — no runaway/clip from 64 partials
+  });
+
+  it('granular: live mode granulates an incoming oscillator into a drone', () => {
+    const osc = mod('osc', 'osc1', { wave: 0, level: 0.8 });
+    const gr = mod('granular', 'gr1', { source: 1, size: 60, density: 4 });
+    const out = mod('audioOut', 'out1');
+    const peak = renderPeak(
+      [osc, gr, out],
+      [wire(osc, 'out', gr, 'in'), wire(gr, 'out', out, 'in')],
+      1,
+    );
+    expect(peak).toBeGreaterThan(0.01);
+  });
 });

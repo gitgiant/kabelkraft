@@ -66,6 +66,10 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'slew',
   'cmath',
   'modmatrix',
+  'pluck',
+  'resonator',
+  'addosc',
+  'granular',
   'notenames',
 ]);
 

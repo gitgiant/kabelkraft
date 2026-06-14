@@ -51,6 +51,10 @@ export type EngineModuleType =
   | 'slew'
   | 'cmath'
   | 'modmatrix'
+  | 'pluck'
+  | 'resonator'
+  | 'addosc'
+  | 'granular'
   | 'notenames';
 
 export interface EngineModuleSnapshot {
@@ -205,6 +209,10 @@ export interface StatusMessage {
   textNotes?: Record<string, number[]>;
   /** Wavetable Osc live display: voice-0 resolved frame position + morph (0–1). */
   wtData?: Record<string, { pos: number; morph: number }>;
+  /** Pluck/Resonator live string: 48-point delay-line snapshot + active flag. */
+  stringData?: Record<string, { s: Float32Array; a: number }>;
+  /** Granular live grain cloud: flat [x, rate, phase] triples + grain count. */
+  grainData?: Record<string, { g: Float32Array; c: number }>;
   /** Module ids that emitted notes since the last post (for wire flashes). */
   noteActivity: string[];
   /** Transport position in beats (worklet is the clock while playing). */
