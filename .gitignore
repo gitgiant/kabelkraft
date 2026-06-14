@@ -11,5 +11,8 @@ key.pem
 *.mid
 *.midi
 
+# Saved project files (local scratch)
+*.kkproj
+
 # Legal drafts and notes (local only until lawyer-reviewed)
 legal/
