@@ -9,9 +9,11 @@
     CUSTOM_PRESETS,
     OPENROUTER_CODE_KEY,
     exchangeOpenRouterCode,
+    fetchOpenRouterModels,
     saveSettings,
     startOpenRouterAuth,
     type AiSettings,
+    type OpenRouterModel,
   } from '../core/aiprovider';
 
   let { settings = $bindable() }: { settings: AiSettings } = $props();
@@ -19,8 +21,30 @@
   let connecting = $state(false);
   let connectError = $state('');
 
+  // OpenRouter model catalog (loaded once an account/key is present).
+  let orModels = $state<OpenRouterModel[]>([]);
+  let orModelsLoading = $state(false);
+  let orModelsError = $state('');
+
   function persistSettings() {
     saveSettings(settings);
+  }
+
+  async function loadOpenRouterModels() {
+    if (settings.provider !== 'openrouter' || !settings.openrouter.apiKey.trim()) {
+      orModels = [];
+      return;
+    }
+    orModelsLoading = true;
+    orModelsError = '';
+    try {
+      orModels = await fetchOpenRouterModels(settings.openrouter.apiKey);
+    } catch (e) {
+      orModelsError = (e as Error).message;
+      orModels = [];
+    } finally {
+      orModelsLoading = false;
+    }
   }
 
   // Match the custom base URL back to a preset so the dropdown tracks manual
@@ -58,6 +82,7 @@
     try {
       settings.openrouter.apiKey = await exchangeOpenRouterCode(e.newValue);
       persistSettings();
+      void loadOpenRouterModels();
     } catch (err) {
       connectError = (err as Error).message;
     }
@@ -65,6 +90,7 @@
 
   onMount(() => {
     window.addEventListener('storage', onStorage);
+    void loadOpenRouterModels();
     return () => window.removeEventListener('storage', onStorage);
   });
 </script>
@@ -97,7 +123,7 @@
       <span class="settings-label">Account</span>
       {#if settings.openrouter.apiKey}
         <span class="connected">✓ Connected</span>
-        <button onclick={() => { settings.openrouter.apiKey = ''; persistSettings(); }}>Disconnect</button>
+        <button onclick={() => { settings.openrouter.apiKey = ''; orModels = []; orModelsError = ''; persistSettings(); }}>Disconnect</button>
       {:else}
         <button class="connect" onclick={connectOpenRouter} disabled={connecting}>
           {connecting ? 'Waiting for OpenRouter…' : '🔗 Connect OpenRouter'}
@@ -107,13 +133,33 @@
     {#if !settings.openrouter.apiKey}
       <div class="settings-row">
         <span class="settings-label">…or key</span>
-        <input class="grow" type="password" placeholder="sk-or-…" bind:value={settings.openrouter.apiKey} onchange={persistSettings} spellcheck="false" autocomplete="off" />
+        <input class="grow" type="password" placeholder="sk-or-…" bind:value={settings.openrouter.apiKey} onchange={() => { persistSettings(); void loadOpenRouterModels(); }} spellcheck="false" autocomplete="off" />
       </div>
     {/if}
     <div class="settings-row">
       <span class="settings-label">Model</span>
-      <input class="grow" type="text" placeholder="anthropic/claude-sonnet-4.6" bind:value={settings.openrouter.model} onchange={persistSettings} spellcheck="false" />
+      {#if orModels.length > 0}
+        <select class="grow" bind:value={settings.openrouter.model} onchange={persistSettings}>
+          {#if settings.openrouter.model && !orModels.some((m) => m.id === settings.openrouter.model)}
+            <option value={settings.openrouter.model}>{settings.openrouter.model} (current)</option>
+          {/if}
+          {#each orModels as m (m.id)}<option value={m.id}>{m.name}</option>{/each}
+        </select>
+        <button onclick={loadOpenRouterModels} disabled={orModelsLoading} title="Refresh model list">↻</button>
+      {:else}
+        <input class="grow" type="text" placeholder="anthropic/claude-sonnet-4.6" bind:value={settings.openrouter.model} onchange={persistSettings} spellcheck="false" />
+        {#if settings.openrouter.apiKey}
+          <button onclick={loadOpenRouterModels} disabled={orModelsLoading} title="Load available models">
+            {orModelsLoading ? '…' : '↻'}
+          </button>
+        {/if}
+      {/if}
     </div>
+    {#if orModelsLoading}
+      <p class="settings-note">Loading models…</p>
+    {:else if orModelsError}
+      <p class="settings-note error">Couldn't load models ({orModelsError}) — type a model id above.</p>
+    {/if}
     {#if connectError}
       <p class="settings-note error">{connectError}</p>
     {:else}

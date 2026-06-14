@@ -8,6 +8,7 @@
 import { Application, Container, FederatedPointerEvent, Graphics, Text } from 'pixi.js';
 import type { ModuleGroup, PortRef, Wire } from '../core/graph';
 import { isTouchMode } from '../core/mobile';
+import { appSettings } from '../core/settings';
 import { PORT_TYPE_COLORS } from '../core/types';
 import { appState } from '../state';
 import { nextGroupColor, onThemeChange, theme } from '../theme';
@@ -46,6 +47,16 @@ export class PatchCanvas {
   private frames = new Map<string, ExpandedFrame>();
   /** Wire anchors for expanded groups' intrinsic poles (set by drawFrames). */
   private frameAnchors = new Map<string, { x: number; y: number }>();
+  /** In-flight position tweens (Arrange animation); advanced each tick. */
+  private tweens: Array<{
+    obj: { position: { x: number; y: number; set(x: number, y: number): void } };
+    sx: number;
+    sy: number;
+    tx: number;
+    ty: number;
+    start: number;
+    dur: number;
+  }> = [];
   private lastTickAt = performance.now();
   private tooltip!: Tooltip;
 
@@ -151,6 +162,11 @@ export class PatchCanvas {
       }
     });
     appState.on('projectLoaded', () => this.rebuildAll());
+    appState.on('groupCollapseToggled', () => {
+      // Opt-in: re-tidy the patch whenever a group expands/collapses so the
+      // freed/needed space is reclaimed without a manual Arrange click.
+      if (appSettings().general.autoArrangeOnToggle) this.autoArrange();
+    });
     appState.on('composerChanged', () => {
       // Open/shrink resizes the composer tile (state mutates instance.w/h).
       for (const v of this.views.values()) {
@@ -345,6 +361,33 @@ export class PatchCanvas {
   }
 
 
+  /** Glide a Pixi object's visual position to (tx, ty); replaces any tween on it. */
+  private queueTween(
+    obj: { position: { x: number; y: number; set(x: number, y: number): void } },
+    tx: number,
+    ty: number,
+    dur = 320,
+  ): void {
+    this.tweens = this.tweens.filter((t) => t.obj !== obj);
+    const { x: sx, y: sy } = obj.position;
+    if (sx === tx && sy === ty) {
+      obj.position.set(tx, ty);
+      return;
+    }
+    this.tweens.push({ obj, sx, sy, tx, ty, start: performance.now(), dur });
+  }
+
+  /** Advance and retire active position tweens (easeInOutCubic). */
+  private advanceTweens(now: number): void {
+    if (this.tweens.length === 0) return;
+    this.tweens = this.tweens.filter((t) => {
+      const k = Math.min(1, (now - t.start) / t.dur);
+      const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+      t.obj.position.set(t.sx + (t.tx - t.sx) * e, t.sy + (t.ty - t.sy) * e);
+      return k < 1;
+    });
+  }
+
   /**
    * Auto-arrange (toolbar): layered signal-flow layout. Nodes are visible
    * module tiles and collapsed group tiles; wires define left→right layers
@@ -423,13 +466,14 @@ export class PatchCanvas {
       for (const node of col) {
         const nx = cx + (colW - node.w) / 2;
         if (node.mv) {
-          node.mv.position.set(nx, cy);
+          // Model snaps to final; the tile glides there visually.
+          this.queueTween(node.mv, nx, cy);
           node.mv.instance.x = nx;
           node.mv.instance.y = cy;
         } else if (node.gv) {
-          const dx = nx - node.gv.position.x;
-          const dy = cy - node.gv.position.y;
-          node.gv.position.set(nx, cy);
+          const dx = nx - node.gv.group.x;
+          const dy = cy - node.gv.group.y;
+          this.queueTween(node.gv, nx, cy);
           node.gv.group.x = nx;
           node.gv.group.y = cy;
           // Members travel with the collapsed tile so expand stays nearby.
@@ -450,9 +494,10 @@ export class PatchCanvas {
       cx += colW + GAP_X;
     }
 
-    // Re-center the view on the arranged patch.
+    // Re-center the view on the arranged patch (glides along with the tiles).
     const scale = this.world.scale.x;
-    this.world.position.set(
+    this.queueTween(
+      this.world,
       this.app.screen.width / 2 - ((minX + maxX) / 2) * scale,
       this.app.screen.height / 2 - ((minY + maxY) / 2) * scale,
     );
@@ -1351,6 +1396,7 @@ export class PatchCanvas {
 
   private tick(): void {
     const now = performance.now();
+    this.advanceTweens(now);
     this.wireLayer.clear();
     this.drawFrames();
 

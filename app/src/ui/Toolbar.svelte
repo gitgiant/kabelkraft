@@ -257,10 +257,10 @@
   </div>
 
   <div class="transport tgroup push" class:playing>
-    <button onclick={() => appState.transportCommand('rewind')} title="Rewind">⏮</button>
-    <button onclick={() => appState.transportCommand('play')} title="Play">▶</button>
-    <button onclick={() => appState.transportCommand('pause')} title="Pause">⏸</button>
-    <button onclick={() => appState.transportCommand('stop')} title="Stop">⏹</button>
+    <button onclick={() => appState.transportCommand('rewind')} title="Rewind (Home)">⏮</button>
+    <button onclick={() => appState.transportCommand('play')} title="Play (Space)">▶</button>
+    <button onclick={() => appState.transportCommand('pause')} title="Pause (Space)">⏸</button>
+    <button onclick={() => appState.transportCommand('stop')} title="Stop (Enter)">⏹</button>
     <label title="Master tempo (PRD: default 120 BPM)">
       <input
         type="number"

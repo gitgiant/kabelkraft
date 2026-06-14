@@ -11,7 +11,7 @@
  */
 
 import type { FaceSpec } from './face';
-import type { ModuleDef, ModuleInstance, PortSpec } from './module';
+import type { ModuleDef, ModuleInstance, ModulePreset, PortSpec } from './module';
 import type { PortType } from './types';
 
 export interface PortRef {
@@ -90,6 +90,10 @@ export interface ModuleGroup {
    */
   poleHidden?: string[];
   poleAdded?: string[];
+  /** Saved configuration snapshots (PRESETS_PLAN.md); lazily created. */
+  presets?: ModulePreset[];
+  /** Last-loaded preset id; dirty = live state differs from this snapshot. */
+  activePresetId?: string;
 }
 
 let nextGroupId = 1;

@@ -1428,28 +1428,44 @@ class AudioOutModule {
     this.inputs = { in: makeStereoBuf() };
     this.outL = new Float32Array(128);
     this.outR = new Float32Array(128);
-    this.limiterEnv = 0;
+    // 5 ms lookahead so the brickwall reacts before a transient arrives.
+    this.lookahead = Math.max(1, Math.round(0.005 * sampleRate));
+    this.dlyL = new Float32Array(this.lookahead);
+    this.dlyR = new Float32Array(this.lookahead);
+    this.dIdx = 0;
+    this.gr = 0; // current gain reduction (dB)
+    this.grDb = 0; // peak GR over the block, for UI metering
   }
 
   render(blockSize) {
     const level = this.params.level ?? 0.8;
     const limiterOn = (this.params.limiter ?? 1) >= 0.5;
-    const releaseCoef = Math.exp(-1 / (0.08 * sampleRate)); // ~80 ms release
+    const ceiling = this.params.ceiling ?? -0.3; // dBFS output ceiling
+    const aA = Math.exp(-1 / (0.001 * sampleRate)); // ~1 ms clamp-down
+    const aR = Math.exp(-1 / (Math.max(0.001, (this.params.release ?? 80) / 1000) * sampleRate));
+    let blockGr = 0;
+
     for (let i = 0; i < blockSize; i++) {
-      let l = this.inputs.in.L[i] * level;
-      let r = this.inputs.in.R[i] * level;
+      const l = this.inputs.in.L[i] * level;
+      const r = this.inputs.in.R[i] * level;
       if (limiterOn) {
         const peak = Math.max(Math.abs(l), Math.abs(r));
-        this.limiterEnv = Math.max(peak, this.limiterEnv * releaseCoef);
-        if (this.limiterEnv > LIMITER_CEILING) {
-          const gain = LIMITER_CEILING / this.limiterEnv;
-          l *= gain;
-          r *= gain;
-        }
+        const db = 20 * Math.log10(peak + DB_FLOOR);
+        const target = Math.max(0, db - ceiling);
+        this.gr = target > this.gr ? target + (this.gr - target) * aA : target + (this.gr - target) * aR;
+        if (this.gr > blockGr) blockGr = this.gr;
+        const gain = Math.pow(10, -this.gr / 20);
+        this.outL[i] = this.dlyL[this.dIdx] * gain;
+        this.outR[i] = this.dlyR[this.dIdx] * gain;
+        this.dlyL[this.dIdx] = l;
+        this.dlyR[this.dIdx] = r;
+        this.dIdx = (this.dIdx + 1) % this.lookahead;
+      } else {
+        this.outL[i] = l;
+        this.outR[i] = r;
       }
-      this.outL[i] = l;
-      this.outR[i] = r;
     }
+    this.grDb = limiterOn ? blockGr : 0;
   }
 }
 

@@ -35,7 +35,7 @@ export function addPolySynth(cx = POLY_CX, cy = POLY_CY): void {
   const vca = appState.addModule('vca', ...at(190, -220));
   const delay = appState.addModule('delay', ...at(430, -320));
   const reverb = appState.addModule('reverb', ...at(700, -340));
-  const audioOut = appState.addModule('audioOut', ...at(990, -220));
+  const audioOut = appState.ensureAudioOut(...at(990, -220));
 
   osc1.label = 'Osc A';
   osc2.label = 'Osc B';
@@ -189,7 +189,7 @@ export function addMonoSynth(cx: number, cy: number): void {
   const lfo = appState.addModule('lfo', ...at(-560, 480));
   const vcf = appState.addModule('vcf', ...at(-60, -150));
   const vca = appState.addModule('vca', ...at(220, -60));
-  const audioOut = appState.addModule('audioOut', ...at(480, -60));
+  const audioOut = appState.ensureAudioOut(...at(480, -60));
 
   osc1.label = 'Osc A';
   osc2.label = 'Osc B';
@@ -262,7 +262,7 @@ export function addSampler(cx: number, cy: number): void {
   const at = (x: number, y: number): [number, number] => [cx + x, cy + y];
 
   const smpl = appState.addModule('smpl', ...at(-120, -100));
-  const audioOut = appState.addModule('audioOut', ...at(220, -60));
+  const audioOut = appState.ensureAudioOut(...at(220, -60));
 
   const wire = (fromId: string, fromPort: string, toId: string, toPort: string) =>
     appState.connect({ moduleId: fromId, portId: fromPort }, { moduleId: toId, portId: toPort });
@@ -299,7 +299,7 @@ export function addDrumKit(cx: number, cy: number): void {
 
   const notethru = appState.addModule('notethru', ...at(-720, -80));
   const mixer = appState.addModule('mixer', ...at(640, -40));
-  const audioOut = appState.addModule('audioOut', ...at(960, -40));
+  const audioOut = appState.ensureAudioOut(...at(960, -40));
 
   const wire = (fromId: string, fromPort: string, toId: string, toPort: string) =>
     appState.connect({ moduleId: fromId, portId: fromPort }, { moduleId: toId, portId: toPort });
@@ -473,7 +473,7 @@ export function addDrumSynth(cx: number, cy: number): void {
 
   // -- sum: kick / snare+clap / hats / toms on the four mixer channels --------
   const mixer = appState.addModule('mixer', ...at(-380, rowY(1)));
-  const audioOut = appState.addModule('audioOut', ...at(40, rowY(2)));
+  const audioOut = appState.ensureAudioOut(...at(40, rowY(2)));
   wire(kickVca.id, 'out', mixer.id, 'in1');
   for (const v of [snareToneVca, snareNoiseVca, clapVca]) wire(v.id, 'out', mixer.id, 'in2');
   for (const v of [chVca, ohVca]) wire(v.id, 'out', mixer.id, 'in3');

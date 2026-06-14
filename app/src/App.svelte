@@ -5,6 +5,7 @@
   import { appSettings, onSettingsChange, type AppSettings } from './core/settings';
   import { isTouchMode, onTouchModeChange } from './core/mobile';
   import { clearAutosave, readAutosave, writeAutosave } from './core/autosave';
+  import { initMediaSession } from './core/mediasession';
   import AiImport from './ui/AiImport.svelte';
   import OptionsDialog from './ui/OptionsDialog.svelte';
   import FaceEditor from './ui/FaceEditor.svelte';
@@ -12,6 +13,7 @@
   import PianoRoll from './ui/PianoRoll.svelte';
   import LyricsEditor from './ui/LyricsEditor.svelte';
   import RangeConfig from './ui/RangeConfig.svelte';
+  import PresetMenu from './ui/PresetMenu.svelte';
   import SampleEditor from './ui/SampleEditor.svelte';
   import SampleLibrary from './ui/SampleLibrary.svelte';
   import Toolbar from './ui/Toolbar.svelte';
@@ -37,9 +39,31 @@
   }
 
   function onKeyDown(e: KeyboardEvent) {
-    if (!appSettings().general.qwertyPiano) return;
     const tag = (document.activeElement?.tagName ?? '').toLowerCase();
-    if (tag === 'input' || tag === 'textarea' || e.repeat || e.metaKey || e.ctrlKey) return;
+    const typing = tag === 'input' || tag === 'textarea' || (document.activeElement as HTMLElement | null)?.isContentEditable;
+
+    // Global transport shortcuts (DAW conventions). Work regardless of the
+    // QWERTY-piano setting, but never while typing or holding a modifier.
+    if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        appState.transportCommand(appState.transport.playing ? 'pause' : 'play');
+        return;
+      }
+      if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+        e.preventDefault();
+        appState.transportCommand('stop');
+        return;
+      }
+      if (e.code === 'Home') {
+        e.preventDefault();
+        appState.transportCommand('rewind');
+        return;
+      }
+    }
+
+    if (!appSettings().general.qwertyPiano) return;
+    if (typing || e.repeat || e.metaKey || e.ctrlKey) return;
     const semi = QWERTY_SEMITONES[e.key.toLowerCase()];
     if (semi === undefined) return;
     for (const kb of keyboardModules()) {
@@ -135,6 +159,7 @@
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    const offMediaSession = initMediaSession(appState);
     const offComposer = appState.on('composerChanged', () => {
       composerIds = [...appState.composerOpen];
     });
@@ -142,6 +167,7 @@
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('beforeunload', onBeforeUnload);
+      offMediaSession();
       offComposer();
       offSettings();
       offTouch();
@@ -177,6 +203,7 @@
     <PianoRoll moduleId={id} />
   {/each}
   <RangeConfig />
+  <PresetMenu />
   <LyricsEditor />
   <VisEditor />
   <VisualizerOverlay />

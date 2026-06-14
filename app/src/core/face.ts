@@ -11,6 +11,7 @@
 
 import type { Graph, ModuleGroup, Wire } from './graph';
 import { createInstance, type ModuleDef, type ModuleInstance } from './module';
+import { remapPreset } from './preset';
 
 export type FaceElementKind =
   | 'knob'
@@ -317,6 +318,9 @@ export function importKkmod(json: string, defs: Map<string, ModuleDef>): KkmodIm
     if (m.data) inst.data = m.data;
     if (m.label) inst.label = m.label;
     if (m.color !== undefined) inst.color = m.color;
+    // A plain-module preset references only the module itself — copy verbatim.
+    if (m.presets) inst.presets = m.presets.map((p) => ({ ...p }));
+    if (m.activePresetId) inst.activePresetId = m.activePresetId;
     moduleIdMap.set(m.id, inst.id);
     modules.push(inst);
   }
@@ -342,6 +346,8 @@ export function importKkmod(json: string, defs: Map<string, ModuleDef>): KkmodIm
     id: groupIdMap.get(g.id)!,
     moduleIds: g.moduleIds.map((id) => moduleIdMap.get(id)!).filter(Boolean),
     groupIds: g.groupIds.map((id) => groupIdMap.get(id)!).filter(Boolean),
+    // Container presets reference member module ids — remap them to fresh ids.
+    presets: g.presets?.map((p) => remapPreset(p, moduleIdMap)),
     collapsed: true,
     face: g.face
       ? {

@@ -23,6 +23,9 @@ import { bandCoefs, biquadResponseDb, chainResponseDb, vcfCoefs } from '../core/
 import { isTouchMode } from '../core/mobile';
 import { appState } from '../state';
 import { ensureAudioPermission, listAudioDevices } from '../engine/devices';
+import { appSettings, updateSettings } from '../core/settings';
+import { openSelectMenu } from './SelectMenu';
+import { PresetBar, fitText } from './PresetBar';
 import { theme } from '../theme';
 import { binFrac } from '../visual/features';
 import { approximateScene, visGraphOf } from '../visual/migrate';
@@ -353,10 +356,15 @@ export class ModuleView extends Container {
   }
 
   private buildTitle(): void {
-    const title = new Text({
-      text: this.instance.label ?? this.def.name,
-      style: { fontSize: 12, fill: theme.text, fontWeight: 'bold' },
-    });
+    // Glyph buttons occupy the right end of the title bar (per module type);
+    // the preset picker sits just left of them, the (truncated) name at left.
+    const hasAiButton = this.instance.type === 'lyrics' || this.instance.type === 'visualizer';
+    const rightInset = this.instance.type === 'composer' ? 44 : hasAiButton ? 22 : 4;
+    const pickerRightX = this.w - rightInset;
+    const nameMaxW = Math.max(24, Math.min(90, (pickerRightX - 8) * 0.5));
+    const titleMaxW = Math.max(16, pickerRightX - (nameMaxW + 36) - 14);
+
+    const title = fitText(this.instance.label ?? this.def.name, titleMaxW, theme.text);
     title.position.set(8, 5);
     // Let title-bar clicks fall through to the body (drag, double-click) —
     // group tiles do the same.
@@ -417,6 +425,17 @@ export class ModuleView extends Container {
         appState.openVisEditor(this.instance.id),
       );
     }
+
+    // Preset picker (◀ name ▶), right-aligned before the glyph buttons.
+    this.addChild(
+      new PresetBar({
+        target: { id: this.instance.id, isGroup: false },
+        rightX: pickerRightX,
+        y: 5,
+        maxNameW: nameMaxW,
+        tooltip: this.tooltip,
+      }),
+    );
 
     this.body.eventMode = 'static';
     this.body.cursor = 'grab';
@@ -1091,6 +1110,10 @@ export class ModuleView extends Container {
     }
     if (type === 'audioIn') {
       this.buildAudioDeviceRow(x, this.h - 24, w);
+      bottom -= 26;
+    }
+    if (type === 'audioOut') {
+      this.buildAudioOutputDeviceRow(x, this.h - 24, w);
       bottom -= 26;
     }
 
@@ -2115,21 +2138,29 @@ export class ModuleView extends Container {
     hit.cursor = 'pointer';
     hit.on('pointerdown', (e) => {
       e.stopPropagation();
+      const sx = e.clientX;
+      const sy = e.clientY;
       void (async () => {
         await ensureAudioPermission();
         const { inputs } = await listAudioDevices();
         const devices = [{ deviceId: '', label: 'default input' }, ...inputs];
         const current = (this.instance.data?.deviceId as string) || '';
-        const idx = devices.findIndex((d) => d.deviceId === current);
-        const next = devices[(idx + 1) % devices.length];
-        appState.setModuleData(this.instance.id, 'deviceId', next.deviceId);
-        appState.setModuleData(this.instance.id, 'deviceName', next.label);
-        this.updateAudioDeviceText();
+        openSelectMenu({
+          x: sx,
+          y: sy,
+          items: devices.map((d) => ({ label: d.label, value: d.deviceId, selected: d.deviceId === current })),
+          onPick: (deviceId) => {
+            const dev = devices.find((d) => d.deviceId === deviceId);
+            appState.setModuleData(this.instance.id, 'deviceId', deviceId);
+            appState.setModuleData(this.instance.id, 'deviceName', dev?.label ?? 'default input');
+            this.updateAudioDeviceText();
+          },
+        });
       })();
     });
     hit.on('pointerover', (e) =>
       this.tooltip.show(
-        ['Capture device', 'Click to cycle through available inputs (asks for microphone permission first).'],
+        ['Capture device', 'Click to choose an input (asks for microphone permission first).'],
         e.clientX,
         e.clientY,
       ),
@@ -2141,7 +2172,68 @@ export class ModuleView extends Container {
   private updateAudioDeviceText(): void {
     if (!this.audioDeviceText) return;
     const name = (this.instance.data?.deviceName as string) || 'default input';
-    this.audioDeviceText.text = `dev: ${name}`;
+    this.audioDeviceText.text = `in: ${name}`;
+  }
+
+  // -- Audio output device row (audioOut) --------------------------------------
+  // Output device is machine-level (one AudioContext = one hardware sink), so
+  // this drives the global sinkId setting and restarts the engine, mirroring
+  // Options → Audio rather than storing a device id in the project.
+
+  private audioOutDeviceText: Text | null = null;
+
+  private buildAudioOutputDeviceRow(x: number, y: number, w: number): void {
+    this.audioOutDeviceText = new Text({ text: '', style: { fontSize: 10, fill: theme.textDim } });
+    this.audioOutDeviceText.position.set(x, y);
+    this.addChild(this.audioOutDeviceText);
+    this.updateAudioOutDeviceText();
+
+    const hit = new Graphics().rect(x - 4, y - 4, w + 8, 18).fill({ color: 0xffffff, alpha: 0.001 });
+    hit.eventMode = 'static';
+    hit.cursor = 'pointer';
+    hit.on('pointerdown', (e) => {
+      e.stopPropagation();
+      const sx = e.clientX;
+      const sy = e.clientY;
+      void (async () => {
+        await ensureAudioPermission();
+        const { outputs } = await listAudioDevices();
+        const devices = [{ deviceId: '', label: 'default output' }, ...outputs];
+        const current = appSettings().audio.sinkId || '';
+        openSelectMenu({
+          x: sx,
+          y: sy,
+          items: devices.map((d) => ({ label: d.label, value: d.deviceId, selected: d.deviceId === current })),
+          onPick: (deviceId) => {
+            updateSettings((s) => { s.audio.sinkId = deviceId; });
+            if (appState.engine.started) void appState.restartEngine();
+            this.updateAudioOutDeviceText();
+          },
+        });
+      })();
+    });
+    hit.on('pointerover', (e) =>
+      this.tooltip.show(
+        ['Output device', 'Click to choose the hardware output (applies to the whole project; brief audio dropout).'],
+        e.clientX,
+        e.clientY,
+      ),
+    );
+    hit.on('pointerout', () => this.tooltip.hide());
+    this.addChild(hit);
+  }
+
+  private updateAudioOutDeviceText(): void {
+    if (!this.audioOutDeviceText) return;
+    const sinkId = appSettings().audio.sinkId || '';
+    void (async () => {
+      let name = 'default output';
+      if (sinkId) {
+        const { outputs } = await listAudioDevices();
+        name = outputs.find((d) => d.deviceId === sinkId)?.label || sinkId;
+      }
+      if (this.audioOutDeviceText) this.audioOutDeviceText.text = `out: ${name}`;
+    })();
   }
 
   // -- parametric EQ face (PRD §8.4: curve + dots + live spectrum) -------------

@@ -56,6 +56,32 @@ export interface ModuleDef {
   defaultData?: () => Record<string, unknown>;
 }
 
+/** One internal wire captured in a container preset (both endpoints inside). */
+export interface PresetWire {
+  from: { moduleId: string; portId: string };
+  to: { moduleId: string; portId: string };
+}
+
+/**
+ * A saved configuration snapshot — PRESETS_PLAN.md. Plain modules store their
+ * own `params`/`data`; containers (groups) store every member's params/data
+ * (`members`) plus the internal `wires`. The member set is frozen — a preset
+ * never adds/removes modules, only retunes and rewires existing ones.
+ */
+export interface ModulePreset {
+  id: string;
+  name: string;
+  /** Free-text grouping (e.g. bass/lead/pad); "Default" when unset. */
+  category: string;
+  // Plain-module shape:
+  params?: Record<string, number>;
+  data?: Record<string, unknown>;
+  // Container shape:
+  members?: Record<string, { params: Record<string, number>; data?: Record<string, unknown> }>;
+  /** Internal wires only (both endpoints among the members). */
+  wires?: PresetWire[];
+}
+
 export interface ModuleInstance {
   id: string;
   type: string;
@@ -70,6 +96,10 @@ export interface ModuleInstance {
   params: Record<string, number>;
   /** Non-scalar module state (e.g. sequencer steps). */
   data?: Record<string, unknown>;
+  /** Saved configuration snapshots (PRESETS_PLAN.md); lazily created. */
+  presets?: ModulePreset[];
+  /** Last-loaded preset id; dirty = live state differs from this snapshot. */
+  activePresetId?: string;
 }
 
 let nextId = 1;

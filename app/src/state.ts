@@ -5,7 +5,17 @@
  */
 
 import { Graph, type PortRef, type Wire } from './core/graph';
-import { createInstance, type ModuleInstance } from './core/module';
+import { createInstance, type ModuleInstance, type ModulePreset } from './core/module';
+import {
+  applyPreset,
+  captureLivePreset,
+  DEFAULT_PRESET_CATEGORY,
+  DEFAULT_PRESET_NAME,
+  liveMatchesPreset,
+  newPresetId,
+  randomizeLive,
+  type PresetTarget,
+} from './core/preset';
 import { MODULE_DEFS } from './core/registry';
 import { decodeSample, encodeSample, parseSampleKey, sampleKey, type SampleData } from './core/samples';
 import { deserializeProject, serializeProject, type ProjectMeta } from './core/serialize';
@@ -55,7 +65,10 @@ export type StateEvent =
   | 'lyricsChanged' // lyrics editor opened/closed
   | 'lyricsAiRequest' // container 🤖 button: open a lyrics editor's AI popup
   | 'rangeConfigChanged' // knob/slider range popup opened/closed
-  | 'projectMetaChanged'; // name/artists/description/picture edited
+  | 'projectMetaChanged' // name/artists/description/picture edited
+  | 'presetsChanged' // a module/container preset was saved/loaded/renamed/etc.
+  | 'presetMenuChanged' // preset menu popup opened/closed
+  | 'groupCollapseToggled'; // a group was expanded/collapsed (tile toggle)
 
 type Listener = () => void;
 
@@ -887,6 +900,20 @@ export class AppState {
     return inst;
   }
 
+  /**
+   * Return the project's master Audio Out, creating one at (x, y) only if none
+   * exists. Starters and audio-producing containers route here instead of each
+   * spawning their own Audio Out — its `in` sums every source (registry), so
+   * the canvas stays a single sink instead of a clutter of output tiles.
+   */
+  ensureAudioOut(x: number, y: number): ModuleInstance {
+    const existing =
+      [...this.graph.modules.values()].find(
+        (m) => m.type === 'audioOut' && !this.graph.groupOfModule(m.id),
+      ) ?? [...this.graph.modules.values()].find((m) => m.type === 'audioOut');
+    return existing ?? this.addModule('audioOut', x, y);
+  }
+
   removeModule(moduleId: string): void {
     this.beginUndoable();
     this.graph.removeModule(moduleId);
@@ -1014,6 +1041,7 @@ export class AppState {
     if (!group) return;
     group.collapsed = !group.collapsed;
     this.emit('graphChanged');
+    this.emit('groupCollapseToggled');
   }
 
   renameGroup(groupId: string, name: string): void {
@@ -1263,6 +1291,203 @@ export class AppState {
     this.engine.setData(moduleId, key, value);
     // Audio In device switch: (re)open the capture stream for the new device.
     if (mod.type === 'audioIn' && key === 'deviceId') this.engine.syncInputs(this.graph);
+  }
+
+  // -- Presets (PRESETS_PLAN.md) ---------------------------------------------
+
+  /** Preset menu popup target + screen anchor, or null when closed. */
+  presetMenuOpen: { target: PresetTarget; x: number; y: number } | null = null;
+
+  openPresetMenu(target: PresetTarget, x: number, y: number): void {
+    this.presetMenuOpen = { target, x, y };
+    this.emit('presetMenuChanged');
+  }
+
+  closePresetMenu(): void {
+    if (!this.presetMenuOpen) return;
+    this.presetMenuOpen = null;
+    this.emit('presetMenuChanged');
+  }
+
+  /** Transient picker label (e.g. AI-generated, not yet saved), per target. */
+  private transientPreset = new Map<string, string>();
+
+  private targetKey(t: PresetTarget): string {
+    return `${t.isGroup ? 'g' : 'm'}:${t.id}`;
+  }
+
+  private presetHost(t: PresetTarget): { presets?: ModulePreset[]; activePresetId?: string } | undefined {
+    return t.isGroup ? this.graph.groups.get(t.id) : this.graph.modules.get(t.id);
+  }
+
+  /** Saved presets of a target (empty until the first one is created). */
+  presetsOf(t: PresetTarget): ModulePreset[] {
+    return this.presetHost(t)?.presets ?? [];
+  }
+
+  activePreset(t: PresetTarget): ModulePreset | undefined {
+    const host = this.presetHost(t);
+    return host?.presets?.find((p) => p.id === host.activePresetId);
+  }
+
+  /** Picker name: transient label, else active preset name, else "Default". */
+  presetDisplayName(t: PresetTarget): string {
+    const transient = this.transientPreset.get(this.targetKey(t));
+    if (transient) return transient;
+    return this.activePreset(t)?.name ?? DEFAULT_PRESET_NAME;
+  }
+
+  /** Live state differs from the active preset (false when none is active). */
+  isPresetDirty(t: PresetTarget): boolean {
+    if (this.transientPreset.has(this.targetKey(t))) return true;
+    const active = this.activePreset(t);
+    return active ? !liveMatchesPreset(this.graph, t, active) : false;
+  }
+
+  /**
+   * Materialize the "Default" preset on first preset-menu interaction, so
+   * untouched modules/containers add zero bytes to saved files. Not an undo
+   * step (silent initialization).
+   */
+  ensureDefaultPreset(t: PresetTarget): void {
+    const host = this.presetHost(t);
+    if (!host || (host.presets && host.presets.length > 0)) return;
+    host.presets = [
+      {
+        id: newPresetId(),
+        name: DEFAULT_PRESET_NAME,
+        category: DEFAULT_PRESET_CATEGORY,
+        ...captureLivePreset(this.graph, t),
+      },
+    ];
+    host.activePresetId = host.presets[0].id;
+    this.emit('presetsChanged');
+  }
+
+  /** Load a preset into live state (preset → live). One undo step. */
+  loadPreset(t: PresetTarget, presetId: string): void {
+    const host = this.presetHost(t);
+    const preset = host?.presets?.find((p) => p.id === presetId);
+    if (!host || !preset) return;
+    this.beginUndoable();
+    applyPreset(this.graph, t, preset);
+    host.activePresetId = presetId;
+    this.transientPreset.delete(this.targetKey(t));
+    this.syncEngine();
+    this.emit('graphChanged');
+    this.emit('paramChanged');
+    this.emit('presetsChanged');
+  }
+
+  /** Overwrite the active preset from live state (live → preset). */
+  savePreset(t: PresetTarget): void {
+    const host = this.presetHost(t);
+    const idx = host?.presets?.findIndex((p) => p.id === host.activePresetId) ?? -1;
+    if (!host?.presets || idx < 0) return;
+    this.beginUndoable();
+    const prev = host.presets[idx];
+    host.presets[idx] = {
+      id: prev.id,
+      name: prev.name,
+      category: prev.category,
+      ...captureLivePreset(this.graph, t),
+    };
+    this.transientPreset.delete(this.targetKey(t));
+    this.emit('presetsChanged');
+  }
+
+  /** Save live state as a new preset; becomes active. Returns the new id. */
+  savePresetAs(t: PresetTarget, name: string, category?: string): string | undefined {
+    const host = this.presetHost(t);
+    if (!host) return undefined;
+    this.beginUndoable();
+    const preset: ModulePreset = {
+      id: newPresetId(),
+      name: name.trim() || DEFAULT_PRESET_NAME,
+      category: category?.trim() || DEFAULT_PRESET_CATEGORY,
+      ...captureLivePreset(this.graph, t),
+    };
+    (host.presets ??= []).push(preset);
+    host.activePresetId = preset.id;
+    this.transientPreset.delete(this.targetKey(t));
+    this.emit('presetsChanged');
+    return preset.id;
+  }
+
+  renamePreset(t: PresetTarget, presetId: string, name: string, category?: string): void {
+    const preset = this.presetHost(t)?.presets?.find((p) => p.id === presetId);
+    if (!preset) return;
+    this.beginUndoable();
+    preset.name = name.trim() || preset.name;
+    if (category !== undefined) preset.category = category.trim() || DEFAULT_PRESET_CATEGORY;
+    this.emit('presetsChanged');
+  }
+
+  /** Copy a preset (does not change which preset is active or live state). */
+  duplicatePreset(t: PresetTarget, presetId: string): string | undefined {
+    const host = this.presetHost(t);
+    const preset = host?.presets?.find((p) => p.id === presetId);
+    if (!host?.presets || !preset) return undefined;
+    this.beginUndoable();
+    const copy: ModulePreset = { ...structuredClone(preset), id: newPresetId(), name: `${preset.name} copy` };
+    host.presets.push(copy);
+    this.emit('presetsChanged');
+    return copy.id;
+  }
+
+  /** Delete a preset; if it was active, fall back to the synthetic default. */
+  deletePreset(t: PresetTarget, presetId: string): void {
+    const host = this.presetHost(t);
+    if (!host?.presets) return;
+    const idx = host.presets.findIndex((p) => p.id === presetId);
+    if (idx < 0) return;
+    this.beginUndoable();
+    host.presets.splice(idx, 1);
+    if (host.activePresetId === presetId) host.activePresetId = undefined;
+    this.emit('presetsChanged');
+  }
+
+  /** Reload the active preset, discarding live (dirty) edits. */
+  revertPreset(t: PresetTarget): void {
+    const active = this.activePreset(t);
+    if (active) this.loadPreset(t, active.id);
+  }
+
+  /** Step the picker arrows: flat list across categories, wrapping. */
+  stepPreset(t: PresetTarget, dir: 1 | -1): void {
+    const presets = this.presetsOf(t);
+    if (presets.length < 2) return;
+    const host = this.presetHost(t)!;
+    const cur = presets.findIndex((p) => p.id === host.activePresetId);
+    const next = ((cur < 0 ? 0 : cur) + dir + presets.length) % presets.length;
+    this.loadPreset(t, presets[next].id);
+  }
+
+  /** Randomize live params (honoring `randomizable`); dirties the active preset. */
+  randomizePreset(t: PresetTarget): void {
+    this.beginUndoable();
+    randomizeLive(this.graph, t);
+    this.syncEngine();
+    this.emit('paramChanged');
+    this.emit('presetsChanged');
+  }
+
+  /**
+   * Apply a generated/transient configuration to live state with a picker
+   * label, NOT saved as a preset (PRESETS_PLAN.md — AI results). The user saves
+   * it via Save As if good. One undo step.
+   */
+  applyTransientPreset(t: PresetTarget, preset: ModulePreset, label: string): void {
+    const host = this.presetHost(t);
+    if (!host) return;
+    this.beginUndoable();
+    applyPreset(this.graph, t, preset);
+    host.activePresetId = undefined;
+    this.transientPreset.set(this.targetKey(t), label);
+    this.syncEngine();
+    this.emit('graphChanged');
+    this.emit('paramChanged');
+    this.emit('presetsChanged');
   }
 
   // -- AI patch import (PRD §10.2) -------------------------------------------

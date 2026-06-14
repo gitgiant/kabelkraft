@@ -23,8 +23,10 @@ import { generateLyricsSpecPack, parseKkLyrics, type LyricsSongContext } from '.
 import { generateFaceSpecPack, parseKkFace } from './aiface';
 import { generateProjectSpecPack, parseKkProject } from './aiproject';
 import { generateVisualSpecPack, parseKkVis } from './aivisual';
+import { generatePresetSpecPack, parseKkPreset } from './aipreset';
 import { appSettings, updateSettings } from './settings';
 import type { Graph } from './graph';
+import type { PresetTarget } from './preset';
 import { CUSTOM_PRESETS, type AiSettings } from './aisettings';
 
 export {
@@ -45,7 +47,9 @@ export function loadSettings(): AiSettings {
 
 export function saveSettings(s: AiSettings): void {
   updateSettings((all) => {
-    all.ai = structuredClone(s);
+    // s may be a Svelte $state proxy (the settings panel binds it); structuredClone
+    // rejects proxies, so JSON-clone it — AiSettings is plain JSON data.
+    all.ai = JSON.parse(JSON.stringify(s)) as AiSettings;
   });
 }
 
@@ -101,6 +105,36 @@ export async function exchangeOpenRouterCode(code: string): Promise<string> {
   if (!data.key) throw new Error('OpenRouter returned no key.');
   localStorage.removeItem(OPENROUTER_VERIFIER_KEY);
   return data.key as string;
+}
+
+/** One OpenRouter model option for the settings dropdown. */
+export interface OpenRouterModel {
+  id: string;
+  name: string;
+}
+
+/**
+ * Fetch the catalog of models available on OpenRouter (GET /models). The key is
+ * optional for this endpoint but passed when present so the list reflects the
+ * account. Sorted by display name; throws on a network/HTTP failure so the UI
+ * can fall back to a free-text field.
+ */
+export async function fetchOpenRouterModels(apiKey?: string): Promise<OpenRouterModel[]> {
+  const headers: Record<string, string> = {};
+  if (apiKey?.trim()) headers.Authorization = `Bearer ${apiKey.trim()}`;
+  const res = await fetch(`${OPENROUTER_BASE_URL}/models`, { headers });
+  if (!res.ok) {
+    throw new Error(`OpenRouter models ${res.status}: ${res.statusText}`);
+  }
+  const data = await res.json();
+  const list = Array.isArray(data?.data) ? data.data : [];
+  const models: OpenRouterModel[] = [];
+  for (const m of list) {
+    if (typeof m?.id !== 'string') continue;
+    models.push({ id: m.id, name: typeof m.name === 'string' && m.name ? m.name : m.id });
+  }
+  models.sort((a, b) => a.name.localeCompare(b.name));
+  return models;
 }
 
 /** Is the selected provider actually usable (key / url present)? */
@@ -345,6 +379,30 @@ export function generateFace(
     'module face',
     (text) => {
       const r = parseKkFace(text, graph, groupId);
+      return { ok: r.ok, errors: r.errors };
+    },
+    userPrompt,
+    settings,
+    maxAttempts,
+    onProgress,
+  );
+}
+
+/** Preset flavour: retune (and rewire, for a container) an existing target —
+ * its live module ids ride along in the spec, so the output needs no remap. */
+export function generatePreset(
+  graph: Graph,
+  target: PresetTarget,
+  userPrompt: string,
+  settings: AiSettings,
+  maxAttempts = 3,
+  onProgress?: (status: string) => void,
+): Promise<GenerateResult> {
+  return generateWithSpec(
+    generatePresetSpecPack(graph, target),
+    'preset',
+    (text) => {
+      const r = parseKkPreset(text, graph, target);
       return { ok: r.ok, errors: r.errors };
     },
     userPrompt,

@@ -14,6 +14,7 @@ import { appState } from '../state';
 import { nextGroupColor, theme } from '../theme';
 import { MODULE_TITLE_H, ModuleView, PORT_RADIUS, type PortHandlers } from './ModuleView';
 import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
+import { PresetBar, fitText } from './PresetBar';
 import type { Tooltip } from './Tooltip';
 
 const TITLE_H = 24;
@@ -237,10 +238,12 @@ export class GroupView extends Container {
 
   /** Title text + title-bar buttons + color swatch (full tiles only). */
   private buildTileChrome(w: number): void {
-    const title = new Text({
-      text: `▣ ${this.group.name}`,
-      style: { fontSize: 12, fill: theme.text, fontWeight: 'bold' },
-    });
+    // Glyph buttons end at ~w-84 (🤖); the preset picker sits left of them.
+    const pickerRightX = w - 100;
+    const nameMaxW = Math.max(24, Math.min(90, (pickerRightX - 8) * 0.5));
+    const titleMaxW = Math.max(16, pickerRightX - (nameMaxW + 36) - 14);
+
+    const title = fitText(`▣ ${this.group.name}`, titleMaxW, theme.text);
     title.position.set(8, 5);
     title.eventMode = 'none';
     this.addChild(title);
@@ -298,6 +301,17 @@ export class GroupView extends Container {
     swatch.on('pointerover', (e) => this.tooltip.show(['Recolor group', 'Click to cycle colors.'], e.clientX, e.clientY));
     swatch.on('pointerout', () => this.tooltip.hide());
     this.addChild(swatch);
+
+    // Preset picker (◀ name ▶) for the container, left of the glyph buttons.
+    this.addChild(
+      new PresetBar({
+        target: { id: this.group.id, isGroup: true },
+        rightX: pickerRightX,
+        y: 5,
+        maxNameW: nameMaxW,
+        tooltip: this.tooltip,
+      }),
+    );
   }
 
   // -- resize (all sides) ----------------------------------------------------

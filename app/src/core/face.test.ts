@@ -183,6 +183,63 @@ describe('kkmod export/import', () => {
     ]);
   });
 
+  it('remaps preset member ids and internal wires through a kkmod round-trip', () => {
+    const { graph, synth, lfo, group } = makeGraph();
+    group.activePresetId = 'p1';
+    group.presets = [
+      {
+        id: 'p1',
+        name: 'Bass',
+        category: 'Bass',
+        members: {
+          [synth.id]: { params: { cutoff: 400 } },
+          [lfo.id]: { params: { rate: 5 } },
+        },
+        wires: [{ from: { moduleId: lfo.id, portId: 'out' }, to: { moduleId: synth.id, portId: 'mod' } }],
+      },
+    ];
+
+    const imported = importKkmod(exportKkmod(graph, group.id, new Map()), MODULE_DEFS);
+    const root = imported.groups.find((g) => g.id === imported.rootGroupId)!;
+    const newSynth = imported.modules.find((m) => m.type === 'vcf')!;
+    const newLfo = imported.modules.find((m) => m.type === 'lfo')!;
+
+    expect(root.activePresetId).toBe('p1');
+    const preset = root.presets![0];
+    expect(preset.category).toBe('Bass');
+    // Member keys remapped to the fresh module ids.
+    expect(Object.keys(preset.members!).sort()).toEqual([newSynth.id, newLfo.id].sort());
+    expect(preset.members![newSynth.id].params.cutoff).toBe(400);
+    expect(preset.members![newLfo.id].params.rate).toBe(5);
+    // Wire endpoints remapped too.
+    expect(preset.wires).toEqual([
+      { from: { moduleId: newLfo.id, portId: 'out' }, to: { moduleId: newSynth.id, portId: 'mod' } },
+    ]);
+  });
+
+  it('drops preset members/wires referencing modules absent from the kkmod', () => {
+    const { graph, synth, group } = makeGraph();
+    group.presets = [
+      {
+        id: 'p1',
+        name: 'Bass',
+        category: 'Bass',
+        members: {
+          [synth.id]: { params: { cutoff: 400 } },
+          ghost: { params: { x: 1 } },
+        },
+        wires: [{ from: { moduleId: 'ghost', portId: 'out' }, to: { moduleId: synth.id, portId: 'mod' } }],
+      },
+    ];
+
+    const imported = importKkmod(exportKkmod(graph, group.id, new Map()), MODULE_DEFS);
+    const root = imported.groups.find((g) => g.id === imported.rootGroupId)!;
+    const newSynth = imported.modules.find((m) => m.type === 'vcf')!;
+    const preset = root.presets![0];
+    expect(Object.keys(preset.members!)).toEqual([newSynth.id]);
+    expect(preset.wires).toEqual([]);
+  });
+
   it('keeps nested group structure', () => {
     const { graph, group } = makeGraph();
     const inner = createInstance(MODULE_DEFS.get('vca')!, 0, 0);

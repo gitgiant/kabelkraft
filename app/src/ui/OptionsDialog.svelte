@@ -714,6 +714,12 @@
               <span class="dim">A-row = piano (A W S E D …), relative to each keyboard module's octave</span>
             </label>
             <label class="row">
+              <input class="opt-auto-arrange" type="checkbox" bind:checked={cfg.general.autoArrangeOnToggle}
+                onchange={() => save((s) => { s.general.autoArrangeOnToggle = cfg.general.autoArrangeOnToggle; })} />
+              <span>Auto-arrange on group expand/collapse</span>
+              <span class="dim">runs the Arrange layout whenever a container group opens or shrinks</span>
+            </label>
+            <label class="row">
               <input class="opt-confirm-leave" type="checkbox" bind:checked={cfg.general.confirmLeave}
                 onchange={() => save((s) => { s.general.confirmLeave = cfg.general.confirmLeave; })} />
               <span>Confirm before leaving the page</span>

@@ -248,9 +248,11 @@ const audioOut: ModuleDef = {
     { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
     { id: 'pair', label: 'Pair', min: 0, max: CHANNEL_PAIRS.length - 1, default: 0, options: [...CHANNEL_PAIRS], randomizable: false },
     { id: 'limiter', label: 'Limiter', min: 0, max: 1, default: 1, options: ['off', 'on'], randomizable: false },
+    { id: 'ceiling', label: 'Ceiling', min: -24, max: 0, default: -0.3, unit: 'dB', randomizable: false },
+    { id: 'release', label: 'Release', min: 1, max: 500, default: 80, unit: 'ms', randomizable: false },
   ],
-  width: 210,
-  height: 170,
+  width: 230,
+  height: 210,
 };
 
 const visualizer: ModuleDef = {

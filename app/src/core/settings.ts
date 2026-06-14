@@ -36,6 +36,8 @@ export interface GeneralSettings {
   autosaveInterval: number;
   /** QWERTY-as-piano (PRD §8.6): A-row plays notes on keyboard modules. */
   qwertyPiano: boolean;
+  /** Auto-run the layered Arrange layout when a group is expanded/collapsed. */
+  autoArrangeOnToggle: boolean;
 }
 
 export interface AudioSettings {
@@ -75,7 +77,7 @@ export function defaultSettings(): AppSettings {
   return {
     version: 1,
     display: { theme: 'dark', uiScale: 1, visMaxFps: 240, visMaxRes: 1, touchMode: 'auto' },
-    general: { defaultTempo: 120, confirmLeave: false, autosave: true, autosaveInterval: 30, qwertyPiano: true },
+    general: { defaultTempo: 120, confirmLeave: false, autosave: true, autosaveInterval: 30, qwertyPiano: true, autoArrangeOnToggle: false },
     audio: { latencyHint: 'interactive', sampleRate: 0, sinkId: '', inputId: '', masterGain: 1, muted: false },
     midi: { disabledInputs: [] },
     ai: structuredClone(DEFAULT_AI_SETTINGS),
@@ -109,6 +111,7 @@ export function sanitizeSettings(raw: unknown): AppSettings {
       autosave: s.general?.autosave !== false,
       autosaveInterval: clamp(s.general?.autosaveInterval, 5, 600, d.general.autosaveInterval),
       qwertyPiano: s.general?.qwertyPiano !== false,
+      autoArrangeOnToggle: s.general?.autoArrangeOnToggle === true,
     },
     audio: {
       latencyHint: ['interactive', 'balanced', 'playback'].includes(s.audio?.latencyHint as string)
