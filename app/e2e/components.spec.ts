@@ -39,7 +39,7 @@ test('voice→osc→filter→amp chain plays polyphonically and releases', async
     const osc = s.addModule('osc', 200, 0);
     const vcf = s.addModule('vcf', 400, 0);
     const vca = s.addModule('vca', 600, 0);
-    const adsr = s.addModule('adsr', 400, 200);
+    const adsr = s.addModule('envelope', 400, 200);
     s.connect({ moduleId: kb.id, portId: 'notes' }, { moduleId: voice.id, portId: 'notes' });
     s.connect({ moduleId: voice.id, portId: 'pitch' }, { moduleId: osc.id, portId: 'pitch' });
     s.connect({ moduleId: osc.id, portId: 'out' }, { moduleId: vcf.id, portId: 'in' });

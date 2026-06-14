@@ -319,26 +319,42 @@ const levels: ModuleDef = {
   height: 120,
 };
 
-const adsr: ModuleDef = {
-  type: 'adsr',
-  name: 'ADSR',
+export const ENV_MODES = ['gated', 'one-shot', 'loop'] as const;
+
+const envelope: ModuleDef = {
+  type: 'envelope',
+  name: 'Envelope',
   category: 'data',
   description:
-    'Envelope as a control signal: gated by incoming notes or by a Gate control (e.g. from a ' +
-    'Voice module — then the envelope runs per-voice). Modulates anything with a control input.',
+    'A DAHDSR envelope as a control signal: gated by incoming notes or by a Gate control (e.g. ' +
+    'from a Voice module — then the envelope runs per-voice). Per-stage curve, velocity ' +
+    'sensitivity, depth/invert/bipolar output, and gated / one-shot / loop modes. Modulates ' +
+    'anything with a control input.',
   ports: [
     { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Notes gate the envelope (note on = attack, note off = release).' },
     { id: 'gate', label: 'Gate', type: 'control', direction: 'in', description: 'Control gate (>0.5 = open). A polyphonic gate from a Voice module runs one envelope per voice.' },
-    { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Envelope value 0.0–1.0 (polyphonic when gated per-voice).' },
+    { id: 'vel', label: 'Vel', type: 'control', direction: 'in', description: 'Per-voice velocity (0–1), e.g. from a Voice module. Scales the peak via the Vel amount.' },
+    { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Envelope value (polyphonic when gated per-voice). 0–1, or ±depth when bipolar.' },
   ],
   params: [
+    { id: 'delay', label: 'Delay', min: 0, max: 2, default: 0, unit: 's', curve: 'exp', randomizable: true },
     { id: 'attack', label: 'Attack', min: 0.001, max: 4, default: 0.05, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'hold', label: 'Hold', min: 0, max: 2, default: 0, unit: 's', curve: 'exp', randomizable: true },
     { id: 'decay', label: 'Decay', min: 0.001, max: 4, default: 0.2, unit: 's', curve: 'exp', randomizable: true },
     { id: 'sustain', label: 'Sustain', min: 0, max: 1, default: 0.6, randomizable: true },
     { id: 'release', label: 'Release', min: 0.001, max: 8, default: 0.3, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'atkCurve', label: 'Atk Crv', min: -1, max: 1, default: 0, randomizable: true },
+    { id: 'decCurve', label: 'Dec Crv', min: -1, max: 1, default: -0.4, randomizable: true },
+    { id: 'relCurve', label: 'Rel Crv', min: -1, max: 1, default: -0.4, randomizable: true },
+    { id: 'velAmt', label: 'Vel', min: 0, max: 1, default: 0, randomizable: true },
+    { id: 'depth', label: 'Depth', min: 0, max: 1, default: 1, randomizable: true },
+    { id: 'mode', label: 'Mode', min: 0, max: ENV_MODES.length - 1, default: 0, options: [...ENV_MODES], randomizable: false },
+    { id: 'bipolar', label: 'Bipolar', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
+    { id: 'invert', label: 'Invert', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
   ],
-  width: 240,
-  height: 170,
+  width: 320,
+  height: 372,
+  customFace: true,
 };
 
 export const RANDOM_MODES = ['walk', 's&h'] as const;
@@ -713,7 +729,7 @@ const voice: ModuleDef = {
   category: 'component',
   description:
     'Voice allocator: turns a note stream into per-voice Pitch/Gate/Velocity control lanes ' +
-    '(pitch = MIDI/127). Downstream components (Osc, Filter, Amp, ADSR via Gate) process each ' +
+    '(pitch = MIDI/127). Downstream components (Osc, Filter, Amp, Envelope via Gate) process each ' +
     'voice separately; lanes collapse to a mix wherever a normal stereo input is reached.',
   ports: [
     { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Polyphonic note stream to allocate across voices.' },
@@ -824,7 +840,7 @@ const vcf: ModuleDef = {
   category: 'component',
   description:
     'Multimode filter (state-variable): cutoff and Q knobs, live response curve (drag the dot: ' +
-    'cutoff/Q). The Mod input shifts the cutoff by up to ±6 octaves (Amt) — wire an ADSR or LFO. ' +
+    'cutoff/Q). The Mod input shifts the cutoff by up to ±6 octaves (Amt) — wire an Envelope or LFO. ' +
     'Processes per-voice lanes from upstream components.',
   ports: [
     audioIn('Audio to filter (keeps per-voice lanes).'),
@@ -847,7 +863,7 @@ const vca: ModuleDef = {
   name: 'Amp',
   category: 'component',
   description:
-    'Voltage-controlled amplifier: audio × CV × level. Wire an ADSR (gated per-voice) into CV ' +
+    'Voltage-controlled amplifier: audio × CV × level. Wire an Envelope (gated per-voice) into CV ' +
     'for envelopes; unwired CV passes audio at the Level setting.',
   ports: [
     audioIn('Audio to attenuate (keeps per-voice lanes).'),
@@ -936,7 +952,7 @@ const button: ModuleDef = {
   category: 'controller',
   description:
     'Momentary or latching button (PRD §8.6). Control output is 1 while pressed/latched, else 0 ' +
-    '— gate an ADSR, mute a mixer channel, trigger a Sample & Hold.',
+    '— gate an Envelope, mute a mixer channel, trigger a Sample & Hold.',
   ports: [
     { id: 'out', label: 'Control', type: 'control', direction: 'out', description: 'Button state: 0 or 1.' },
   ],
@@ -1173,7 +1189,7 @@ const notenames: ModuleDef = {
 
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
-    transport, sequencer, arp, composer, notethru, lfo, adsr, random, keyboard, midiIn, midiOut,
+    transport, sequencer, arp, composer, notethru, lfo, envelope, random, keyboard, midiIn, midiOut,
     voice, osc, wtosc, smpl, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
     mixer, recorder, audioInDef, audioOut, levels, visualizer,

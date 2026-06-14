@@ -15,7 +15,7 @@ async function setup(page: Page): Promise<{ comp: string; synth: string }> {
     const comp = s.addModule('composer', -500, 0);
     const voice = s.addModule('voice', -250, 0);
     const osc = s.addModule('osc', 0, -100);
-    const adsr = s.addModule('adsr', -250, 200);
+    const adsr = s.addModule('envelope', -250, 200);
     const vca = s.addModule('vca', 250, 0);
     const out = s.addModule('audioOut', 600, 0);
     const wire = (f: string, fp: string, t: string, tp: string) =>

@@ -106,7 +106,7 @@ describe('engine worklet produces audio (boot starters, headless)', () => {
   it('drum-synth idiom: sequencer-gated ADSR opens a VCA over a free osc', () => {
     const seq = mod('sequencer', 'seq1', { gate: 0.05 });
     seq.data = { steps: Array.from({ length: 16 }, () => ({ on: true, pitch: 60 })) };
-    const env = mod('adsr', 'env1', { attack: 0.001, decay: 0.01, sustain: 1, release: 0.45 });
+    const env = mod('envelope', 'env1', { attack: 0.001, decay: 0.01, sustain: 1, release: 0.45 });
     const osc = mod('osc', 'osc1', { wave: 0 });
     const vca = mod('vca', 'vca1', { level: 0.9 });
     const out = mod('audioOut', 'out1');
@@ -126,8 +126,8 @@ describe('engine worklet produces audio (boot starters, headless)', () => {
     const composer = mod('composer', 'cmp1');
     const voice = mod('voice', 'voi1');
     const oscs = [1, 2, 3, 4].map((i) => mod('osc', `osc${i}`));
-    const adsrA = mod('adsr', 'envA');
-    const adsrF = mod('adsr', 'envF', { decay: 0.35, sustain: 0.25 });
+    const adsrA = mod('envelope', 'envA');
+    const adsrF = mod('envelope', 'envF', { decay: 0.35, sustain: 0.25 });
     const vcf = mod('vcf', 'vcf1', { cutoff: 900, amt: 2.5 });
     const vca = mod('vca', 'vca1');
     const delay = mod('delay', 'dly1', { mix: 0.2 });

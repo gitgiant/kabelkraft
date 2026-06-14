@@ -29,8 +29,8 @@ export function addPolySynth(cx = POLY_CX, cy = POLY_CY): void {
   const osc2 = appState.addModule('osc', ...at(-360, -250));
   const osc3 = appState.addModule('osc', ...at(-360, 0));
   const osc4 = appState.addModule('osc', ...at(-360, 250));
-  const adsrA = appState.addModule('adsr', ...at(-640, -60));
-  const adsrF = appState.addModule('adsr', ...at(-640, 140));
+  const adsrA = appState.addModule('envelope', ...at(-640, -60));
+  const adsrF = appState.addModule('envelope', ...at(-640, 140));
   const vcf = appState.addModule('vcf', ...at(-80, -360));
   const vca = appState.addModule('vca', ...at(190, -220));
   const delay = appState.addModule('delay', ...at(430, -320));
@@ -184,8 +184,8 @@ export function addMonoSynth(cx: number, cy: number): void {
   const voice = appState.addModule('voice', ...at(-560, -120));
   const osc1 = appState.addModule('osc', ...at(-320, -240));
   const osc2 = appState.addModule('osc', ...at(-320, -10));
-  const adsrA = appState.addModule('adsr', ...at(-560, 90));
-  const adsrF = appState.addModule('adsr', ...at(-560, 290));
+  const adsrA = appState.addModule('envelope', ...at(-560, 90));
+  const adsrF = appState.addModule('envelope', ...at(-560, 290));
   const lfo = appState.addModule('lfo', ...at(-560, 480));
   const vcf = appState.addModule('vcf', ...at(-60, -150));
   const vca = appState.addModule('vca', ...at(220, -60));
@@ -348,7 +348,7 @@ export function addDrumKit(cx: number, cy: number): void {
  * pressing Play grooves immediately.
  *
  * Percussion envelopes: sustain 1 with the sequencer gate at minimum, so the
- * ADSR snaps open and Release is the drum's single decay control.
+ * Envelope snaps open and Release is the drum's single decay control.
  */
 export function addDrumSynth(cx: number, cy: number): void {
   const at = (x: number, y: number): [number, number] => [cx + x, cy + y];
@@ -358,7 +358,7 @@ export function addDrumSynth(cx: number, cy: number): void {
   const rowY = (row: number) => -1050 + row * 300;
 
   const env = (label: string, x: number, y: number, release: number, attack = 0.001) => {
-    const e = appState.addModule('adsr', ...at(x, y));
+    const e = appState.addModule('envelope', ...at(x, y));
     e.label = label;
     appState.setParam(e.id, 'attack', attack);
     appState.setParam(e.id, 'decay', 0.01);
@@ -561,7 +561,7 @@ export const STARTERS: StarterPatch[] = [
   },
   {
     name: 'Mono Synth',
-    description: '1-voice lead/bass: Voice → 2 Osc → Filter → Amp, two ADSRs, LFO — wire a note source',
+    description: '1-voice lead/bass: Voice → 2 Osc → Filter → Amp, two Envelopes, LFO — wire a note source',
     add: () => {
       const c = patchCanvas.viewCenter();
       addMonoSynth(c.x, c.y);

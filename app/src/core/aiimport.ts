@@ -75,7 +75,7 @@ const TYPE_ALIASES: Record<string, string> = {
   filterm: 'vcf', amp: 'vca', voicealloc: 'voice',
   echo: 'delay', filter: 'eq', comp: 'compressor', verb: 'reverb',
   piano: 'keyboard', keys: 'keyboard', output: 'audioOut', master: 'audioOut', speaker: 'audioOut',
-  env: 'adsr', envelope: 'adsr', noise: 'random', seq: 'sequencer', arpeggiator: 'arp',
+  env: 'envelope', adsr: 'envelope', noise: 'random', seq: 'sequencer', arpeggiator: 'arp',
 };
 
 export function suggestType(name: string, candidates: Iterable<string>): string | null {

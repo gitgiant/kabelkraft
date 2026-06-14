@@ -286,7 +286,7 @@ test('ADSR and Random feed control values', async ({ page }) => {
 
   const ids = await page.evaluate((r) => {
     const s = window.__kk;
-    const adsr = s.addModule('adsr', 0, 600);
+    const adsr = s.addModule('envelope', 0, 600);
     const random = s.addModule('random', 300, 600);
     s.connect({ moduleId: r.sequencer, portId: 'notes' }, { moduleId: adsr.id, portId: 'notes' });
     // Control fan-in is single-wire: random replaces the rig LFO on the filter mod.

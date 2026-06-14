@@ -45,7 +45,7 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'visualizer',
   'limiter',
   'modulator',
-  'adsr',
+  'envelope',
   'random',
   'eq',
   'mixer',

@@ -115,6 +115,21 @@ export { TITLE_H as MODULE_TITLE_H };
 const CELL_W = 64;
 const CELL_H = 60;
 
+/** Display width (seconds) of the sustain plateau in the envelope contour. */
+const SUSTAIN_DISPLAY_S = 0.4;
+
+/**
+ * Per-stage envelope curve: linear phase t∈[0,1] → shaped 0..1. Mirrors
+ * envShape() in engine-worklet.js. c=0 linear; c>0 convex; c<0 concave.
+ */
+function envShape(t: number, c: number): number {
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  if (c > -1e-4 && c < 1e-4) return t;
+  const k = 5 * c;
+  return (Math.exp(k * t) - 1) / (Math.exp(k) - 1);
+}
+
 const CTRL_HINT =
   'Drag. Double-click: default. Shift-double-click: type. Alt-click: MIDI learn.';
 
@@ -1039,6 +1054,10 @@ export class ModuleView extends Container {
       this.buildVcfFace(x, top, w);
       return;
     }
+    if (type === 'envelope') {
+      this.buildEnvelopeFace(x, top, w);
+      return;
+    }
     if (type === 'knob') {
       this.buildKnobFace();
       return;
@@ -1260,6 +1279,106 @@ export class ModuleView extends Container {
     g.circle(cx, yFor(biquadResponseDb(coefs, cutoff, sr)), 5)
       .fill(PORT_TYPE_COLORS.audio)
       .stroke({ width: 2, color: theme.text });
+  }
+
+  // -- envelope face: knob grid + DAHDSR contour with a live playhead --------
+
+  private envCurveG: Graphics | null = null;
+  private envDotG: Graphics | null = null;
+  private envCurveRect = { x: 0, y: 0, w: 0, h: 0 };
+  private lastEnvDot = NaN;
+
+  private buildEnvelopeFace(x: number, y: number, w: number): void {
+    const ctrls = this.visibleParams().map((p) => this.paramCtrl(p));
+    // Knob grid on top; the contour fills the rest of the tile below it.
+    const band = this.ctrlBandH(ctrls.length, w);
+    this.buildCtrlGrid(ctrls, x, y, w, band);
+
+    const cy = y + band + 8;
+    this.envCurveRect = { x, y: cy, w, h: this.h - cy - 12 };
+    this.envCurveG = new Graphics();
+    this.addChild(this.envCurveG);
+    this.envDotG = new Graphics();
+    this.addChild(this.envDotG);
+    this.drawEnvCurve();
+  }
+
+  /** Output value of the envelope at raw progress `env` (0..1), vel assumed 1. */
+  private envOut(env: number): number {
+    const p = this.instance.params;
+    const v = (p.invert ? 1 - env : env) * (p.depth ?? 1);
+    return p.bipolar ? v * 2 - (p.depth ?? 1) : v;
+  }
+
+  /** Map an output value to a y within the contour box (handles bipolar). */
+  private envY(out: number): number {
+    const r = this.envCurveRect;
+    const bip = (this.instance.params.bipolar ?? 0) > 0.5;
+    const norm = bip ? (out + 1) / 2 : out; // -1..1 → 0..1, else already 0..1
+    return r.y + r.h - Math.max(0, Math.min(1, norm)) * r.h;
+  }
+
+  /** Static DAHDSR contour, x ∝ stage time, y = output (depth/invert/bipolar). */
+  private drawEnvCurve(): void {
+    if (!this.envCurveG) return;
+    const g = this.envCurveG;
+    const r = this.envCurveRect;
+    const p = this.instance.params;
+
+    g.clear();
+    g.roundRect(r.x, r.y, r.w, r.h, 4).fill(theme.inset);
+    if ((p.bipolar ?? 0) > 0.5) {
+      const zy = this.envY(0);
+      g.moveTo(r.x, zy).lineTo(r.x + r.w, zy).stroke({ width: 1, color: theme.moduleStroke, alpha: 0.6 });
+    }
+
+    // Stage durations laid along x; sustain gets a fixed display segment.
+    const sustain = p.sustain ?? 0.6;
+    const stages: Array<{ t: number; shape: (f: number) => number }> = [
+      { t: p.delay ?? 0, shape: () => 0 },
+      { t: p.attack ?? 0.05, shape: (f) => envShape(f, p.atkCurve ?? 0) },
+      { t: p.hold ?? 0, shape: () => 1 },
+      { t: p.decay ?? 0.2, shape: (f) => 1 + (sustain - 1) * envShape(f, p.decCurve ?? 0) },
+      { t: SUSTAIN_DISPLAY_S, shape: () => sustain },
+      { t: p.release ?? 0.3, shape: (f) => sustain * (1 - envShape(f, p.relCurve ?? 0)) },
+    ];
+    const total = stages.reduce((s, st) => s + Math.max(st.t, 0), 0) || 1;
+
+    const pts: Array<{ x: number; y: number }> = [];
+    let acc = 0;
+    const SEG = 12;
+    for (const st of stages) {
+      const dur = Math.max(st.t, 0);
+      const x0 = r.x + (acc / total) * r.w;
+      const x1 = r.x + ((acc + dur) / total) * r.w;
+      for (let i = 0; i <= SEG; i++) {
+        const f = i / SEG;
+        pts.push({ x: x0 + (x1 - x0) * f, y: this.envY(this.envOut(st.shape(f))) });
+      }
+      acc += dur;
+    }
+
+    // Filled area under the contour, then the line.
+    const base = this.envY((p.bipolar ?? 0) > 0.5 ? -1 : 0);
+    g.moveTo(pts[0].x, base);
+    for (const pt of pts) g.lineTo(pt.x, pt.y);
+    g.lineTo(pts[pts.length - 1].x, base);
+    g.closePath();
+    g.fill({ color: PORT_TYPE_COLORS.control, alpha: 0.16 });
+    g.moveTo(pts[0].x, pts[0].y);
+    for (const pt of pts) g.lineTo(pt.x, pt.y);
+    g.stroke({ width: 2, color: PORT_TYPE_COLORS.control });
+  }
+
+  /** Live playhead dot riding the contour at the current output level. */
+  private drawEnvDot(out: number): void {
+    if (!this.envDotG) return;
+    const r = this.envCurveRect;
+    const g = this.envDotG;
+    g.clear();
+    g.circle(r.x + r.w - 6, this.envY(out), 4)
+      .fill(PORT_TYPE_COLORS.control)
+      .stroke({ width: 1.5, color: theme.text });
   }
 
   // -- controller faces (PRD §8.6) -------------------------------------------
@@ -2918,6 +3037,7 @@ export class ModuleView extends Container {
     this.runCtrlRedraws();
     if (this.instance.type === 'peq') this.drawPeqCurve();
     if (this.instance.type === 'vcf') this.drawVcfCurve();
+    if (this.instance.type === 'envelope') this.drawEnvCurve();
     if (this.instance.type === 'knob') this.drawKnob();
     if (this.instance.type === 'slider') this.drawSlider();
     if (this.instance.type === 'xy') this.drawXy();
@@ -3034,6 +3154,13 @@ export class ModuleView extends Container {
       if (spectrum && spectrum !== this.lastSpectrum) {
         this.lastSpectrum = spectrum;
         this.drawPeqSpectrum(spectrum);
+      }
+    }
+    if (this.envDotG) {
+      const out = appState.controlValues[this.instance.id] ?? 0;
+      if (out !== this.lastEnvDot) {
+        this.lastEnvDot = out;
+        this.drawEnvDot(out);
       }
     }
     if (this.grBar) {

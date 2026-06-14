@@ -46,8 +46,8 @@ Wire types: notes (cyan), control (magenta, single fan-in), audio (amber, sums).
 
 - **Subtractive synth voice**: \`note source → voice → osc → vcf → vca → audioOut\`.
   The \`voice\` turns a note stream into per-voice \`pitch\` (wire to \`osc.pitch\`) and
-  \`gate\` (wire to an \`adsr.gate\`). The amp envelope drives loudness:
-  \`adsr.out → vca.cv\`. A second \`adsr.out → vcf.mod\` gives a filter envelope
+  \`gate\` (wire to an \`envelope.gate\`). The amp envelope drives loudness:
+  \`envelope.out → vca.cv\`. A second \`envelope.out → vcf.mod\` gives a filter envelope
   (depth = the vcf \`amt\` param, in octaves). \`lfo.out → vcf.mod\` instead for a
   sweep. Set \`voice.voices\` to 1 for a mono/bass patch, higher for polyphony.
 - **Two-oscillator / detune**: two \`osc\` both fed \`voice.pitch\`, both \`→ vcf.in\`
@@ -111,8 +111,8 @@ const EXAMPLES = `
     { "id": "seq", "type": "sequencer", "params": { "division": 2 } },
     { "id": "voice", "type": "voice", "params": { "voices": 1, "glide": 0.04 } },
     { "id": "osc", "type": "osc", "params": { "wave": 3, "octave": -1 } },
-    { "id": "ampEnv", "type": "adsr", "params": { "attack": 0.005, "decay": 0.12, "sustain": 0.2, "release": 0.12 } },
-    { "id": "filtEnv", "type": "adsr", "params": { "attack": 0.005, "decay": 0.18, "sustain": 0, "release": 0.12 } },
+    { "id": "ampEnv", "type": "envelope", "params": { "attack": 0.005, "decay": 0.12, "sustain": 0.2, "release": 0.12 } },
+    { "id": "filtEnv", "type": "envelope", "params": { "attack": 0.005, "decay": 0.18, "sustain": 0, "release": 0.12 } },
     { "id": "vcf", "type": "vcf", "params": { "cutoff": 500, "res": 0.45, "amt": 2.5 } },
     { "id": "vca", "type": "vca" },
     { "id": "out", "type": "audioOut" }
@@ -141,8 +141,8 @@ const EXAMPLES = `
   }
 }
 \`\`\`
-One \`voice\` (mono) drives the \`osc\`; the amp \`adsr\` shapes the \`vca\`, a second
-\`adsr\` sweeps the \`vcf\` cutoff. This is the core subtractive recipe.
+One \`voice\` (mono) drives the \`osc\`; the amp \`envelope\` shapes the \`vca\`, a second
+\`envelope\` sweeps the \`vcf\` cutoff. This is the core subtractive recipe.
 
 ### 2. FM pad (osc → osc.fm)
 \`\`\`json
@@ -153,7 +153,7 @@ One \`voice\` (mono) drives the \`osc\`; the amp \`adsr\` shapes the \`vca\`, a 
     { "id": "voice", "type": "voice", "params": { "voices": 8, "glide": 0 } },
     { "id": "modop", "type": "osc", "params": { "wave": 0, "semi": 12 } },
     { "id": "carrier", "type": "osc", "params": { "wave": 0, "fmAmt": 0.5 } },
-    { "id": "env", "type": "adsr", "params": { "attack": 0.8, "decay": 0.5, "sustain": 0.7, "release": 2.5 } },
+    { "id": "env", "type": "envelope", "params": { "attack": 0.8, "decay": 0.5, "sustain": 0.7, "release": 2.5 } },
     { "id": "vca", "type": "vca" },
     { "id": "verb", "type": "reverb", "params": { "algo": 1, "decay": 0.8, "mix": 0.45 } },
     { "id": "out", "type": "audioOut" }

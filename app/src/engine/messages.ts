@@ -16,7 +16,7 @@ export type EngineModuleType =
   | 'composer'
   | 'notethru'
   | 'lfo'
-  | 'adsr'
+  | 'envelope'
   | 'random'
   | 'delay'
   | 'reverb'

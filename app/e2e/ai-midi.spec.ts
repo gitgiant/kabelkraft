@@ -15,7 +15,7 @@ async function setupComposerRig(page: Page): Promise<{ comp: string; synth: stri
     const comp = s.addModule('composer', -500, 0);
     const voice = s.addModule('voice', 300, 0);
     const osc = s.addModule('osc', 600, -100);
-    const adsr = s.addModule('adsr', 300, 260);
+    const adsr = s.addModule('envelope', 300, 260);
     const vca = s.addModule('vca', 900, 0);
     const out = s.addModule('audioOut', 1200, 0);
     const wire = (f: string, fp: string, t: string, tp: string) =>
@@ -125,7 +125,7 @@ test('stop pressed twice hard-kills stuck voices (panic)', async ({ page }) => {
       { start: 0, length: 16, pitch: 60, vel: 1, pan: 0, release: 0.5, modX: 0, modY: 0, prob: 1 },
     ]);
     s.setModuleData(comp, 'length', 16);
-    const adsr = [...s.graph.modules.values()].find((m) => m.type === 'adsr')!;
+    const adsr = [...s.graph.modules.values()].find((m) => m.type === 'envelope')!;
     s.setParam(adsr.id, 'sustain', 1);
     s.setParam(adsr.id, 'release', 10);
   }, ids);

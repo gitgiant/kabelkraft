@@ -82,6 +82,8 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
   const graph = new Graph(defs);
 
   for (const mod of raw.modules ?? []) {
+    // Legacy 'adsr' modules became the richer 'envelope' (same ports + params).
+    if (mod.type === 'adsr') mod.type = 'envelope';
     if (!defs.has(mod.type)) {
       warnings.push(`Unknown module type "${mod.type}" skipped (id ${mod.id})`);
       continue;

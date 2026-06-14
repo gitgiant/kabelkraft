@@ -99,7 +99,7 @@ export async function classicRig(page: Page): Promise<ClassicRig> {
     const keyboard = s.addModule('keyboard', -980, 120);
     const voice = s.addModule('voice', -680, -120);
     const osc = s.addModule('osc', -360, -260);
-    const adsr = s.addModule('adsr', -680, 220);
+    const adsr = s.addModule('envelope', -680, 220);
     // lfo sits just under the vcf: faces.spec groups vcf+lfo and expands it, so
     // the pair must stay compact and on-screen for param hit-testing.
     const lfo = s.addModule('lfo', -40, 200);

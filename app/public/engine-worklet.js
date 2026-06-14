@@ -228,7 +228,7 @@ const SILENT_BLOCK = new Float32Array(128);
 
 /** Block-rate (control) modules: rendered then skipped by the audio dispatch. */
 const CONTROL_RATE_TYPES = new Set([
-  'lfo', 'adsr', 'random',
+  'lfo', 'envelope', 'random',
   'voice', 'knob', 'slider', 'xy', 'button', 'quantizer', 'sah', 'slew', 'cmath', 'modmatrix',
 ]);
 
@@ -255,100 +255,185 @@ function ensureLanes(mod, n) {
   }
 }
 
+/** Envelope mode order — must match ENV_MODES in core/registry.ts. */
+const ENV_MODES = ['gated', 'one-shot', 'loop'];
+
 /**
- * Control envelope with two gate sources:
+ * Per-stage curve: map linear phase t∈[0,1] → shaped 0..1.
+ * c=0 linear; c>0 convex (slow→fast); c<0 concave (fast→slow). k=5c.
+ */
+function envShape(t, c) {
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  if (c > -1e-4 && c < 1e-4) return t;
+  const k = 5 * c;
+  return (Math.exp(k * t) - 1) / (Math.exp(k) - 1);
+}
+
+/**
+ * DAHDSR control envelope with two gate sources:
  * - note input: any held note keeps the gate open (monophonic, original path);
  * - 'gate' control input: when polyphonic (from a Voice module) one envelope
  *   runs per lane, so every voice gets its own contour.
+ * Per-stage curve shaping, velocity → peak, depth/invert/bipolar output, and
+ * gated / one-shot / loop modes. A 'vel' control input (per-lane velocity, e.g.
+ * from a Voice module) scales the peak by the Vel amount.
  */
-class AdsrModule {
+class EnvelopeModule {
   constructor(id, params) {
     this.id = id;
-    this.type = 'adsr';
+    this.type = 'envelope';
     this.params = params;
     this.controlIn = {};
     this.held = new Set();
-    this.stage = 'off'; // attack | decay | sustain | release | off
-    this.env = 0;
+    this.stage = 'off'; // delay | attack | hold | decay | sustain | release | off
+    this.phase = 0; // 0..1 progress within the current timed stage
+    this.env = 0; // raw envelope 0..1 (pre output transform)
+    this.startEnv = 0; // env at the start of the current stage (click-free ramps)
+    this.open = false; // last gate state (edge detection)
     this.value = 0;
     this.controlOut = { out: 0 };
-    this.lanes = []; // per-lane { stage, env } for gate mode
+    this.lanes = []; // per-lane state for gate mode
     this.gateOut = null;
   }
 
   noteOn(voiceId) {
     this.held.add(voiceId);
-    this.stage = 'attack';
   }
 
   noteOff(voiceId) {
     this.held.delete(voiceId);
-    if (this.held.size === 0 && this.stage !== 'off') this.stage = 'release';
+  }
+
+  resetState(st) {
+    st.stage = 'off';
+    st.phase = 0;
+    st.env = 0;
+    st.startEnv = 0;
+    st.open = false;
   }
 
   /** Hard kill (stop ×2): silence instantly instead of riding out a release. */
   panic() {
     this.held.clear();
-    this.stage = 'off';
-    this.env = 0;
+    this.resetState(this);
     this.value = 0;
     this.controlOut.out = 0;
-    for (const st of this.lanes) {
-      st.stage = 'off';
-      st.env = 0;
-    }
+    for (const st of this.lanes) this.resetState(st);
     if (this.gateOut) this.gateOut.fill(0);
   }
 
-  /** Advance one envelope state (`{stage, env}`) by `step` seconds. */
-  advance(st, step) {
+  /** Apply a gate edge to a lane, honoring mode (one-shot ignores note-off). */
+  gate(st, open, mode) {
+    if (open && !st.open) {
+      st.stage = (this.params.delay ?? 0) > 0.0001 ? 'delay' : 'attack';
+      st.phase = 0;
+      st.startEnv = st.env;
+    } else if (!open && st.open) {
+      if (mode !== 'one-shot' && st.stage !== 'off') {
+        st.stage = 'release';
+        st.phase = 0;
+        st.startEnv = st.env;
+      }
+    }
+    st.open = open;
+  }
+
+  /** Advance one lane by `step` seconds; returns raw env 0..1. */
+  advance(st, step, mode) {
     const p = this.params;
-    if (st.stage === 'attack') {
-      st.env += step / Math.max(0.001, p.attack ?? 0.05);
-      if (st.env >= 1) { st.env = 1; st.stage = 'decay'; }
-    } else if (st.stage === 'decay') {
-      const sustain = p.sustain ?? 0.6;
-      st.env -= step / Math.max(0.001, p.decay ?? 0.2);
-      if (st.env <= sustain) { st.env = sustain; st.stage = 'sustain'; }
-    } else if (st.stage === 'release') {
-      st.env -= step / Math.max(0.001, p.release ?? 0.3);
-      if (st.env <= 0) { st.env = 0; st.stage = 'off'; }
+    const adv = (time) => { st.phase += step / Math.max(0.0001, time); };
+    switch (st.stage) {
+      case 'delay':
+        adv(p.delay ?? 0);
+        if (st.phase >= 1) { st.phase = 0; st.stage = 'attack'; st.startEnv = st.env; }
+        break;
+      case 'attack':
+        adv(p.attack ?? 0.05);
+        if (st.phase >= 1) {
+          st.env = 1; st.phase = 0; st.startEnv = 1;
+          st.stage = (p.hold ?? 0) > 0.0001 ? 'hold' : 'decay';
+        } else {
+          st.env = st.startEnv + (1 - st.startEnv) * envShape(st.phase, p.atkCurve ?? 0);
+        }
+        break;
+      case 'hold':
+        st.env = 1;
+        adv(p.hold ?? 0);
+        if (st.phase >= 1) { st.phase = 0; st.stage = 'decay'; st.startEnv = 1; }
+        break;
+      case 'decay': {
+        const sustain = p.sustain ?? 0.6;
+        adv(p.decay ?? 0.2);
+        if (st.phase >= 1) {
+          st.env = sustain; st.phase = 0; st.startEnv = sustain;
+          if (mode === 'loop') st.stage = 'attack';
+          else if (mode === 'one-shot') st.stage = 'release';
+          else st.stage = 'sustain';
+        } else {
+          st.env = st.startEnv + (sustain - st.startEnv) * envShape(st.phase, p.decCurve ?? 0);
+        }
+        break;
+      }
+      case 'sustain':
+        st.env = p.sustain ?? 0.6;
+        break;
+      case 'release':
+        adv(p.release ?? 0.3);
+        if (st.phase >= 1) { st.env = 0; st.phase = 0; st.stage = 'off'; }
+        else st.env = st.startEnv * (1 - envShape(st.phase, p.relCurve ?? 0));
+        break;
+      default:
+        st.env = 0;
     }
     return st.env;
   }
 
-  gateLane(st, open) {
-    if (open && (st.stage === 'off' || st.stage === 'release')) st.stage = 'attack';
-    else if (!open && st.stage !== 'off' && st.stage !== 'release') st.stage = 'release';
+  /** Map raw env (0..1) → output via velocity, invert, depth, bipolar. */
+  shapeOut(env, vel) {
+    const p = this.params;
+    const velAmt = p.velAmt ?? 0;
+    const velScale = (1 - velAmt) + velAmt * (vel ?? 1);
+    const v = (p.invert ? 1 - env : env) * velScale;
+    const depth = p.depth ?? 1;
+    return p.bipolar ? (v * 2 - 1) * depth : v * depth;
   }
 
   render(blockSize) {
     const step = blockSize / sampleRate;
+    const mode = ENV_MODES[Math.round(this.params.mode ?? 0)] || 'gated';
     const gate = this.controlIn.gate;
+    const vel = this.controlIn.vel;
 
     if (gate !== undefined) {
       const width = cwidth(gate);
-      const n = Math.max(1, width);
-      while (this.lanes.length < n) this.lanes.push({ stage: 'off', env: 0 });
       if (width > 0) {
+        while (this.lanes.length < width) {
+          this.lanes.push({ stage: 'off', phase: 0, env: 0, startEnv: 0, open: false });
+        }
         if (!this.gateOut || this.gateOut.length !== width) this.gateOut = new Float32Array(width);
         for (let v = 0; v < width; v++) {
           const st = this.lanes[v];
-          this.gateLane(st, gate[v] > 0.5);
-          this.gateOut[v] = this.advance(st, step);
+          this.gate(st, gate[v] > 0.5, mode);
+          this.advance(st, step, mode);
+          this.gateOut[v] = this.shapeOut(st.env, cval(vel, v));
         }
         this.controlOut.out = this.gateOut;
         this.value = this.gateOut[0];
-      } else {
-        const st = this.lanes[0];
-        this.gateLane(st, gate > 0.5);
-        this.value = this.advance(st, step);
-        this.controlOut.out = this.value;
+        return;
       }
+      // Scalar gate: a single envelope carried on `this`.
+      this.gate(this, gate > 0.5, mode);
+      this.advance(this, step, mode);
+      this.value = this.shapeOut(this.env, cval(vel, 0));
+      this.controlOut.out = this.value;
       return;
     }
 
-    this.value = this.advance(this, step); // note-gated path: `this` carries stage/env
+    // Note-gated path: held notes keep the gate open.
+    this.gate(this, this.held.size > 0, mode);
+    this.advance(this, step, mode);
+    this.value = this.shapeOut(this.env, cval(vel, 0));
     this.controlOut.out = this.value;
   }
 }
@@ -2558,8 +2643,8 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new MidiOutModule(m.id, m.params));
           } else if (m.type === 'mixer') {
             next.set(m.id, new MixerModule(m.id, m.params));
-          } else if (m.type === 'adsr') {
-            next.set(m.id, new AdsrModule(m.id, m.params));
+          } else if (m.type === 'envelope') {
+            next.set(m.id, new EnvelopeModule(m.id, m.params));
           } else if (m.type === 'random') {
             next.set(m.id, new RandomModule(m.id, m.params));
           } else if (m.type === 'recorder') {
