@@ -13,6 +13,7 @@
   import { VIS_RATES, VIS_RES_SCALES } from '../visual/display';
   import type { StateEvent } from '../state';
   import AiSettingsPanel from './AiSettingsPanel.svelte';
+  import AiInputsPanel from './AiInputsPanel.svelte';
   import { downloadProject } from './project-io';
 
   type Tab =
@@ -698,6 +699,10 @@
           {:else if tab === 'ai'}
             <AiSettingsPanel bind:settings={aiSettings} />
             <p class="pane-note dim">Used by AI Patch, AI Project, group AI edit and the piano roll's AI MIDI.</p>
+
+            <h3>Generation inputs</h3>
+            <p class="pane-note dim">Choose what context each AI flavor sends with your prompt. Required context (specs, the target's own modules) always rides.</p>
+            <AiInputsPanel />
 
           {:else if tab === 'general'}
             <label class="row">
