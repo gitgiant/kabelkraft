@@ -26,7 +26,7 @@ import {
   framePoints,
   type WtTable,
 } from '../core/wavetable';
-import { bandCoefs, biquadResponseDb, chainResponseDb, vcfCoefs } from '../core/eqmath';
+import { bandCoefs, biquadResponseDb, chainResponseDb } from '../core/eqmath';
 import { isTouchMode } from '../core/mobile';
 import { appState } from '../state';
 import { ensureAudioPermission, listAudioDevices } from '../engine/devices';
@@ -39,6 +39,8 @@ import { approximateScene, visGraphOf } from '../visual/migrate';
 import { ContainerRenderer, graphSupported, webgpuAvailable } from '../visual/runtime';
 import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import type { Tooltip } from './Tooltip';
+import type { FaceDef, FaceRenderer } from './faces/types';
+import { VcfFace } from './faces/vcf';
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
@@ -168,7 +170,7 @@ export interface PortHandlers {
  * Knob/Slider module's scaled value. All knob/selector/fader widgets speak
  * this interface so gestures (drag, default, typing, learn) stay uniform.
  */
-interface CtrlSpec {
+export interface CtrlSpec {
   key: string;
   label: string;
   min: number;
@@ -200,22 +202,6 @@ const KEYS: KeySpec[] = [
   { semitone: 10, black: true }, { semitone: 11, black: false },
 ];
 
-/**
- * One module type's tile face: how to build the body, how to redraw it on a
- * param change, and the sizing flags that used to live in three parallel Sets.
- * Replaces the buildFace()/refreshParams() type switches with a table lookup.
- */
-interface FaceEntry {
-  build(view: ModuleView): void;
-  refresh?(view: ModuleView): void;
-  /** Hand-tuned layout that should not auto-fit to a param grid. */
-  customLayout?: boolean;
-  /** No upper size cap (hosts nested editors/canvases). */
-  unbounded?: boolean;
-  /** Cannot shrink below the def's default size. */
-  fixedMin?: boolean;
-}
-
 export class ModuleView extends Container {
   readonly portCenters = new Map<string, { x: number; y: number }>();
   private body = new Graphics();
@@ -241,10 +227,10 @@ export class ModuleView extends Container {
    * refreshParams() type switches and the three sizing Sets. `private` methods
    * are reachable from these arrows because TS access is class-scoped.
    */
-  private static readonly FACES: Record<string, FaceEntry> = {
+  private static readonly FACES: Record<string, FaceDef> = {
     // -- fully custom faces (own their whole body) --------------------------
     peq: { build: (v) => v.buildPeqFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawPeqCurve(), customLayout: true },
-    vcf: { build: (v) => v.buildVcfFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawVcfCurve(), customLayout: true },
+    vcf: { make: () => new VcfFace(), customLayout: true },
     envelope: { build: (v) => v.buildEnvelopeFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawEnvCurve(), customLayout: true },
     knob: { build: (v) => v.buildKnobFace(), refresh: (v) => v.drawKnob(), customLayout: true },
     slider: { build: (v) => v.buildSliderFace(), refresh: (v) => v.drawSlider(), customLayout: true },
@@ -299,23 +285,35 @@ export class ModuleView extends Container {
   };
 
   /** Pure param-grid modules (delay, reverb, lfo…) with no special layout. */
-  private static readonly DEFAULT_FACE: FaceEntry = { build: (v) => v.buildParamFace() };
+  private static readonly DEFAULT_FACE: FaceDef = { build: (v) => v.buildParamFace() };
 
-  private faceEntry(): FaceEntry {
+  private faceEntry(): FaceDef {
     return ModuleView.FACES[this.instance.type] ?? ModuleView.DEFAULT_FACE;
+  }
+
+  /** This view's renderer — a migrated face's own object, or an adapter that
+   * delegates to the buildXxx/drawXxx methods still living on ModuleView.
+   * Assigned in the constructor (after `instance` is set), not as a field
+   * initializer (those run before parameter-property assignment). */
+  private face!: FaceRenderer;
+
+  private makeFace(): FaceRenderer {
+    const def = this.faceEntry();
+    return def.make ? def.make() : { build: def.build!, refresh: def.refresh };
   }
 
   constructor(
     readonly instance: ModuleInstance,
     readonly def: ModuleDef,
     private handlers: PortHandlers,
-    private tooltip: Tooltip,
+    readonly tooltip: Tooltip,
     /** Headless: face-view embed — tile face only (no title buttons, ports,
      * resize, body drag); double-click runs onOpen instead. */
     private opts: { headless?: boolean; onOpen?: () => void } = {},
   ) {
     super();
     this.position.set(instance.x, instance.y);
+    this.face = this.makeFace();
     this.rebuild();
   }
 
@@ -400,7 +398,6 @@ export class ModuleView extends Container {
     this.clipped = false;
     this.mixMeters = [];
     this.grBar = null;
-    this.vcfCurveG = null;
     this.ctrlG = null;
     this.ctrlText = null;
     this.compG = null;
@@ -412,6 +409,7 @@ export class ModuleView extends Container {
     this.peqSpectrumG = null;
     this.peqDots = [];
     this.lastSpectrum = null;
+    // (vcf curve state now lives on VcfFace)
     this.wtRowTextA = null;
     this.wtRowTextB = null;
     this.wtDisplay = null;
@@ -839,7 +837,7 @@ export class ModuleView extends Container {
     return false;
   }
 
-  private paramCtrl(p: ParamSpec): CtrlSpec {
+  paramCtrl(p: ParamSpec): CtrlSpec {
     return {
       key: p.id,
       label: p.label,
@@ -855,7 +853,7 @@ export class ModuleView extends Container {
     };
   }
 
-  private paramSpec(id: string): ParamSpec {
+  paramSpec(id: string): ParamSpec {
     return this.def.params.find((p) => p.id === id)!;
   }
 
@@ -870,7 +868,7 @@ export class ModuleView extends Container {
     return (v - c.min) / (c.max - c.min);
   }
 
-  private ctrlFromNorm(c: CtrlSpec, n: number): number {
+  ctrlFromNorm(c: CtrlSpec, n: number): number {
     const k = Math.min(1, Math.max(0, n));
     let v: number;
     if (c.curve === 'exp' && c.min > 0) v = c.min * Math.pow(c.max / c.min, k);
@@ -938,7 +936,7 @@ export class ModuleView extends Container {
 
   /** Rotary knob for a continuous control. Value is shown on hover/drag only;
    * the persistent readout is dropped to keep cells dense. */
-  private buildKnob(c: CtrlSpec, cx: number, cy: number, r: number, maxW?: number): void {
+  buildKnob(c: CtrlSpec, cx: number, cy: number, r: number, maxW?: number): void {
     this.paramAnchors.set(c.key, { x: cx, y: cy });
     const g = new Graphics();
     this.addChild(g);
@@ -1000,7 +998,7 @@ export class ModuleView extends Container {
   }
 
   /** Stepped selector knob for an options control (waveform, mode, …). */
-  private buildSelector(c: CtrlSpec, cx: number, cy: number, r: number, maxW?: number): void {
+  buildSelector(c: CtrlSpec, cx: number, cy: number, r: number, maxW?: number): void {
     this.paramAnchors.set(c.key, { x: cx, y: cy });
     const opts = c.options!;
     const g = new Graphics();
@@ -1190,7 +1188,7 @@ export class ModuleView extends Container {
   // -- face dispatch -----------------------------------------------------------
 
   private buildFace(): void {
-    this.faceEntry().build(this);
+    this.face.build(this);
   }
 
   /**
@@ -1241,107 +1239,6 @@ export class ModuleView extends Container {
     const band = this.ctrlBandH(ctrls, gw);
     this.buildCtrlGrid(ctrls, x, top, gw);
     opts.display?.({ x, top, gw, band, bottom });
-  }
-
-  // -- filter (vcf) face: knobs + response curve -----------------------------
-
-  private vcfCurveG: Graphics | null = null;
-  private vcfCurveRect = { x: 0, y: 0, w: 0, h: 0 };
-
-  private buildVcfFace(x: number, y: number, w: number): void {
-    const r = Math.max(12, Math.min(20, w / 11));
-    const knobY = y + r + 16;
-    this.buildSelector(this.paramCtrl(this.paramSpec('mode')), x + w * 0.125, knobY, r);
-    this.buildKnob(this.paramCtrl(this.paramSpec('cutoff')), x + w * 0.375, knobY, r);
-    this.buildKnob(this.paramCtrl(this.paramSpec('res')), x + w * 0.625, knobY, r);
-    this.buildKnob(this.paramCtrl(this.paramSpec('amt')), x + w * 0.875, knobY, r);
-
-    const cy = knobY + r + 26;
-    this.vcfCurveRect = { x, y: cy, w, h: this.h - cy - 12 };
-    this.vcfCurveG = new Graphics();
-    this.addChild(this.vcfCurveG);
-    this.drawVcfCurve();
-
-    const rect = this.vcfCurveRect;
-    const hit = new Graphics().rect(rect.x, rect.y, rect.w, rect.h).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'crosshair';
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      appState.beginUndoable();
-      const cutoff = this.paramCtrl(this.paramSpec('cutoff'));
-      const res = this.paramCtrl(this.paramSpec('res'));
-      const apply = (lx: number, ly: number) => {
-        cutoff.set(this.ctrlFromNorm(cutoff, (lx - rect.x) / rect.w));
-        res.set(this.ctrlFromNorm(res, 1 - (ly - rect.y) / rect.h));
-        this.refreshParams();
-      };
-      const first = this.toLocal(e.global);
-      apply(first.x, first.y);
-      const scale = this.worldTransform.a || 1;
-      const sx = e.clientX;
-      const sy = e.clientY;
-      const onMove = (ev: PointerEvent) =>
-        apply(first.x + (ev.clientX - sx) / scale, first.y + (ev.clientY - sy) / scale);
-      const onUp = () => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-      };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-    });
-    hit.on('pointerover', (ev) =>
-      this.tooltip.show(
-        ['Filter response', 'Drag: horizontal = cutoff, vertical = Q.'],
-        ev.clientX,
-        ev.clientY,
-      ),
-    );
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-  }
-
-  /** Visual indicator: log-frequency magnitude curve of the current settings. */
-  private drawVcfCurve(): void {
-    if (!this.vcfCurveG) return;
-    const g = this.vcfCurveG;
-    const r = this.vcfCurveRect;
-    const p = this.instance.params;
-    const sr = appState.engine.sampleRate;
-    const coefs = vcfCoefs(Math.round(p.mode ?? 0), p.cutoff ?? 1200, p.res ?? 0.2, sr);
-
-    const F_LO = 20;
-    const F_HI = 20000;
-    const DB_RANGE = 30; // ±30 dB
-    const yFor = (db: number) =>
-      r.y + r.h / 2 - (Math.max(-DB_RANGE, Math.min(DB_RANGE, db)) / DB_RANGE) * (r.h / 2);
-
-    g.clear();
-    g.roundRect(r.x, r.y, r.w, r.h, 4).fill(theme.inset);
-    g.moveTo(r.x, r.y + r.h / 2).lineTo(r.x + r.w, r.y + r.h / 2)
-      .stroke({ width: 1, color: theme.moduleStroke, alpha: 0.6 });
-
-    const N = 80;
-    const pts: Array<{ x: number; y: number }> = [];
-    for (let i = 0; i <= N; i++) {
-      const f = F_LO * Math.pow(F_HI / F_LO, i / N);
-      pts.push({ x: r.x + (i / N) * r.w, y: yFor(biquadResponseDb(coefs, f, sr)) });
-    }
-    g.moveTo(pts[0].x, r.y + r.h);
-    for (const pt of pts) g.lineTo(pt.x, pt.y);
-    g.lineTo(pts[N].x, r.y + r.h);
-    g.closePath();
-    g.fill({ color: PORT_TYPE_COLORS.audio, alpha: 0.18 });
-    g.moveTo(pts[0].x, pts[0].y);
-    for (const pt of pts) g.lineTo(pt.x, pt.y);
-    g.stroke({ width: 2, color: PORT_TYPE_COLORS.audio });
-
-    // Cutoff handle.
-    const cutoff = Math.min(F_HI, Math.max(F_LO, p.cutoff ?? 1200));
-    const cx = r.x + (Math.log(cutoff / F_LO) / Math.log(F_HI / F_LO)) * r.w;
-    g.circle(cx, yFor(biquadResponseDb(coefs, cutoff, sr)), 5)
-      .fill(PORT_TYPE_COLORS.audio)
-      .stroke({ width: 2, color: theme.text });
   }
 
   // -- envelope face: knob grid + DAHDSR contour with a live playhead --------
@@ -3410,7 +3307,7 @@ export class ModuleView extends Container {
 
   refreshParams(): void {
     this.runCtrlRedraws();
-    this.faceEntry().refresh?.(this);
+    this.face.refresh?.(this);
   }
 
   // -- type-specific faces --------------------------------------------------
