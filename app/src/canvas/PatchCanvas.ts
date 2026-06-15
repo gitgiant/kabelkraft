@@ -167,12 +167,15 @@ export class PatchCanvas {
     window.addEventListener('keydown', (e) => this.onKeyDown(e));
 
     appState.on('graphChanged', () => {
-      this.syncViews();
+      const added = this.syncViews();
       // TODO(intelligence): placeholder face lists wired inputs — refresh on
       // wire changes (syncViews only adds/removes whole tiles).
       for (const v of this.views.values()) {
         if (v.instance.type === 'intelligence') v.rebuild();
       }
+      // A freshly added module may land off-screen (open-space search) — zoom
+      // out to bring it into view.
+      if (added.length) this.fitAfterAdd(added);
     });
     appState.on('projectLoaded', () => this.rebuildAll());
     appState.on('groupCollapseToggled', () => {
@@ -528,8 +531,9 @@ export class PatchCanvas {
   /** Collapsed-state snapshot from the previous sync, for toggle animation. */
   private prevCollapsed = new Map<string, boolean>();
 
-  private syncViews(): void {
+  private syncViews(): ModuleView[] {
     const graph = appState.graph;
+    const added: ModuleView[] = [];
 
     for (const [id, view] of [...this.views]) {
       if (!graph.modules.has(id)) {
@@ -548,6 +552,7 @@ export class PatchCanvas {
       this.moduleLayer.addChild(view);
       this.views.set(inst.id, view);
       this.placeInOpenSpace(view); // newly placed modules drop into empty space (PRD §5)
+      added.push(view);
     }
 
     // Group tiles and frames are few — rebuild from scratch each change.
@@ -649,6 +654,7 @@ export class PatchCanvas {
     }
     this.prevCollapsed.clear();
     for (const group of graph.groups.values()) this.prevCollapsed.set(group.id, group.collapsed);
+    return added;
   }
 
   /** A group's poles: stable baseline (crossing + unconnected) ± override. */
@@ -1308,8 +1314,8 @@ export class PatchCanvas {
     this.clearLongPress();
   }
 
-  /** Fit the whole patch in view; if already fitted, return to 100%. */
-  fitView(): void {
+  /** Bounding box of every visible tile in world coords, or null if empty. */
+  private contentBounds(): { minX: number; minY: number; maxX: number; maxY: number } | null {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     const include = (x: number, y: number, w: number, h: number) => {
       minX = Math.min(minX, x); minY = Math.min(minY, y);
@@ -1321,7 +1327,46 @@ export class PatchCanvas {
     for (const gv of this.groupViews.values()) {
       include(gv.position.x, gv.position.y, gv.tileWidth, gv.tileHeight);
     }
-    if (!Number.isFinite(minX)) return;
+    return Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null;
+  }
+
+  /** True when a tile sits fully inside the current viewport. */
+  private isFullyOnScreen(view: ModuleView): boolean {
+    const s = this.world.scale.x;
+    const sx = this.world.position.x + view.position.x * s;
+    const sy = this.world.position.y + view.position.y * s;
+    return (
+      sx >= 0 &&
+      sy >= 0 &&
+      sx + view.w * s <= this.app.screen.width &&
+      sy + view.h * s <= this.app.screen.height
+    );
+  }
+
+  /** A new module landed off-screen: zoom out (never in) to bring it into view. */
+  private fitAfterAdd(added: ModuleView[]): void {
+    if (added.every((v) => this.isFullyOnScreen(v))) return;
+    const b = this.contentBounds();
+    if (!b) return;
+    const sw = this.app.screen.width;
+    const sh = this.app.screen.height;
+    const pad = 60;
+    const w = Math.max(1, b.maxX - b.minX);
+    const h = Math.max(1, b.maxY - b.minY);
+    const cx = (b.minX + b.maxX) / 2;
+    const cy = (b.minY + b.maxY) / 2;
+    // Only ever zoom out: keep current scale unless content no longer fits.
+    const fit = Math.min((sw - pad) / w, (sh - pad) / h);
+    const scale = Math.max(0.2, Math.min(this.world.scale.x, fit));
+    this.world.scale.set(scale);
+    this.world.position.set(sw / 2 - cx * scale, sh / 2 - cy * scale);
+  }
+
+  /** Fit the whole patch in view; if already fitted, return to 100%. */
+  fitView(): void {
+    const b = this.contentBounds();
+    if (!b) return;
+    const { minX, minY, maxX, maxY } = b;
     const sw = this.app.screen.width;
     const sh = this.app.screen.height;
     const pad = 60;
