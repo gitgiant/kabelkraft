@@ -41,6 +41,7 @@ import { ModmatrixFace } from './faces/modmatrix';
 import { MixerFace } from './faces/mixer';
 import { ComposerFace } from './faces/composer';
 import { ParamFace, KeyboardFace, TransportFace } from './faces/param';
+import { VMeter, GrMeter, type Meter } from './faces/meters';
 export { tickHiddenTintSource } from './faces/visThumb';
 
 
@@ -315,10 +316,6 @@ export class ModuleView extends Container {
     this.portDots.clear();
     this.ctrlRedraws = [];
     this.paramAnchors.clear();
-    this.meterBar = null;
-    this.clipDot = null;
-    this.clipped = false;
-    this.grBar = null;
     this.midiDeviceText = null;
     // (peq/vcf curve + wtosc table + recorder/mixer state now lives on their
     // FaceRenderer objects)
@@ -1104,9 +1101,10 @@ export class ModuleView extends Container {
   /**
    * Param-grid faces: a knob band, with an optional edge meter / device-row
    * rail and a type-specific display below. The rail and band arithmetic lives
-   * here so every compositional face shares it (see the FACES table).
+   * here so every compositional face shares it (see the FACES table). Returns
+   * the rail meter (if any) so the calling face can drive it from `live()`.
    */
-  buildParamFace(opts: ParamFaceOpts = {}): void {
+  buildParamFace(opts: ParamFaceOpts = {}): Meter | null {
     const x = 10;
     const w = this.w - 20;
     const top = TITLE_H + 6;
@@ -1114,14 +1112,15 @@ export class ModuleView extends Container {
 
     // Vertical meter rail in a right-edge column.
     let right = this.w - 10;
+    let rail: Meter | null = null;
     if (opts.rail === 'vmeterOut') {
-      this.buildVMeter(this.w - 30, top + 12, 14, this.h - top - 26);
+      rail = this.buildVMeter(this.w - 30, top + 12, 14, this.h - top - 26);
       right = this.w - 44;
     } else if (opts.rail === 'vmeterIn') {
-      this.buildVMeter(this.w - 30, top + 12, 14, this.h - top - 40);
+      rail = this.buildVMeter(this.w - 30, top + 12, 14, this.h - top - 40);
       right = this.w - 44;
     } else if (opts.rail === 'grmeter') {
-      this.buildGrMeter(this.w - 28, top + 12, 12, this.h - top - 26);
+      rail = this.buildGrMeter(this.w - 28, top + 12, 12, this.h - top - 26);
       right = this.w - 42;
     }
 
@@ -1142,6 +1141,7 @@ export class ModuleView extends Container {
     const band = this.ctrlBandH(ctrls, gw);
     this.buildCtrlGrid(ctrls, x, top, gw);
     opts.display?.({ x, top, gw, band, bottom });
+    return rail;
   }
 
   // -- mixer face: 5 console strips (4 channels + master bus) --------------------
@@ -1310,23 +1310,9 @@ export class ModuleView extends Container {
 
   // -- gain-reduction meter (compressor/limiter/mbcomp): vertical red bar -------
 
-  private grBar: Graphics | null = null;
-  private grRect = { x: 0, y: 0, w: 0, h: 0 };
-
-  private buildGrMeter(x: number, y: number, w: number, h: number): void {
-    const label = new Text({ text: 'GR', style: { fontSize: 9, fill: theme.textDim } });
-    label.anchor.set(0.5, 1);
-    label.position.set(x + w / 2, y - 2);
-    this.addChild(label);
-    const bg = new Graphics().roundRect(x, y, w, h, 3).fill(theme.inset);
-    this.addChild(bg);
-    this.grBar = new Graphics();
-    this.addChild(this.grBar);
-    this.grRect = { x, y, w, h };
+  private buildGrMeter(x: number, y: number, w: number, h: number): GrMeter {
+    return new GrMeter(this, x, y, w, h);
   }
-
-  // -- drum machine face -----------------------------------------------------
-
 
   /** A sample/wavetable loaded: let the face redraw (sampler waveform, wtosc
    * slot rows + frame tables). */
@@ -1339,62 +1325,15 @@ export class ModuleView extends Container {
     this.face.refresh?.(this);
   }
 
-  // -- vertical peak meter (levels / audioOut / recorder) ------------------------
-
-  private meterBar: Graphics | null = null;
-  private clipDot: Graphics | null = null;
-  private meterRect = { x: 0, y: 0, w: 0, h: 0 };
-  private clipped = false;
-
-  buildVMeter(x: number, y: number, w: number, h: number): void {
-    const bg = new Graphics().roundRect(x, y, w, h, 3).fill(theme.inset);
-    this.addChild(bg);
-    this.meterBar = new Graphics();
-    this.addChild(this.meterBar);
-    this.clipDot = new Graphics();
-    this.clipDot.circle(x + w / 2, y - 8, 4).fill(0x550000);
-    this.clipDot.eventMode = 'static';
-    this.clipDot.cursor = 'pointer';
-    this.addChild(this.clipDot);
-    this.meterRect = { x, y, w, h };
+  /** Vertical peak meter primitive — the face holds it and drives it from its
+   * own `live()` (levels / audioOut / recorder). */
+  buildVMeter(x: number, y: number, w: number, h: number): VMeter {
+    return new VMeter(this, x, y, w, h);
   }
 
-  /** Called from the canvas ticker: live meters + sequencer playhead. */
+  /** Called from the canvas ticker: faces redraw their live visuals + meters. */
   updateLive(): void {
     this.face.live?.(this);
-    if (this.grBar) {
-      // Gain reduction grows downward, red, scaled to 24 dB full height.
-      const gr = appState.gainReduction[this.instance.id] ?? 0;
-      const bh = Math.min(1, gr / 24) * this.grRect.h;
-      this.grBar.clear();
-      if (bh > 0.5) {
-        this.grBar
-          .roundRect(this.grRect.x, this.grRect.y, this.grRect.w, bh, 3)
-          .fill(0xff5050);
-      }
-    }
-    if (!this.meterBar) return;
-    const reading = appState.meters[this.instance.id];
-    const peak = reading?.peak ?? 0;
-    if (reading?.clipped) this.clipped = true;
-    this.meterBar.clear();
-    const { x, y, w, h } = this.meterRect;
-    const bh = Math.min(1, peak) * h;
-    if (bh > 0.5) {
-      // Vertical bar grows bottom→top, green/amber/red by level.
-      this.meterBar
-        .roundRect(x, y + h - bh, w, bh, 3)
-        .fill(peak > 1 ? 0xff3030 : peak > 0.85 ? 0xffb13d : 0x52e07a);
-    }
-    if (this.clipDot) {
-      this.clipDot.clear().circle(x + w / 2, y - 8, 4)
-        .fill(this.clipped ? 0xff2020 : 0x550000);
-      this.clipDot.off('pointerdown');
-      this.clipDot.on('pointerdown', (e) => {
-        e.stopPropagation();
-        this.clipped = false;
-      });
-    }
   }
 
   setSelected(on: boolean): void {

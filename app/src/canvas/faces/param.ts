@@ -2,19 +2,26 @@ import { Graphics, Text } from 'pixi.js';
 import { appState } from '../../state';
 import { theme } from '../../theme';
 import { KEYS, type ModuleView, type ParamFaceCtx, type ParamFaceOpts } from '../ModuleView';
+import type { Meter } from './meters';
 import type { FaceRenderer } from './types';
 
 /**
  * Shared param-grid face: the default tile for every module that is just a
  * knob/selector band, optionally with an edge meter rail or a bottom device
- * row (audio/MIDI ports, compressor gain-reduction meter, …). The live meter
- * bars are driven by ModuleView.updateLive's shared meter paths.
+ * row (audio/MIDI ports, compressor gain-reduction meter, …). When the tile
+ * has a rail meter, the face holds it and drives it from `live()`.
  */
 export class ParamFace implements FaceRenderer {
+  private meter: Meter | null = null;
+
   constructor(private readonly opts: ParamFaceOpts = {}) {}
 
   build(view: ModuleView): void {
-    view.buildParamFace(this.opts);
+    this.meter = view.buildParamFace(this.opts);
+  }
+
+  live(view: ModuleView): void {
+    this.meter?.update(view);
   }
 }
 

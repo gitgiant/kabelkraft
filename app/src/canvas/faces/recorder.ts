@@ -2,22 +2,25 @@ import { Graphics, Text } from 'pixi.js';
 import { appState } from '../../state';
 import { theme } from '../../theme';
 import { MODULE_TITLE_H, type ModuleView } from '../ModuleView';
+import type { VMeter } from './meters';
 import type { FaceRenderer } from './types';
 
-/** Recorder: a REC/STOP toggle + elapsed-time readout beside a peak meter
- * (the meter's live bar is the shared meterBar path in updateLive). */
+/** Recorder: a REC/STOP toggle + elapsed-time readout beside a peak meter,
+ * all driven from live(). */
 export class RecorderFace implements FaceRenderer {
   private button: Graphics | null = null;
   private label: Text | null = null;
   private elapsed: Text | null = null;
+  private meter: VMeter | null = null;
   private rect = { x: 0, y: 0 };
 
   build(view: ModuleView): void {
     this.buildButton(view, 10, MODULE_TITLE_H + 10, view.w - 56);
-    view.buildVMeter(view.w - 32, MODULE_TITLE_H + 18, 14, view.h - MODULE_TITLE_H - 32);
+    this.meter = view.buildVMeter(view.w - 32, MODULE_TITLE_H + 18, 14, view.h - MODULE_TITLE_H - 32);
   }
 
   live(view: ModuleView): void {
+    this.meter?.update(view);
     if (!this.elapsed) return;
     const recording = appState.isRecording(view.instance.id);
     this.elapsed.text = recording
