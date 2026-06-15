@@ -42,6 +42,7 @@ import type { FaceDef, FaceRenderer } from './faces/types';
 import { VcfFace } from './faces/vcf';
 import { EnvelopeFace } from './faces/envelope';
 import { PeqFace } from './faces/peq';
+import { ButtonFace, KnobFace, SliderFace, XyFace } from './faces/controls';
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
@@ -124,7 +125,7 @@ export { TITLE_H as MODULE_TITLE_H };
 /** Nominal column pitch for the auto knob grid. */
 const CELL_W = 46;
 
-const CTRL_HINT =
+export const CTRL_HINT =
   'Drag. Double-click: default. Shift-double-click: type. Alt-click: MIDI learn.';
 
 /** Trim a label in place with a trailing ellipsis so it fits maxW px. */
@@ -215,10 +216,10 @@ export class ModuleView extends Container {
     peq: { make: () => new PeqFace(), customLayout: true },
     vcf: { make: () => new VcfFace(), customLayout: true },
     envelope: { make: () => new EnvelopeFace(), customLayout: true },
-    knob: { build: (v) => v.buildKnobFace(), refresh: (v) => v.drawKnob(), customLayout: true },
-    slider: { build: (v) => v.buildSliderFace(), refresh: (v) => v.drawSlider(), customLayout: true },
-    xy: { build: (v) => v.buildXyFace(), refresh: (v) => v.drawXy(), customLayout: true },
-    button: { build: (v) => v.buildButtonFace(), refresh: (v) => v.drawButton(), customLayout: true },
+    knob: { make: () => new KnobFace(), customLayout: true },
+    slider: { make: () => new SliderFace(), customLayout: true },
+    xy: { make: () => new XyFace(), customLayout: true },
+    button: { make: () => new ButtonFace(), customLayout: true },
     mixer: { build: (v) => v.buildMixerFace(10, TITLE_H + 18, v.w - 20), customLayout: true },
     composer: { build: (v) => v.buildComposerFace(10, TITLE_H + 6, v.w - 20), customLayout: true, unbounded: true },
     levels: { build: (v) => v.buildVMeter(v.w / 2 - 12, TITLE_H + 18, 24, v.h - TITLE_H - 32), customLayout: true },
@@ -381,8 +382,6 @@ export class ModuleView extends Container {
     this.clipped = false;
     this.mixMeters = [];
     this.grBar = null;
-    this.ctrlG = null;
-    this.ctrlText = null;
     this.compG = null;
     this.lastCompPos = -1;
     this.lastCompData = null;
@@ -481,7 +480,7 @@ export class ModuleView extends Container {
   }
 
   /** Accent for control visuals: the resolved tint, else the control type color. */
-  private accent(): number {
+  accent(): number {
     return this.liveColor ?? PORT_TYPE_COLORS.control;
   }
 
@@ -841,6 +840,11 @@ export class ModuleView extends Container {
     return this.paramAnchors.get(paramId) ?? null;
   }
 
+  /** Record a control's center so e2e/tools can aim the pointer at it. */
+  setParamAnchor(key: string, x: number, y: number): void {
+    this.paramAnchors.set(key, { x, y });
+  }
+
   /** Normalized 0–1 position of a control value, honoring its display curve. */
   private ctrlNorm(c: CtrlSpec, v: number): number {
     if (c.curve === 'exp' && c.min > 0) return Math.log(v / c.min) / Math.log(c.max / c.min);
@@ -871,7 +875,7 @@ export class ModuleView extends Container {
     return `${Math.round(n * 100)}/100`;
   }
 
-  private ctrlTipTitle(c: CtrlSpec): string {
+  ctrlTipTitle(c: CtrlSpec): string {
     return `${c.label}: ${this.formatCtrl(c)} (${this.ctrlRaw(c)})`;
   }
 
@@ -883,7 +887,7 @@ export class ModuleView extends Container {
    * Shared gesture preamble: face learn, MIDI learn (alt), double-click
    * default, shift-double-click typed entry. True = event consumed.
    */
-  private ctrlPreamble(c: CtrlSpec, e: FederatedPointerEvent): boolean {
+  ctrlPreamble(c: CtrlSpec, e: FederatedPointerEvent): boolean {
     if (c.learnId && appState.faceLearn && appState.completeFaceLearn(this.instance.id, c.learnId)) {
       return true;
     }
@@ -1218,355 +1222,6 @@ export class ModuleView extends Container {
     const band = this.ctrlBandH(ctrls, gw);
     this.buildCtrlGrid(ctrls, x, top, gw);
     opts.display?.({ x, top, gw, band, bottom });
-  }
-
-  // -- controller faces (PRD §8.6) -------------------------------------------
-
-  private ctrlG: Graphics | null = null;
-  private ctrlText: Text | null = null;
-
-  private setCtrl(paramId: string, v: number): void {
-    appState.setParam(this.instance.id, paramId, Math.min(1, Math.max(0, v)));
-  }
-
-  /**
-   * Display range for Knob/Slider modules (instance.data.cfg). Display-only:
-   * the Control output always stays normalized 0–1.
-   */
-  private ctrlCfg(): { min: number; max: number; def: number } {
-    const c = (this.instance.data?.cfg ?? {}) as Record<string, unknown>;
-    const min = typeof c.min === 'number' && Number.isFinite(c.min) ? c.min : 0;
-    let max = typeof c.max === 'number' && Number.isFinite(c.max) ? c.max : 1;
-    if (max === min) max = min + 1;
-    const def = typeof c.def === 'number' && Number.isFinite(c.def) ? c.def : min + 0.5 * (max - min);
-    return { min, max, def: Math.min(max, Math.max(min, def)) };
-  }
-
-  /** The Knob/Slider value as a CtrlSpec in the configured display range. */
-  private ctrlValueSpec(redraw: () => void): CtrlSpec {
-    const cfg = this.ctrlCfg();
-    return {
-      key: 'value',
-      label: this.instance.label ?? this.def.name,
-      min: cfg.min,
-      max: cfg.max,
-      default: cfg.def,
-      get: () => cfg.min + Math.min(1, Math.max(0, this.instance.params.value ?? 0)) * (cfg.max - cfg.min),
-      set: (s) => {
-        this.setCtrl('value', (s - cfg.min) / (cfg.max - cfg.min));
-        redraw();
-      },
-      learnId: 'value',
-    };
-  }
-
-  private ctrlScaledText(): string {
-    const cfg = this.ctrlCfg();
-    const v = cfg.min + Math.min(1, Math.max(0, this.instance.params.value ?? 0)) * (cfg.max - cfg.min);
-    return Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
-  }
-
-  /** ⚙ opens the range-config popup (Knob/Slider modules). */
-  private buildCtrlConfigButton(): void {
-    const gear = new Text({ text: '⚙', style: { fontSize: 13, fill: theme.textDim } });
-    gear.anchor.set(1, 0);
-    gear.position.set(this.w - 6, TITLE_H + 4);
-    gear.eventMode = 'static';
-    gear.cursor = 'pointer';
-    gear.on('pointerdown', (e) => {
-      e.stopPropagation();
-      appState.openRangeConfig(this.instance.id);
-    });
-    gear.on('pointerover', (e) =>
-      this.tooltip.show(['Range', 'Configure min, max and default. Display only — the output stays 0–1.'], e.clientX, e.clientY),
-    );
-    gear.on('pointerout', () => this.tooltip.hide());
-    this.addChild(gear);
-  }
-
-  private knobCenter(): { cx: number; cy: number } {
-    return { cx: this.w / 2, cy: TITLE_H + 56 };
-  }
-
-  private buildKnobFace(): void {
-    const { cx, cy } = this.knobCenter();
-    this.paramAnchors.set('value', { x: cx, y: cy });
-    this.ctrlG = new Graphics();
-    this.addChild(this.ctrlG);
-    this.ctrlText = new Text({ text: '', style: { fontSize: 12, fill: theme.text } });
-    this.ctrlText.anchor.set(0.5, 0);
-    this.ctrlText.position.set(cx, cy + 44);
-    this.addChild(this.ctrlText);
-    this.drawKnob();
-    this.buildCtrlConfigButton();
-
-    const hit = new Graphics().circle(cx, cy, 40).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'ns-resize';
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      const c = this.ctrlValueSpec(() => this.drawKnob());
-      if (this.ctrlPreamble(c, e)) return;
-      appState.beginUndoable();
-      const start = this.instance.params.value ?? 0;
-      const startY = e.clientY;
-      const scale = this.worldTransform.a || 1;
-      const onMove = (ev: PointerEvent) => {
-        this.setCtrl('value', start + (startY - ev.clientY) / scale / 120);
-        this.drawKnob();
-        this.tooltip.showNow([this.ctrlTipTitle(c)], ev.clientX, ev.clientY);
-      };
-      const onUp = () => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        this.tooltip.hide();
-      };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-    });
-    hit.on('pointerover', (ev) => {
-      const c = this.ctrlValueSpec(() => this.drawKnob());
-      this.tooltip.show([this.ctrlTipTitle(c), `${CTRL_HINT} ⚙: range.`], ev.clientX, ev.clientY);
-    });
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-  }
-
-  drawKnob(): void {
-    if (!this.ctrlG || this.instance.type !== 'knob') return;
-    const { cx, cy } = this.knobCenter();
-    const v = Math.min(1, Math.max(0, this.instance.params.value ?? 0));
-    const a0 = Math.PI * 0.75;
-    const a1 = Math.PI * 2.25;
-    const av = a0 + (a1 - a0) * v;
-    const g = this.ctrlG;
-    g.clear();
-    g.circle(cx, cy, 28).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
-    // moveTo before each arc: without it the path connects from its
-    // current point (the graphics origin), drawing stray wire-like lines.
-    g.moveTo(cx + Math.cos(a0) * 36, cy + Math.sin(a0) * 36);
-    g.arc(cx, cy, 36, a0, a1).stroke({ width: 4, color: theme.inset });
-    g.moveTo(cx + Math.cos(a0) * 36, cy + Math.sin(a0) * 36);
-    g.arc(cx, cy, 36, a0, av).stroke({ width: 4, color: this.accent() });
-    g.moveTo(cx + Math.cos(av) * 10, cy + Math.sin(av) * 10)
-      .lineTo(cx + Math.cos(av) * 26, cy + Math.sin(av) * 26)
-      .stroke({ width: 3, color: this.accent() });
-    if (this.ctrlText) this.ctrlText.text = this.ctrlScaledText();
-  }
-
-  private sliderTrack(): { x: number; y: number; w: number; h: number; horiz: boolean } {
-    const horiz = Math.round(this.instance.params.orient ?? 0) === 1;
-    const pad = 18;
-    if (horiz) {
-      return { x: pad, y: TITLE_H + 40, w: this.w - pad * 2, h: 12, horiz };
-    }
-    return { x: this.w / 2 - 6, y: TITLE_H + 14, w: 12, h: this.h - TITLE_H - 112, horiz };
-  }
-
-  private buildSliderFace(): void {
-    this.ctrlG = new Graphics();
-    this.addChild(this.ctrlG);
-    this.ctrlText = new Text({ text: '', style: { fontSize: 12, fill: theme.text } });
-    this.ctrlText.anchor.set(0.5, 0);
-    this.ctrlText.position.set(this.w / 2, this.h - 90);
-    this.addChild(this.ctrlText);
-    this.drawSlider();
-    this.buildCtrlConfigButton();
-    const t0 = this.sliderTrack();
-    this.paramAnchors.set('value', { x: t0.x + t0.w / 2, y: t0.y + t0.h / 2 });
-
-    // Hit area covers both orientations; drawing follows the orient param.
-    const hit = new Graphics()
-      .rect(8, TITLE_H + 6, this.w - 16, this.h - TITLE_H - 98)
-      .fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'pointer';
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      const c = this.ctrlValueSpec(() => this.drawSlider());
-      if (this.ctrlPreamble(c, e)) return;
-      const t = this.sliderTrack();
-      appState.beginUndoable();
-      // Jump to the click position, then track relatively.
-      const local = this.toLocal(e.global);
-      this.setCtrl('value', t.horiz ? (local.x - t.x) / t.w : 1 - (local.y - t.y) / t.h);
-      this.drawSlider();
-      const start = this.instance.params.value ?? 0;
-      const startX = e.clientX;
-      const startY = e.clientY;
-      const scale = this.worldTransform.a || 1;
-      const onMove = (ev: PointerEvent) => {
-        const dx = (ev.clientX - startX) / scale;
-        const dy = (ev.clientY - startY) / scale;
-        this.setCtrl('value', start + (t.horiz ? dx / t.w : -dy / t.h));
-        this.drawSlider();
-        this.tooltip.showNow([this.ctrlTipTitle(c)], ev.clientX, ev.clientY);
-      };
-      const onUp = () => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        this.tooltip.hide();
-      };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-    });
-    hit.on('pointerover', (ev) => {
-      const c = this.ctrlValueSpec(() => this.drawSlider());
-      this.tooltip.show([this.ctrlTipTitle(c), `${CTRL_HINT} ⚙: range.`], ev.clientX, ev.clientY);
-    });
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-
-    this.buildSelector(this.paramCtrl(this.paramSpec('orient')), this.w / 2, this.h - 42, 12);
-  }
-
-  drawSlider(): void {
-    if (!this.ctrlG || this.instance.type !== 'slider') return;
-    const v = Math.min(1, Math.max(0, this.instance.params.value ?? 0));
-    const t = this.sliderTrack();
-    const g = this.ctrlG;
-    g.clear();
-    g.roundRect(t.x, t.y, t.w, t.h, 5).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
-    if (t.horiz) {
-      g.roundRect(t.x, t.y, t.w * v, t.h, 5).fill(this.accent());
-      g.roundRect(t.x + t.w * v - 7, t.y - 6, 14, t.h + 12, 4)
-        .fill(theme.button)
-        .stroke({ width: 1, color: theme.text });
-    } else {
-      g.roundRect(t.x, t.y + t.h * (1 - v), t.w, t.h * v, 5).fill(this.accent());
-      g.roundRect(t.x - 12, t.y + t.h * (1 - v) - 7, t.w + 24, 14, 4)
-        .fill(theme.button)
-        .stroke({ width: 1, color: theme.text });
-    }
-    if (this.ctrlText) this.ctrlText.text = this.ctrlScaledText();
-  }
-
-  private xyPad(): { x: number; y: number; w: number; h: number } {
-    return {
-      x: 18,
-      y: TITLE_H + 8,
-      w: this.w - 36,
-      h: this.h - TITLE_H - 8 - 58,
-    };
-  }
-
-  private buildXyFace(): void {
-    this.ctrlG = new Graphics();
-    this.addChild(this.ctrlG);
-    this.drawXy();
-
-    const r = this.xyPad();
-    this.paramAnchors.set('x', { x: r.x + r.w / 2, y: r.y + r.h / 2 });
-    this.paramAnchors.set('y', { x: r.x + r.w / 2, y: r.y + r.h / 2 });
-    const hit = new Graphics().rect(r.x, r.y, r.w, r.h).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'crosshair';
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      appState.beginUndoable();
-      const local = this.toLocal(e.global);
-      this.setCtrl('x', (local.x - r.x) / r.w);
-      this.setCtrl('y', 1 - (local.y - r.y) / r.h);
-      this.drawXy();
-      const sx = this.instance.params.x ?? 0.5;
-      const sy = this.instance.params.y ?? 0.5;
-      const startX = e.clientX;
-      const startY = e.clientY;
-      const scale = this.worldTransform.a || 1;
-      const onMove = (ev: PointerEvent) => {
-        this.setCtrl('x', sx + (ev.clientX - startX) / scale / r.w);
-        this.setCtrl('y', sy - (ev.clientY - startY) / scale / r.h);
-        this.drawXy();
-      };
-      const onUp = () => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        if (Math.round(this.instance.params.spring ?? 0) === 1) {
-          this.setCtrl('x', 0.5);
-          this.setCtrl('y', 0.5);
-          this.drawXy();
-        }
-      };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-    });
-    hit.on('pointerover', (ev) =>
-      this.tooltip.show(['XY pad: drag the puck. X and Y are separate control outputs.'], ev.clientX, ev.clientY),
-    );
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-
-    this.buildSelector(this.paramCtrl(this.paramSpec('spring')), this.w / 2, this.h - 32, 12);
-  }
-
-  drawXy(): void {
-    if (!this.ctrlG || this.instance.type !== 'xy') return;
-    const r = this.xyPad();
-    const vx = Math.min(1, Math.max(0, this.instance.params.x ?? 0.5));
-    const vy = Math.min(1, Math.max(0, this.instance.params.y ?? 0.5));
-    const px = r.x + vx * r.w;
-    const py = r.y + (1 - vy) * r.h;
-    const g = this.ctrlG;
-    g.clear();
-    g.roundRect(r.x, r.y, r.w, r.h, 6).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
-    g.moveTo(r.x + r.w / 2, r.y).lineTo(r.x + r.w / 2, r.y + r.h).stroke({ width: 1, color: theme.moduleStroke });
-    g.moveTo(r.x, r.y + r.h / 2).lineTo(r.x + r.w, r.y + r.h / 2).stroke({ width: 1, color: theme.moduleStroke });
-    g.moveTo(px, r.y).lineTo(px, r.y + r.h).stroke({ width: 1, color: theme.textDim, alpha: 0.4 });
-    g.moveTo(r.x, py).lineTo(r.x + r.w, py).stroke({ width: 1, color: theme.textDim, alpha: 0.4 });
-    g.circle(px, py, 9).fill(this.accent()).stroke({ width: 2, color: theme.text });
-  }
-
-  private buttonRect(): { x: number; y: number; w: number; h: number } {
-    return { x: 22, y: TITLE_H + 10, w: this.w - 44, h: this.h - TITLE_H - 72 };
-  }
-
-  private buildButtonFace(): void {
-    this.ctrlG = new Graphics();
-    this.addChild(this.ctrlG);
-    this.drawButton();
-
-    const r = this.buttonRect();
-    this.paramAnchors.set('value', { x: r.x + r.w / 2, y: r.y + r.h / 2 });
-    const hit = new Graphics().rect(r.x, r.y, r.w, r.h).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'pointer';
-    const release = () => {
-      if (Math.round(this.instance.params.mode ?? 0) === 0 && (this.instance.params.value ?? 0) > 0.5) {
-        this.setCtrl('value', 0);
-        this.drawButton();
-      }
-    };
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      if (Math.round(this.instance.params.mode ?? 0) === 0) {
-        // Momentary presses are transient — not worth an undo step.
-        this.setCtrl('value', 1);
-      } else {
-        appState.beginUndoable();
-        this.setCtrl('value', (this.instance.params.value ?? 0) > 0.5 ? 0 : 1);
-      }
-      this.drawButton();
-    });
-    hit.on('pointerup', release);
-    hit.on('pointerupoutside', release);
-    hit.on('pointerover', (ev) =>
-      this.tooltip.show(['Button: hold (momentary) or click (toggle). Output is 0 or 1.'], ev.clientX, ev.clientY),
-    );
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-
-    this.buildSelector(this.paramCtrl(this.paramSpec('mode')), this.w / 2, this.h - 34, 12);
-  }
-
-  drawButton(): void {
-    if (!this.ctrlG || this.instance.type !== 'button') return;
-    const r = this.buttonRect();
-    const on = (this.instance.params.value ?? 0) > 0.5;
-    const g = this.ctrlG;
-    g.clear();
-    g.roundRect(r.x, r.y, r.w, r.h, 10)
-      .fill(on ? this.accent() : theme.button)
-      .stroke({ width: 2, color: on ? theme.text : theme.moduleStroke });
   }
 
   // -- mixer face: 5 console strips (4 channels + master bus) --------------------
