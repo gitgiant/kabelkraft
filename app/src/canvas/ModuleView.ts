@@ -45,6 +45,7 @@ import { PeqFace } from './faces/peq';
 import { ButtonFace, KnobFace, SliderFace, XyFace } from './faces/controls';
 import { StringFace } from './faces/string';
 import { SpectrumFace } from './faces/spectrum';
+import { GranularFace } from './faces/granular';
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
@@ -245,16 +246,7 @@ export class ModuleView extends Container {
     pluck: { make: () => new StringFace(), customLayout: true },
     resonator: { make: () => new StringFace(), customLayout: true },
     addosc: { make: () => new SpectrumFace(), customLayout: true },
-    granular: {
-      build: (v) =>
-        v.buildParamFace({
-          display: (c) => {
-            v.buildGrainDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4) - 22);
-            v.buildGranularSample(c.x, c.bottom - 16, c.gw);
-          },
-        }),
-      customLayout: true,
-    },
+    granular: { make: () => new GranularFace(), customLayout: true },
     stt: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
     textinput: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
     transporttext: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
@@ -2008,69 +2000,6 @@ export class ModuleView extends Container {
     g.stroke({ width: 1.8, color: 0xffb13d });
   }
 
-  // -- granular grain cloud + sample load ------------------------------------
-
-  private grainG: Graphics | null = null;
-  private grainRect = { x: 0, y: 0, w: 0, h: 0 };
-  private grainSampleText: Text | null = null;
-
-  private buildGrainDisplay(x: number, y: number, w: number, h: number): void {
-    this.grainRect = { x, y, w: Math.max(40, w), h: Math.max(24, h) };
-    this.grainG = new Graphics();
-    this.addChild(this.grainG);
-    this.drawGrains(null);
-  }
-
-  private drawGrains(data: { g: Float32Array; c: number } | null): void {
-    const g = this.grainG;
-    if (!g) return;
-    const { x, y, w, h } = this.grainRect;
-    g.clear();
-    g.roundRect(x, y, w, h, 4).fill({ color: 0x0d0d14 }).stroke({ width: 1, color: 0x2a2a36 });
-    if (!data || data.c === 0) return;
-    const c = data.c;
-    for (let i = 0; i < c; i++) {
-      const gx = x + 4 + Math.min(1, Math.max(0, data.g[i * 3])) * (w - 8);
-      // y by playback rate (pitch): map ~0.25..4× across the height (log2)
-      const rate = data.g[i * 3 + 1] || 1;
-      const ny = Math.min(1, Math.max(0, (Math.log2(rate) + 2) / 4));
-      const gy = y + h - 4 - ny * (h - 8);
-      const phase = data.g[i * 3 + 2];
-      const a = Math.sin(Math.PI * Math.min(1, Math.max(0, phase))); // fade in/out
-      g.circle(gx, gy, 2).fill({ color: this.accent(), alpha: 0.25 + 0.6 * a });
-    }
-  }
-
-  private buildGranularSample(x: number, y: number, w: number): void {
-    this.grainSampleText = new Text({ text: '', style: { fontSize: 10, fill: theme.textDim } });
-    this.grainSampleText.position.set(x, y);
-    this.grainSampleText.eventMode = 'static';
-    this.grainSampleText.cursor = 'pointer';
-    this.grainSampleText.on('pointerdown', (e) => {
-      e.stopPropagation();
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'audio/*';
-      input.onchange = () => {
-        const file = input.files?.[0];
-        if (file) void appState.loadSampleFile(this.instance.id, file);
-      };
-      input.click();
-    });
-    this.grainSampleText.on('pointerover', (e) =>
-      this.tooltip.show(['Sample', 'Click to load an audio file to granulate (Source = sample).'], e.clientX, e.clientY),
-    );
-    this.grainSampleText.on('pointerout', () => this.tooltip.hide());
-    this.addChild(this.grainSampleText);
-    this.updateGrainSampleName();
-  }
-
-  private updateGrainSampleName(): void {
-    if (!this.grainSampleText) return;
-    const s = appState.samples.get(this.instance.id);
-    this.grainSampleText.text = s ? `♪ ${s.name}` : '＋ load sample…';
-  }
-
   // -- recorder face -----------------------------------------------------------
 
   private recButton: Graphics | null = null;
@@ -2623,10 +2552,6 @@ export class ModuleView extends Container {
         this.wtLastDraw = { pos, morph };
         this.drawWtDisplay(pos, morph);
       }
-    }
-    if (this.grainG) {
-      this.drawGrains(appState.grainData[this.instance.id] ?? null);
-      this.updateGrainSampleName();
     }
     if (this.textFaceLine) this.updateTextFace();
     if (this.compG) {
