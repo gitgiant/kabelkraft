@@ -43,6 +43,8 @@ import { VcfFace } from './faces/vcf';
 import { EnvelopeFace } from './faces/envelope';
 import { PeqFace } from './faces/peq';
 import { ButtonFace, KnobFace, SliderFace, XyFace } from './faces/controls';
+import { StringFace } from './faces/string';
+import { SpectrumFace } from './faces/spectrum';
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
@@ -240,9 +242,9 @@ export class ModuleView extends Container {
     smpl: { build: (v) => v.buildParamFace({ display: (c) => v.buildSamplerFace(c.x, c.top + c.band + 6, c.gw) }), customLayout: true },
     visualizer: { build: (v) => v.buildParamFace({ display: (c) => v.buildVisFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true, unbounded: true },
     wtosc: { build: (v) => v.buildParamFace({ bottomRow: 'wavetable', display: (c) => v.buildWtDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4)) }), customLayout: true },
-    pluck: { build: (v) => v.buildParamFace({ display: (c) => v.buildStringDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4)) }), customLayout: true },
-    resonator: { build: (v) => v.buildParamFace({ display: (c) => v.buildStringDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4)) }), customLayout: true },
-    addosc: { build: (v) => v.buildParamFace({ display: (c) => v.buildSpectrumDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4)) }), refresh: (v) => v.drawSpectrum(), customLayout: true },
+    pluck: { make: () => new StringFace(), customLayout: true },
+    resonator: { make: () => new StringFace(), customLayout: true },
+    addosc: { make: () => new SpectrumFace(), customLayout: true },
     granular: {
       build: (v) =>
         v.buildParamFace({
@@ -1179,7 +1181,7 @@ export class ModuleView extends Container {
    * rail and a type-specific display below. The rail and band arithmetic lives
    * here so every compositional face shares it (see the FACES table).
    */
-  private buildParamFace(opts: {
+  buildParamFace(opts: {
     rail?: 'vmeterOut' | 'vmeterIn' | 'grmeter';
     bottomRow?: 'wavetable' | 'midi' | 'audioIn' | 'audioOut';
     display?: (ctx: { x: number; top: number; gw: number; band: number; bottom: number }) => void;
@@ -2006,84 +2008,6 @@ export class ModuleView extends Container {
     g.stroke({ width: 1.8, color: 0xffb13d });
   }
 
-  // -- pluck / resonator string display --------------------------------------
-
-  private stringG: Graphics | null = null;
-  private stringRect = { x: 0, y: 0, w: 0, h: 0 };
-  private stringWasActive = false;
-
-  private buildStringDisplay(x: number, y: number, w: number, h: number): void {
-    this.stringRect = { x, y, w: Math.max(40, w), h: Math.max(30, h) };
-    this.stringG = new Graphics();
-    this.addChild(this.stringG);
-    this.drawString(null);
-  }
-
-  private drawString(data: { s: Float32Array; a: number } | null): void {
-    const g = this.stringG;
-    if (!g) return;
-    const { x, y, w, h } = this.stringRect;
-    g.clear();
-    g.roundRect(x, y, w, h, 4).fill({ color: 0x0d0d14 }).stroke({ width: 1, color: 0x2a2a36 });
-    const cy = y + h / 2;
-    const arr = data ? data.s : null;
-    if (!arr || arr.length === 0) {
-      g.moveTo(x + 6, cy).lineTo(x + w - 6, cy).stroke({ width: 1.5, color: 0x4a4a64 });
-      return;
-    }
-    const N = arr.length;
-    let peak = 1e-4;
-    for (let k = 0; k < N; k++) { const a = Math.abs(arr[k]); if (a > peak) peak = a; }
-    const amp = (h / 2 - 6) / Math.max(0.2, peak);
-    const active = !!(data && data.a > 0.5);
-    for (let k = 0; k < N; k++) {
-      const px = x + 6 + (k / (N - 1)) * (w - 12);
-      const py = cy - arr[k] * amp;
-      if (k === 0) g.moveTo(px, py); else g.lineTo(px, py);
-    }
-    g.stroke({ width: 1.8, color: active ? 0xffb13d : 0x6a6a84 });
-  }
-
-  // -- additive spectrum display (UI-computed from params) -------------------
-
-  private spectrumG: Graphics | null = null;
-  private spectrumRect = { x: 0, y: 0, w: 0, h: 0 };
-
-  private buildSpectrumDisplay(x: number, y: number, w: number, h: number): void {
-    this.spectrumRect = { x, y, w: Math.max(40, w), h: Math.max(30, h) };
-    this.spectrumG = new Graphics();
-    this.addChild(this.spectrumG);
-    this.drawSpectrum();
-  }
-
-  private drawSpectrum(): void {
-    const g = this.spectrumG;
-    if (!g) return;
-    const { x, y, w, h } = this.spectrumRect;
-    g.clear();
-    g.roundRect(x, y, w, h, 4).fill({ color: 0x0d0d14 }).stroke({ width: 1, color: 0x2a2a36 });
-    const p = this.instance.params;
-    const P = Math.max(1, Math.min(64, Math.round(Number(p.partials) || 16)));
-    const tExp = (Number(p.tilt) || 0) / 6.0206;
-    const b = Math.min(1, Math.max(0, Number(p.odd ?? 0.5))) * 2 - 1;
-    const gains: number[] = [];
-    let peak = 1e-4;
-    for (let hh = 1; hh <= P; hh++) {
-      let gv = Math.pow(hh, tExp);
-      if (b > 0) { if (hh % 2 === 0) gv *= 1 - b; }
-      else if (b < 0) { if (hh % 2 === 1) gv *= 1 + b; }
-      gains.push(gv);
-      if (gv > peak) peak = gv;
-    }
-    const bw = (w - 12) / P;
-    const base = y + h - 6;
-    for (let i = 0; i < P; i++) {
-      const bh = (gains[i] / peak) * (h - 12);
-      const bx = x + 6 + i * bw;
-      g.rect(bx, base - bh, Math.max(1, bw - 1), bh).fill({ color: this.accent(), alpha: 0.85 });
-    }
-  }
-
   // -- granular grain cloud + sample load ------------------------------------
 
   private grainG: Graphics | null = null;
@@ -2698,13 +2622,6 @@ export class ModuleView extends Container {
       if (Math.abs(pos - this.wtLastDraw.pos) > 0.002 || Math.abs(morph - this.wtLastDraw.morph) > 0.002) {
         this.wtLastDraw = { pos, morph };
         this.drawWtDisplay(pos, morph);
-      }
-    }
-    if (this.stringG) {
-      const d = appState.stringData[this.instance.id];
-      if (d || this.stringWasActive) {
-        this.drawString(d ?? null);
-        this.stringWasActive = !!(d && d.a > 0.5);
       }
     }
     if (this.grainG) {
