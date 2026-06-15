@@ -200,6 +200,22 @@ const KEYS: KeySpec[] = [
   { semitone: 10, black: true }, { semitone: 11, black: false },
 ];
 
+/**
+ * One module type's tile face: how to build the body, how to redraw it on a
+ * param change, and the sizing flags that used to live in three parallel Sets.
+ * Replaces the buildFace()/refreshParams() type switches with a table lookup.
+ */
+interface FaceEntry {
+  build(view: ModuleView): void;
+  refresh?(view: ModuleView): void;
+  /** Hand-tuned layout that should not auto-fit to a param grid. */
+  customLayout?: boolean;
+  /** No upper size cap (hosts nested editors/canvases). */
+  unbounded?: boolean;
+  /** Cannot shrink below the def's default size. */
+  fixedMin?: boolean;
+}
+
 export class ModuleView extends Container {
   readonly portCenters = new Map<string, { x: number; y: number }>();
   private body = new Graphics();
@@ -220,8 +236,74 @@ export class ModuleView extends Container {
   /** Resolved live tint (packed RGB); null = default accent. */
   private liveColor: number | null = null;
 
-  /** Faces whose fixed layout cannot shrink below the def's default size. */
-  private static readonly FIXED_MIN_TYPES = new Set(['transport']);
+  /**
+   * Per-type face table — the single source replacing the old buildFace() and
+   * refreshParams() type switches and the three sizing Sets. `private` methods
+   * are reachable from these arrows because TS access is class-scoped.
+   */
+  private static readonly FACES: Record<string, FaceEntry> = {
+    // -- fully custom faces (own their whole body) --------------------------
+    peq: { build: (v) => v.buildPeqFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawPeqCurve(), customLayout: true },
+    vcf: { build: (v) => v.buildVcfFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawVcfCurve(), customLayout: true },
+    envelope: { build: (v) => v.buildEnvelopeFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawEnvCurve(), customLayout: true },
+    knob: { build: (v) => v.buildKnobFace(), refresh: (v) => v.drawKnob(), customLayout: true },
+    slider: { build: (v) => v.buildSliderFace(), refresh: (v) => v.drawSlider(), customLayout: true },
+    xy: { build: (v) => v.buildXyFace(), refresh: (v) => v.drawXy(), customLayout: true },
+    button: { build: (v) => v.buildButtonFace(), refresh: (v) => v.drawButton(), customLayout: true },
+    mixer: { build: (v) => v.buildMixerFace(10, TITLE_H + 18, v.w - 20), customLayout: true },
+    composer: { build: (v) => v.buildComposerFace(10, TITLE_H + 6, v.w - 20), customLayout: true, unbounded: true },
+    levels: { build: (v) => v.buildVMeter(v.w / 2 - 12, TITLE_H + 18, 24, v.h - TITLE_H - 32), customLayout: true },
+    recorder: {
+      build: (v) => {
+        v.buildRecorderFace(10, TITLE_H + 10, v.w - 56);
+        v.buildVMeter(v.w - 32, TITLE_H + 18, 14, v.h - TITLE_H - 32);
+      },
+      customLayout: true,
+    },
+    modmatrix: { build: (v) => v.buildModMatrixFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawModMatrix(), customLayout: true },
+    intelligence: { build: (v) => v.buildIntelligenceFace(10, TITLE_H + 6, v.w - 20), customLayout: true },
+
+    // -- compositional: param band + optional edge rails / display below ----
+    keyboard: { build: (v) => v.buildParamFace({ display: (c) => v.buildKeys(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
+    transport: { build: (v) => v.buildParamFace({ display: (c) => v.buildTransportButtons(v.w / 2 - 84, c.top + c.band + 10) }), customLayout: true, fixedMin: true },
+    sequencer: { build: (v) => v.buildParamFace({ display: (c) => v.buildStepGrid(c.x, c.top + c.band + 6, c.gw) }), customLayout: true },
+    smpl: { build: (v) => v.buildParamFace({ display: (c) => v.buildSamplerFace(c.x, c.top + c.band + 6, c.gw) }), customLayout: true },
+    visualizer: { build: (v) => v.buildParamFace({ display: (c) => v.buildVisFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true, unbounded: true },
+    wtosc: { build: (v) => v.buildParamFace({ bottomRow: 'wavetable', display: (c) => v.buildWtDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4)) }), customLayout: true },
+    pluck: { build: (v) => v.buildParamFace({ display: (c) => v.buildStringDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4)) }), customLayout: true },
+    resonator: { build: (v) => v.buildParamFace({ display: (c) => v.buildStringDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4)) }), customLayout: true },
+    addosc: { build: (v) => v.buildParamFace({ display: (c) => v.buildSpectrumDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4)) }), refresh: (v) => v.drawSpectrum(), customLayout: true },
+    granular: {
+      build: (v) =>
+        v.buildParamFace({
+          display: (c) => {
+            v.buildGrainDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4) - 22);
+            v.buildGranularSample(c.x, c.bottom - 16, c.gw);
+          },
+        }),
+      customLayout: true,
+    },
+    stt: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
+    textinput: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
+    transporttext: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
+    notenames: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
+    lyrics: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
+    audioIn: { build: (v) => v.buildParamFace({ rail: 'vmeterIn', bottomRow: 'audioIn' }), customLayout: true },
+    audioOut: { build: (v) => v.buildParamFace({ rail: 'vmeterOut', bottomRow: 'audioOut' }), customLayout: true },
+    compressor: { build: (v) => v.buildParamFace({ rail: 'grmeter' }), customLayout: true },
+    limiter: { build: (v) => v.buildParamFace({ rail: 'grmeter' }), customLayout: true },
+    mbcomp: { build: (v) => v.buildParamFace({ rail: 'grmeter' }), customLayout: true },
+    midiIn: { build: (v) => v.buildParamFace({ bottomRow: 'midi' }), customLayout: true },
+    midiOut: { build: (v) => v.buildParamFace({ bottomRow: 'midi' }), customLayout: true },
+    bgvisual: { build: (v) => v.buildParamFace(), customLayout: true },
+  };
+
+  /** Pure param-grid modules (delay, reverb, lfo…) with no special layout. */
+  private static readonly DEFAULT_FACE: FaceEntry = { build: (v) => v.buildParamFace() };
+
+  private faceEntry(): FaceEntry {
+    return ModuleView.FACES[this.instance.type] ?? ModuleView.DEFAULT_FACE;
+  }
 
   constructor(
     readonly instance: ModuleInstance,
@@ -239,20 +321,11 @@ export class ModuleView extends Container {
 
   // -- size ----------------------------------------------------------------
 
-  /** Types whose face draws its own layout (curves, displays, device rows,
-   * embedded editors) — they keep their hand-tuned def size; everything else
-   * is a pure param grid and auto-fits to its content. */
-  private static readonly CUSTOM_LAYOUT_TYPES = new Set([
-    'peq', 'vcf', 'envelope', 'knob', 'slider', 'xy', 'button', 'mixer',
-    'composer', 'levels', 'recorder', 'modmatrix', 'intelligence', 'audioOut',
-    'audioIn', 'compressor', 'limiter', 'mbcomp', 'wtosc', 'midiIn', 'midiOut',
-    'keyboard', 'transport', 'sequencer', 'smpl', 'visualizer', 'bgvisual',
-    'stt', 'textinput', 'transporttext', 'notenames', 'lyrics', 'pluck',
-    'resonator', 'addosc', 'granular',
-  ]);
-
+  /** A face draws its own layout (curves, displays, device rows, embedded
+   * editors) when its entry is flagged customLayout — it keeps the def's
+   * hand-tuned size; everything else is a pure param grid that auto-fits. */
   private isCustomLayout(): boolean {
-    return ModuleView.CUSTOM_LAYOUT_TYPES.has(this.instance.type) || !!this.def.customFace;
+    return !!this.faceEntry().customLayout || !!this.def.customFace;
   }
 
   /** Minimal tile size for a pure param grid: title + the densest band that
@@ -289,15 +362,11 @@ export class ModuleView extends Container {
     return this.clampSize(this.instance.h ?? this.def.height, this.def.height);
   }
 
-  /** Container tiles host nested editors/canvases — no upper size cap. */
-  private static readonly UNBOUNDED_TYPES = new Set(['composer', 'visualizer']);
-
   private clampSize(v: number, base: number): number {
-    const lo = ModuleView.FIXED_MIN_TYPES.has(this.instance.type)
-      ? base
-      : Math.max(80, base * 0.7);
+    const entry = this.faceEntry();
+    const lo = entry.fixedMin ? base : Math.max(80, base * 0.7);
     const min = Math.max(lo, this.rollMin(base), v);
-    return ModuleView.UNBOUNDED_TYPES.has(this.instance.type) ? min : Math.min(base * 3, min);
+    return entry.unbounded ? min : Math.min(base * 3, min);
   }
 
   /** While the piano roll is open inside a composer, the tile can't shrink
@@ -1121,170 +1190,57 @@ export class ModuleView extends Container {
   // -- face dispatch -----------------------------------------------------------
 
   private buildFace(): void {
-    const type = this.instance.type;
+    this.faceEntry().build(this);
+  }
+
+  /**
+   * Param-grid faces: a knob band, with an optional edge meter / device-row
+   * rail and a type-specific display below. The rail and band arithmetic lives
+   * here so every compositional face shares it (see the FACES table).
+   */
+  private buildParamFace(opts: {
+    rail?: 'vmeterOut' | 'vmeterIn' | 'grmeter';
+    bottomRow?: 'wavetable' | 'midi' | 'audioIn' | 'audioOut';
+    display?: (ctx: { x: number; top: number; gw: number; band: number; bottom: number }) => void;
+  } = {}): void {
     const x = 10;
     const w = this.w - 20;
     const top = TITLE_H + 6;
-
-    // Fully custom faces.
-    if (type === 'peq') {
-      this.buildPeqFace(x, top, w);
-      return;
-    }
-    if (type === 'vcf') {
-      this.buildVcfFace(x, top, w);
-      return;
-    }
-    if (type === 'envelope') {
-      this.buildEnvelopeFace(x, top, w);
-      return;
-    }
-    if (type === 'knob') {
-      this.buildKnobFace();
-      return;
-    }
-    if (type === 'slider') {
-      this.buildSliderFace();
-      return;
-    }
-    if (type === 'xy') {
-      this.buildXyFace();
-      return;
-    }
-    if (type === 'button') {
-      this.buildButtonFace();
-      return;
-    }
-    if (type === 'mixer') {
-      this.buildMixerFace(x, top + 12, w);
-      return;
-    }
-    if (type === 'composer') {
-      this.buildComposerFace(x, top, w);
-      return;
-    }
-    if (type === 'levels') {
-      this.buildVMeter(this.w / 2 - 12, top + 12, 24, this.h - top - 26);
-      return;
-    }
-    if (type === 'recorder') {
-      this.buildRecorderFace(x, top + 4, w - 36);
-      this.buildVMeter(this.w - 32, top + 12, 14, this.h - top - 26);
-      return;
-    }
-    if (type === 'modmatrix') {
-      this.buildModMatrixFace(x, top, w);
-      return;
-    }
-    if (type === 'intelligence') {
-      this.buildIntelligenceFace(x, top, w);
-      return;
-    }
-
     const ctrls = this.visibleParams().map((p) => this.paramCtrl(p));
 
-    // Vertical meters live in a right-edge column.
+    // Vertical meter rail in a right-edge column.
     let right = this.w - 10;
-    if (type === 'audioOut') {
+    if (opts.rail === 'vmeterOut') {
       this.buildVMeter(this.w - 30, top + 12, 14, this.h - top - 26);
       right = this.w - 44;
-    }
-    if (type === 'audioIn') {
+    } else if (opts.rail === 'vmeterIn') {
       this.buildVMeter(this.w - 30, top + 12, 14, this.h - top - 40);
       right = this.w - 44;
-    }
-    if (type === 'compressor' || type === 'limiter' || type === 'mbcomp') {
+    } else if (opts.rail === 'grmeter') {
       this.buildGrMeter(this.w - 28, top + 12, 12, this.h - top - 26);
       right = this.w - 42;
     }
 
-    // Bottom-anchored utility rows.
+    // Bottom-anchored utility row.
     let bottom = this.h - 8;
-    if (type === 'wtosc') {
+    if (opts.bottomRow === 'wavetable') {
       this.buildWavetableRow(x, this.h - 40, w);
       bottom -= 42;
-    }
-    if (type === 'midiIn' || type === 'midiOut') {
+    } else if (opts.bottomRow === 'midi') {
       this.buildMidiDeviceRow(x, this.h - 24, w);
       bottom -= 26;
-    }
-    if (type === 'audioIn') {
+    } else if (opts.bottomRow === 'audioIn') {
       this.buildAudioDeviceRow(x, this.h - 24, w);
       bottom -= 26;
-    }
-    if (type === 'audioOut') {
+    } else if (opts.bottomRow === 'audioOut') {
       this.buildAudioOutputDeviceRow(x, this.h - 24, w);
       bottom -= 26;
     }
 
     const gw = right - x;
-
-    // Modules with a stretching extra face get a fixed knob band on top.
-    if (type === 'keyboard') {
-      const band = this.ctrlBandH(ctrls, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw);
-      this.buildKeys(x, top + band + 4, gw);
-      return;
-    }
-    if (type === 'transport') {
-      const band = this.ctrlBandH(ctrls, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw);
-      this.buildTransportButtons(this.w / 2 - 84, top + band + 10);
-      return;
-    }
-    if (type === 'sequencer') {
-      const band = this.ctrlBandH(ctrls, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw);
-      this.buildStepGrid(x, top + band + 6, gw);
-      return;
-    }
-    if (type === 'smpl') {
-      const band = this.ctrlBandH(ctrls, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw);
-      this.buildSamplerFace(x, top + band + 6, gw);
-      return;
-    }
-    if (type === 'visualizer') {
-      const band = this.ctrlBandH(ctrls, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw);
-      this.buildVisFace(x, top + band + 4, gw);
-      return;
-    }
-    if (type === 'stt' || type === 'textinput' || type === 'transporttext' || type === 'notenames' || type === 'lyrics') {
-      const band = this.ctrlBandH(ctrls, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw);
-      this.buildTextFace(x, top + band + 4, gw);
-      return;
-    }
-
-    if (type === 'wtosc') {
-      const band = this.ctrlBandH(ctrls, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw);
-      this.buildWtDisplay(x, top + band + 4, gw, bottom - (top + band + 4));
-      return;
-    }
-    if (type === 'pluck' || type === 'resonator') {
-      const band = this.ctrlBandH(ctrls, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw);
-      this.buildStringDisplay(x, top + band + 4, gw, bottom - (top + band + 4));
-      return;
-    }
-    if (type === 'addosc') {
-      const band = this.ctrlBandH(ctrls, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw);
-      this.buildSpectrumDisplay(x, top + band + 4, gw, bottom - (top + band + 4));
-      return;
-    }
-    if (type === 'granular') {
-      const band = this.ctrlBandH(ctrls, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw);
-      this.buildGrainDisplay(x, top + band + 4, gw, bottom - (top + band + 4) - 22);
-      this.buildGranularSample(x, bottom - 16, gw);
-      return;
-    }
-
-    // Pure param modules: the knob grid stretches over the whole face.
+    const band = this.ctrlBandH(ctrls, gw);
     this.buildCtrlGrid(ctrls, x, top, gw);
+    opts.display?.({ x, top, gw, band, bottom });
   }
 
   // -- filter (vcf) face: knobs + response curve -----------------------------
@@ -3454,15 +3410,7 @@ export class ModuleView extends Container {
 
   refreshParams(): void {
     this.runCtrlRedraws();
-    if (this.instance.type === 'peq') this.drawPeqCurve();
-    if (this.instance.type === 'vcf') this.drawVcfCurve();
-    if (this.instance.type === 'envelope') this.drawEnvCurve();
-    if (this.instance.type === 'knob') this.drawKnob();
-    if (this.instance.type === 'slider') this.drawSlider();
-    if (this.instance.type === 'xy') this.drawXy();
-    if (this.instance.type === 'button') this.drawButton();
-    if (this.instance.type === 'modmatrix') this.drawModMatrix();
-    if (this.instance.type === 'addosc') this.drawSpectrum();
+    this.faceEntry().refresh?.(this);
   }
 
   // -- type-specific faces --------------------------------------------------
