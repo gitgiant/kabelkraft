@@ -26,7 +26,6 @@ import {
   framePoints,
   type WtTable,
 } from '../core/wavetable';
-import { bandCoefs, biquadResponseDb, chainResponseDb } from '../core/eqmath';
 import { isTouchMode } from '../core/mobile';
 import { appState } from '../state';
 import { ensureAudioPermission, listAudioDevices } from '../engine/devices';
@@ -42,6 +41,7 @@ import type { Tooltip } from './Tooltip';
 import type { FaceDef, FaceRenderer } from './faces/types';
 import { VcfFace } from './faces/vcf';
 import { EnvelopeFace } from './faces/envelope';
+import { PeqFace } from './faces/peq';
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
@@ -212,7 +212,7 @@ export class ModuleView extends Container {
    */
   private static readonly FACES: Record<string, FaceDef> = {
     // -- fully custom faces (own their whole body) --------------------------
-    peq: { build: (v) => v.buildPeqFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawPeqCurve(), customLayout: true },
+    peq: { make: () => new PeqFace(), customLayout: true },
     vcf: { make: () => new VcfFace(), customLayout: true },
     envelope: { make: () => new EnvelopeFace(), customLayout: true },
     knob: { build: (v) => v.buildKnobFace(), refresh: (v) => v.drawKnob(), customLayout: true },
@@ -388,11 +388,7 @@ export class ModuleView extends Container {
     this.lastCompData = null;
     this.visG = null;
     this.midiDeviceText = null;
-    this.peqPlot = null;
-    this.peqSpectrumG = null;
-    this.peqDots = [];
-    this.lastSpectrum = null;
-    // (vcf curve state now lives on VcfFace)
+    // (peq/vcf curve state now lives on their FaceRenderer objects)
     this.wtRowTextA = null;
     this.wtRowTextB = null;
     this.wtDisplay = null;
@@ -2200,173 +2196,6 @@ export class ModuleView extends Container {
 
   // -- parametric EQ face (PRD §8.4: curve + dots + live spectrum) -------------
 
-  private static readonly PEQ_COLORS = [0xff5050, 0xffb13d, 0x52e07a, 0x3dd9ff, 0xb070ff, 0xff3dd0];
-
-  private peqPlot: Graphics | null = null;
-  private peqSpectrumG: Graphics | null = null;
-  private peqDots: Graphics[] = [];
-  private peqRect = { x: 0, y: 0, w: 0, h: 0 };
-  private lastSpectrum: number[] | null = null;
-
-  private peqFreqToX(f: number): number {
-    const { x, w } = this.peqRect;
-    return x + (Math.log10(Math.max(20, f) / 20) / 3) * w;
-  }
-
-  private peqGainToY(db: number): number {
-    const { y, h } = this.peqRect;
-    return y + h / 2 - (db / 18) * (h / 2);
-  }
-
-  private buildPeqFace(x: number, y: number, w: number): void {
-    const h = this.h - y - 14;
-    this.peqRect = { x, y, w, h };
-
-    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(theme.inset);
-    this.addChild(bg);
-    this.peqSpectrumG = new Graphics();
-    this.addChild(this.peqSpectrumG);
-    this.peqPlot = new Graphics();
-    this.peqPlot.eventMode = 'none';
-    this.addChild(this.peqPlot);
-
-    for (let n = 1; n <= 6; n++) {
-      const dot = new Graphics();
-      dot.circle(0, 0, 6).fill(ModuleView.PEQ_COLORS[n - 1]).stroke({ width: 1.5, color: 0x16161c });
-      dot.eventMode = 'static';
-      dot.cursor = 'move';
-      dot.hitArea = { contains: (px: number, py: number) => px * px + py * py < 14 * 14 };
-      dot.on('pointerdown', (e) => {
-        e.stopPropagation();
-        this.beginPeqBandDrag(n, e);
-      });
-      dot.on('pointerover', (e) => {
-        const p = this.instance.params;
-        this.tooltip.show(
-          [`Band ${n}: ${this.peqBandLabel(n)}`,
-            `${Math.round(p[`b${n}freq`])} Hz, ${p[`b${n}gain`].toFixed(1)} dB, Q ${p[`b${n}q`].toFixed(2)}. Drag: freq/gain. Shift-drag: Q. Click: type.`],
-          e.clientX,
-          e.clientY,
-        );
-      });
-      dot.on('pointerout', () => this.tooltip.hide());
-      this.addChild(dot);
-      this.peqDots.push(dot);
-    }
-    this.drawPeqCurve();
-  }
-
-  private peqBandLabel(n: number): string {
-    const types = ['peak', 'lo-shelf', 'hi-shelf', 'lo-cut', 'hi-cut'];
-    return types[Math.round(this.instance.params[`b${n}type`] ?? 0)] ?? 'peak';
-  }
-
-  private beginPeqBandDrag(n: number, e: FederatedPointerEvent): void {
-    appState.beginUndoable();
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const p = this.instance.params;
-    const startFreq = p[`b${n}freq`] ?? 1000;
-    const startGain = p[`b${n}gain`] ?? 0;
-    const startQ = p[`b${n}q`] ?? 0.9;
-    let moved = false;
-
-    const onMove = (ev: PointerEvent) => {
-      const dx = ev.clientX - startX;
-      const dy = ev.clientY - startY;
-      if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
-      if (!moved) return;
-      if (ev.shiftKey) {
-        const q = Math.min(8, Math.max(0.3, startQ * Math.pow(2, -dy / 60)));
-        appState.setParam(this.instance.id, `b${n}q`, q);
-        this.tooltip.showNow([`Q ${q.toFixed(2)}`], ev.clientX, ev.clientY);
-      } else {
-        const freq = Math.min(20000, Math.max(20, startFreq * Math.pow(10, (dx / this.peqRect.w) * 3)));
-        const gain = Math.min(18, Math.max(-18, startGain - (dy / (this.peqRect.h / 2)) * 18));
-        appState.setParam(this.instance.id, `b${n}freq`, freq);
-        appState.setParam(this.instance.id, `b${n}gain`, gain);
-        this.tooltip.showNow([`${Math.round(freq)} Hz  ${gain.toFixed(1)} dB`], ev.clientX, ev.clientY);
-      }
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      this.tooltip.hide();
-      if (!moved) {
-        const next = (Math.round(this.instance.params[`b${n}type`] ?? 0) + 1) % 5;
-        appState.setParam(this.instance.id, `b${n}type`, next);
-      }
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-
-  /** Grid + combined response curve + dot positions. Called on param changes. */
-  private drawPeqCurve(): void {
-    if (!this.peqPlot) return;
-    const { x, y, w, h } = this.peqRect;
-    const g = this.peqPlot;
-    const sr = appState.engine.sampleRate;
-    g.clear();
-
-    for (const f of [100, 1000, 10000]) {
-      const gx = this.peqFreqToX(f);
-      g.moveTo(gx, y).lineTo(gx, y + h);
-    }
-    g.moveTo(x, y + h / 2).lineTo(x + w, y + h / 2);
-    g.stroke({ width: 1, color: 0xffffff, alpha: 0.08 });
-
-    const p = this.instance.params;
-    const bands = [];
-    for (let n = 1; n <= 6; n++) {
-      bands.push(
-        bandCoefs(
-          Math.round(p[`b${n}type`] ?? 0) as 0 | 1 | 2 | 3 | 4,
-          p[`b${n}freq`] ?? 1000,
-          p[`b${n}gain`] ?? 0,
-          p[`b${n}q`] ?? 0.9,
-          sr,
-        ),
-      );
-    }
-    let first = true;
-    for (let px = 0; px <= w; px += 3) {
-      const f = 20 * Math.pow(10, (3 * px) / w);
-      const db = Math.min(18, Math.max(-18, chainResponseDb(bands, f, sr)));
-      const gy = this.peqGainToY(db);
-      if (first) {
-        g.moveTo(x + px, gy);
-        first = false;
-      } else {
-        g.lineTo(x + px, gy);
-      }
-    }
-    g.stroke({ width: 2, color: 0xffb13d, alpha: 0.95 });
-
-    this.peqDots.forEach((dot, i) => {
-      const n = i + 1;
-      dot.position.set(
-        this.peqFreqToX(p[`b${n}freq`] ?? 1000),
-        this.peqGainToY(Math.min(18, Math.max(-18, p[`b${n}gain`] ?? 0))),
-      );
-    });
-  }
-
-  private drawPeqSpectrum(spectrum: number[]): void {
-    if (!this.peqSpectrumG) return;
-    const { x, y, w, h } = this.peqRect;
-    const g = this.peqSpectrumG;
-    g.clear();
-    g.moveTo(x, y + h);
-    spectrum.forEach((db, b) => {
-      const frac = Math.min(1, Math.max(0, (db + 80) / 80));
-      g.lineTo(x + ((b + 0.5) / spectrum.length) * w, y + h - frac * h);
-    });
-    g.lineTo(x + w, y + h);
-    g.closePath();
-    g.fill({ color: 0x3dd9ff, alpha: 0.16 });
-  }
-
   // -- gain-reduction meter (compressor/limiter/mbcomp): vertical red bar -------
 
   private grBar: Graphics | null = null;
@@ -3240,13 +3069,6 @@ export class ModuleView extends Container {
         this.lastCompPos = pos;
         this.lastCompData = this.instance.data;
         this.drawCompPreview(pos);
-      }
-    }
-    if (this.peqSpectrumG) {
-      const spectrum = appState.spectra[this.instance.id];
-      if (spectrum && spectrum !== this.lastSpectrum) {
-        this.lastSpectrum = spectrum;
-        this.drawPeqSpectrum(spectrum);
       }
     }
     this.face.live?.(this);
