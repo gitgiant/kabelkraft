@@ -39,6 +39,7 @@ import { IntelligenceFace } from './faces/intelligence';
 import { LevelsFace } from './faces/levels';
 import { RecorderFace } from './faces/recorder';
 import { ModmatrixFace } from './faces/modmatrix';
+import { MixerFace } from './faces/mixer';
 export { tickHiddenTintSource } from './faces/visThumb';
 
 
@@ -154,7 +155,7 @@ export class ModuleView extends Container {
     slider: { make: () => new SliderFace(), customLayout: true },
     xy: { make: () => new XyFace(), customLayout: true },
     button: { make: () => new ButtonFace(), customLayout: true },
-    mixer: { build: (v) => v.buildMixerFace(10, TITLE_H + 18, v.w - 20), customLayout: true },
+    mixer: { make: () => new MixerFace(), customLayout: true },
     composer: { build: (v) => v.buildComposerFace(10, TITLE_H + 6, v.w - 20), customLayout: true, unbounded: true },
     levels: { make: () => new LevelsFace(), customLayout: true },
     recorder: { make: () => new RecorderFace(), customLayout: true },
@@ -299,7 +300,6 @@ export class ModuleView extends Container {
     this.meterBar = null;
     this.clipDot = null;
     this.clipped = false;
-    this.mixMeters = [];
     this.grBar = null;
     this.compG = null;
     this.lastCompPos = -1;
@@ -578,6 +578,11 @@ export class ModuleView extends Container {
     const dot = this.portDots.get(portId);
     const port = this.def.ports.find((p) => p.id === portId);
     if (dot && port) this.drawPortDot(dot, port, on);
+  }
+
+  /** A port's dot Graphics — faces toggle visibility (e.g. mixer send poles). */
+  portDot(portId: string): Graphics | undefined {
+    return this.portDots.get(portId);
   }
 
   /** Brief red flash on a port that rejected a wire (PRD §4.3). */
@@ -976,7 +981,7 @@ export class ModuleView extends Container {
   }
 
   /** Vertical fader for a continuous control (mixer channel strips). */
-  private buildFader(c: CtrlSpec, x: number, y: number, w: number, h: number): void {
+  buildFader(c: CtrlSpec, x: number, y: number, w: number, h: number): void {
     this.paramAnchors.set(c.key, { x: x + w / 2, y: y + h / 2 });
     const g = new Graphics();
     this.addChild(g);
@@ -1129,86 +1134,6 @@ export class ModuleView extends Container {
   }
 
   // -- mixer face: 5 console strips (4 channels + master bus) --------------------
-
-  private mixMeters: Array<{
-    key: string;
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-    bar: Graphics;
-    dot: Graphics;
-    clipped: boolean;
-  }> = [];
-
-  private buildMixerFace(x: number, y: number, w: number): void {
-    const chW = w / 5;
-    const r = Math.max(9, Math.min(13, chW * 0.22));
-    const pitch = r * 2 + 24;
-    const knobIds = ['eqHi', 'eqMid', 'eqLo', 'filt', 'send'];
-    for (let ch = 1; ch <= 5; ch++) {
-      const cx = x + (ch - 1) * chW + chW / 2;
-      knobIds.forEach((pid, k) => {
-        this.buildKnob(this.paramCtrl(this.paramSpec(`${pid}${ch}`)), cx, y + r + 12 + k * pitch, r);
-      });
-      const panCy = this.h - r - 24;
-      this.buildKnob(this.paramCtrl(this.paramSpec(`pan${ch}`)), cx, panCy, r);
-
-      // Fader with its strip meter beside it (channels pre-fader, master = out).
-      const fy = y + 24 + knobIds.length * pitch;
-      const fh = Math.max(40, panCy - r - 30 - fy);
-      const fw = Math.max(10, Math.min(14, chW * 0.22));
-      const mw = 5;
-      const fx = cx - (fw + 3 + mw) / 2;
-      this.buildFader(this.paramCtrl(this.paramSpec(`lvl${ch}`)), fx, fy, fw, fh);
-      const mx = fx + fw + 3;
-      this.addChild(new Graphics().roundRect(mx, fy, mw, fh, 2).fill(theme.inset));
-      const bar = new Graphics();
-      bar.eventMode = 'none';
-      this.addChild(bar);
-      const dot = new Graphics();
-      dot.eventMode = 'static';
-      dot.cursor = 'pointer';
-      this.addChild(dot);
-      const m = {
-        key: ch === 5 ? this.instance.id : `${this.instance.id}:ch${ch}`,
-        x: mx,
-        y: fy,
-        w: mw,
-        h: fh,
-        bar,
-        dot,
-        clipped: false,
-      };
-      dot.circle(mx + mw / 2, fy - 6, 3).fill(0x550000);
-      dot.on('pointerdown', (e) => {
-        e.stopPropagation();
-        m.clipped = false;
-      });
-      this.mixMeters.push(m);
-    }
-  }
-
-  /** Send poles show only while their knob is up or a wire is attached. */
-  private updateSendPoles(): void {
-    let wired: Set<string> | null = null;
-    for (let ch = 1; ch <= 5; ch++) {
-      const pid = `send${ch}`;
-      const dot = this.portDots.get(pid);
-      if (!dot) continue;
-      if ((this.instance.params[pid] ?? 0) > 0.001) {
-        dot.visible = true;
-        continue;
-      }
-      if (!wired) {
-        wired = new Set();
-        for (const wire of appState.graph.wires.values()) {
-          if (wire.from.moduleId === this.instance.id) wired.add(wire.from.portId);
-        }
-      }
-      dot.visible = wired.has(pid);
-    }
-  }
 
   // -- composer face (PRD §8.3, piano roll) --------------------------------------
 
@@ -1572,22 +1497,6 @@ export class ModuleView extends Container {
         this.grBar
           .roundRect(this.grRect.x, this.grRect.y, this.grRect.w, bh, 3)
           .fill(0xff5050);
-      }
-    }
-    if (this.mixMeters.length > 0) {
-      this.updateSendPoles();
-      for (const m of this.mixMeters) {
-        const r = appState.meters[m.key];
-        const peak = r?.peak ?? 0;
-        if (r?.clipped) m.clipped = true;
-        m.bar.clear();
-        const bh = Math.min(1, peak) * m.h;
-        if (bh > 0.5) {
-          m.bar
-            .roundRect(m.x, m.y + m.h - bh, m.w, bh, 2)
-            .fill(peak > 1 ? 0xff3030 : peak > 0.85 ? 0xffb13d : 0x52e07a);
-        }
-        m.dot.clear().circle(m.x + m.w / 2, m.y - 6, 3).fill(m.clipped ? 0xff2020 : 0x550000);
       }
     }
     if (!this.meterBar) return;
