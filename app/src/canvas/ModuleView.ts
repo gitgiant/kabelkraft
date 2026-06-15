@@ -35,6 +35,9 @@ import { TextFace } from './faces/text';
 import { SamplerFace } from './faces/sampler';
 import { WtoscFace } from './faces/wtosc';
 import { VisualizerFace } from './faces/visualizer';
+import { IntelligenceFace } from './faces/intelligence';
+import { LevelsFace } from './faces/levels';
+import { RecorderFace } from './faces/recorder';
 export { tickHiddenTintSource } from './faces/visThumb';
 
 
@@ -152,16 +155,10 @@ export class ModuleView extends Container {
     button: { make: () => new ButtonFace(), customLayout: true },
     mixer: { build: (v) => v.buildMixerFace(10, TITLE_H + 18, v.w - 20), customLayout: true },
     composer: { build: (v) => v.buildComposerFace(10, TITLE_H + 6, v.w - 20), customLayout: true, unbounded: true },
-    levels: { build: (v) => v.buildVMeter(v.w / 2 - 12, TITLE_H + 18, 24, v.h - TITLE_H - 32), customLayout: true },
-    recorder: {
-      build: (v) => {
-        v.buildRecorderFace(10, TITLE_H + 10, v.w - 56);
-        v.buildVMeter(v.w - 32, TITLE_H + 18, 14, v.h - TITLE_H - 32);
-      },
-      customLayout: true,
-    },
+    levels: { make: () => new LevelsFace(), customLayout: true },
+    recorder: { make: () => new RecorderFace(), customLayout: true },
     modmatrix: { build: (v) => v.buildModMatrixFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawModMatrix(), customLayout: true },
-    intelligence: { build: (v) => v.buildIntelligenceFace(10, TITLE_H + 6, v.w - 20), customLayout: true },
+    intelligence: { make: () => new IntelligenceFace(), customLayout: true },
 
     // -- compositional: param band + optional edge rails / display below ----
     keyboard: { build: (v) => v.buildParamFace({ display: (c) => v.buildKeys(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
@@ -307,10 +304,8 @@ export class ModuleView extends Container {
     this.lastCompPos = -1;
     this.lastCompData = null;
     this.midiDeviceText = null;
-    // (peq/vcf curve + wtosc table state now lives on their FaceRenderer objects)
-    this.recButton = null;
-    this.recLabel = null;
-    this.recElapsed = null;
+    // (peq/vcf curve + wtosc table + recorder/mixer state now lives on their
+    // FaceRenderer objects)
 
     this.body = new Graphics();
     this.addChild(this.body);
@@ -1289,59 +1284,6 @@ export class ModuleView extends Container {
     }
   }
 
-  /**
-   * TODO(intelligence): placeholder face only. One mock "AI prompt window"
-   * row appears per wired input type; nothing generates yet. Planned: each
-   * row opens an input-aware prompt panel (audio → analysis, notes → MIDI
-   * generation, text → lyrics/visual prompts, visual → scene edits) through
-   * the shared buildAiContext() pipeline, plus matching output ports.
-   */
-  private buildIntelligenceFace(x: number, y: number, w: number): void {
-    const wired = this.def.ports.filter(
-      (p) =>
-        p.direction === 'in' &&
-        [...appState.graph.wires.values()].some(
-          (wr) => wr.to.moduleId === this.instance.id && wr.to.portId === p.id,
-        ),
-    );
-
-    if (wired.length === 0) {
-      const hint = new Text({
-        text: '🤖 Wire any signal in —\na matching AI prompt\nwindow appears here.',
-        style: { fontSize: 11, fill: theme.textDim, lineHeight: 17 },
-      });
-      hint.position.set(x, y + 6);
-      this.addChild(hint);
-      return;
-    }
-
-    let py = y + 2;
-    const rowH = 40;
-    for (const p of wired) {
-      if (py + rowH > this.h - 12) break; // stretch the tile for more rows
-      const g = new Graphics();
-      g.roundRect(x, py, w, rowH - 6, 6)
-        .fill({ color: 0x000000, alpha: 0.2 })
-        .stroke({ width: 1, color: theme.moduleStroke });
-      g.circle(x + 12, py + (rowH - 6) / 2, 4).fill(PORT_TYPE_COLORS[p.type]);
-      this.addChild(g);
-      const label = new Text({
-        text: `${p.label} prompt`,
-        style: { fontSize: 11, fontWeight: '700', fill: theme.text },
-      });
-      label.position.set(x + 24, py + 5);
-      this.addChild(label);
-      const stub = new Text({
-        text: '✨ Describe what to generate… (coming soon)',
-        style: { fontSize: 9, fill: theme.textDim },
-      });
-      stub.position.set(x + 24, py + 19);
-      this.addChild(stub);
-      py += rowH;
-    }
-  }
-
-
   // -- MIDI device row (midiIn/midiOut) ----------------------------------------
 
   private midiDeviceText: Text | null = null;
@@ -1524,61 +1466,6 @@ export class ModuleView extends Container {
   // -- drum machine face -----------------------------------------------------
 
 
-  // -- recorder face -----------------------------------------------------------
-
-  private recButton: Graphics | null = null;
-  private recLabel: Text | null = null;
-  private recElapsed: Text | null = null;
-  private recRect = { x: 0, y: 0 };
-
-  private buildRecorderFace(x: number, y: number, w: number): void {
-    this.recRect = { x, y };
-    this.recButton = new Graphics();
-    this.addChild(this.recButton);
-
-    this.recLabel = new Text({ text: '', style: { fontSize: 12, fill: theme.text, fontWeight: 'bold' } });
-    this.recLabel.anchor.set(0.5);
-    this.recLabel.position.set(x + 45, y + 15);
-    this.recLabel.eventMode = 'none';
-    this.addChild(this.recLabel);
-
-    this.recElapsed = new Text({ text: '0.0 s', style: { fontSize: 12, fill: theme.textDim } });
-    this.recElapsed.anchor.set(0, 0);
-    this.recElapsed.position.set(x, y + 38);
-    this.addChild(this.recElapsed);
-
-    const hit = new Graphics().rect(x, y, 90, 30).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'pointer';
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      appState.toggleRecord(this.instance.id);
-      this.drawRecButton();
-    });
-    hit.on('pointerover', (e) =>
-      this.tooltip.show(
-        ['Recorder', 'Records incoming audio; stopping downloads a WAV file.'],
-        e.clientX,
-        e.clientY,
-      ),
-    );
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-    this.drawRecButton();
-  }
-
-  private drawRecButton(): void {
-    if (!this.recButton || !this.recLabel) return;
-    const recording = appState.isRecording(this.instance.id);
-    const { x, y } = this.recRect;
-    this.recButton
-      .clear()
-      .roundRect(x, y, 90, 30, 6)
-      .fill(recording ? 0xaa2020 : theme.button)
-      .stroke({ width: 1, color: recording ? 0xff5050 : 0x4a4a58 });
-    this.recLabel.text = recording ? '■ STOP' : '● REC';
-  }
-
   /** A sample/wavetable loaded: let the face redraw (sampler waveform, wtosc
    * slot rows + frame tables). */
   refreshSample(): void {
@@ -1760,7 +1647,7 @@ export class ModuleView extends Container {
   private meterRect = { x: 0, y: 0, w: 0, h: 0 };
   private clipped = false;
 
-  private buildVMeter(x: number, y: number, w: number, h: number): void {
+  buildVMeter(x: number, y: number, w: number, h: number): void {
     const bg = new Graphics().roundRect(x, y, w, h, 3).fill(theme.inset);
     this.addChild(bg);
     this.meterBar = new Graphics();
@@ -1775,16 +1662,6 @@ export class ModuleView extends Container {
 
   /** Called from the canvas ticker: live meters + sequencer playhead. */
   updateLive(): void {
-    if (this.recElapsed) {
-      const recording = appState.isRecording(this.instance.id);
-      this.recElapsed.text = recording
-        ? `${appState.recordingSeconds(this.instance.id).toFixed(1)} s`
-        : appState.lastRecordingSeconds > 0
-          ? `saved ${appState.lastRecordingSeconds.toFixed(1)} s`
-          : '0.0 s';
-      // Keep the button in sync if recording was toggled elsewhere.
-      this.drawRecButton();
-    }
     if (this.compG) {
       let pos = -1;
       if (appState.transport.playing) {
