@@ -8,6 +8,7 @@
  * params), clamped to the param range.
  */
 
+import { CAMERA_PARAMS } from './camera3d';
 import type { VisNodeDef, VisParamSpec, VisPortSpec } from './types';
 
 const visOut: VisPortSpec = {
@@ -134,6 +135,101 @@ const gradient: VisNodeDef = {
     { id: 'sat', label: 'Sat', min: 0, max: 1, default: 0.7 },
     { id: 'lum', label: 'Lum', min: 0, max: 0.8, default: 0.25 },
     { id: 'drift', label: 'Drift', min: 0, max: 1, default: 0 },
+  ],
+};
+
+// -- 3D raymarch sources (VISUALIZER_3D_PLAN.md, PR1) --------------------
+
+const raytunnel: VisNodeDef = {
+  type: 'raytunnel',
+  name: 'Tunnel',
+  category: 'source',
+  description:
+    'Raymarched endless 3D tunnel — the camera flies forward along a twisting ' +
+    'tube. Speed/radius react to the audio; chain Bloom for a demoscene rush.',
+  ports: [visOut],
+  params: [
+    { id: 'speed', label: 'Speed', min: 0, max: 4, default: 1.2 },
+    { id: 'twist', label: 'Twist', min: -0.5, max: 0.5, default: 0.08 },
+    { id: 'radius', label: 'Radius', min: 0.3, max: 2, default: 0.9 },
+    { id: 'glow', label: 'Glow', min: 0, max: 1, default: 0.5 },
+    { id: 'hue', label: 'Hue', min: 0, max: 1, default: 0.6, modMode: 'add-wrap' },
+    { id: 'roll', label: 'Roll', min: -3.2, max: 3.2, default: 0 },
+    { id: 'fov', label: 'FOV', min: 0.4, max: 1.6, default: 1 },
+    { id: 'quality', label: 'Quality', min: 0, max: 1, default: 0.5 },
+  ],
+};
+
+const sdffractal: VisNodeDef = {
+  type: 'sdffractal',
+  name: 'SDF Fractal',
+  category: 'source',
+  description:
+    'Raymarched Mandelbox fractal you orbit and fly into. Lit with a fresnel ' +
+    'rim glow. Wire bass → scale to make it breathe, onset → spin for camera kicks.',
+  ports: [visOut],
+  params: [
+    ...CAMERA_PARAMS,
+    { id: 'scale', label: 'Scale', min: 1.8, max: 3, default: 2.5 },
+    { id: 'iters', label: 'Detail', min: 4, max: 16, default: 10 },
+    { id: 'glow', label: 'Glow', min: 0, max: 1, default: 0.5 },
+    { id: 'hue', label: 'Hue', min: 0, max: 1, default: 0.6, modMode: 'add-wrap' },
+    { id: 'quality', label: 'Quality', min: 0, max: 1, default: 0.5 },
+  ],
+};
+
+const terrain: VisNodeDef = {
+  type: 'terrain',
+  name: 'Terrain',
+  category: 'source',
+  description:
+    'A scrolling 3D heightfield built from the spectrum history — a landscape ' +
+    'of past sound receding to the horizon. Orbit it with the camera params.',
+  ports: [visOut],
+  params: [
+    ...CAMERA_PARAMS,
+    { id: 'height', label: 'Height', min: 0.2, max: 3, default: 1.4 },
+    { id: 'glow', label: 'Glow', min: 0, max: 1, default: 0.4 },
+    { id: 'hue', label: 'Hue', min: 0, max: 1, default: 0.4, modMode: 'add-wrap' },
+    { id: 'quality', label: 'Quality', min: 0, max: 1, default: 0.5 },
+  ],
+};
+
+// -- 3D raster sources (VISUALIZER_3D_PLAN.md, PR2) ----------------------
+
+const bars3d: VisNodeDef = {
+  type: 'bars3d',
+  name: 'Spectrum City',
+  category: 'source',
+  description:
+    'A 3D grid of instanced cubes whose heights are the live spectrum — an ' +
+    'orbiting neon bar city, lit with a fresnel rim. Chain Bloom for glow. ' +
+    'count×count cells (count 8 = all 64 bins).',
+  ports: [visOut],
+  params: [
+    ...CAMERA_PARAMS,
+    { id: 'count', label: 'Count', min: 2, max: 16, default: 8 },
+    { id: 'spacing', label: 'Spacing', min: 0.3, max: 1.5, default: 0.7 },
+    { id: 'heightScale', label: 'Height', min: 0.5, max: 6, default: 3 },
+    { id: 'glow', label: 'Glow', min: 0, max: 1, default: 0.5 },
+    { id: 'hue', label: 'Hue', min: 0, max: 1, default: 0.6, modMode: 'add-wrap' },
+  ],
+};
+
+const particles3d: VisNodeDef = {
+  type: 'particles3d',
+  name: 'Particle Galaxy',
+  category: 'source',
+  description:
+    'Note and onset bursts explode outward as additive 3D billboards, seen ' +
+    'through an orbiting camera. No depth sort — pure glowing swarm.',
+  ports: [visOut],
+  params: [
+    ...CAMERA_PARAMS,
+    { id: 'rate', label: 'Rate', min: 0, max: 1, default: 0.5 },
+    { id: 'size', label: 'Size', min: 0.2, max: 3, default: 1 },
+    { id: 'spread', label: 'Spread', min: 0.3, max: 3, default: 1 },
+    { id: 'hue', label: 'Hue', min: 0, max: 1, default: 0.6, modMode: 'add-wrap' },
   ],
 };
 
@@ -365,6 +461,11 @@ export const VIS_NODE_DEFS: Map<string, VisNodeDef> = new Map(
     particles,
     shapes,
     gradient,
+    raytunnel,
+    sdffractal,
+    terrain,
+    bars3d,
+    particles3d,
     image,
     video,
     webcam,

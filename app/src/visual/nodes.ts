@@ -9,7 +9,9 @@
  * (null = unwired → transparent black).
  */
 
+import { camFromParams, cameraEye } from './camera3d';
 import { binFrac, SPECTRUM_BINS } from './features';
+import { viewProj } from './mat4';
 import {
   blackTexture,
   createPersistentTexture,
@@ -17,7 +19,10 @@ import {
   fullscreenPipeline,
   runPass,
   sharedSampler,
+  unitCube,
+  CAMERA_WGSL,
   COMMON_WGSL,
+  DEPTH_FORMAT,
   RT_FORMAT,
   type Particle,
   type RenderEnv,
@@ -181,6 +186,8 @@ const particles: NodeImpl = {
             vy: -2 - Math.random() * 5,
             life: 1,
             hue: ((pitch % 12) / 12),
+            z: 0,
+            vz: 0,
           });
         }
       }
@@ -193,6 +200,8 @@ const particles: NodeImpl = {
           vy: -3 - Math.random() * 6,
           life: 1,
           hue: f.centroid,
+          z: 0,
+          vz: 0,
         });
       }
     }
@@ -997,6 +1006,561 @@ const scenes: NodeImpl = {
   },
 };
 
+// -- 3D raymarch (VISUALIZER_3D_PLAN.md, PR1) --------------------------------
+// Each is a fullscreen fragment pass that marches a distance field and returns
+// a flattened premultiplied layer — so blur/bloom/feedback compose them like
+// any other source. A `quality` param scales the march step so heavy
+// tiles/thumbnails stay cheap (paired with the per-container res/fps caps).
+
+// -- raytunnel: endless tube, camera flies forward along the path ------------
+
+const RAYTUNNEL_FS = /* wgsl */ `
+struct Uni { a: vec4f, b: vec4f, c: vec4f };
+@group(0) @binding(0) var<uniform> u: Uni;
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4f {
+  let fov = u.a.x; let aspect = u.a.y; let time = u.a.z; let speed = u.a.w;
+  let twist = u.b.x; let radius = u.b.y; let glow = u.b.z; let hue = u.b.w;
+  let roll = u.c.x; let quality = u.c.y; let centroid = u.c.w;
+
+  let ndc = vec2f((in.uv.x * 2.0 - 1.0) * aspect, (1.0 - in.uv.y) * 2.0 - 1.0);
+  let cr = cos(roll); let sr = sin(roll);
+  let rxy = vec2f(ndc.x * cr - ndc.y * sr, ndc.x * sr + ndc.y * cr);
+  let fl = 1.0 / tan(fov * 0.5);
+  let rd = normalize(vec3f(rxy, fl));
+  let ro = vec3f(0.0);
+  let travel = time * speed * 4.0;
+
+  var t = 0.0; var hit = 0.0; var glowAcc = 0.0; var pz = 0.0; var stripe = 0.0;
+  let stepK = mix(0.7, 0.35, clamp(quality, 0.0, 1.0));
+  for (var k = 0; k < 80; k++) {
+    let p = ro + rd * t;
+    let z = p.z + travel;
+    let ang = z * twist;
+    let ca = cos(ang); let sa = sin(ang);
+    let q = vec2f(p.x * ca - p.y * sa, p.x * sa + p.y * ca);
+    let center = vec2f(sin(z * 0.15), cos(z * 0.12)) * 0.6;
+    let d = radius - length(q - center);
+    glowAcc += 1.0 / (1.0 + d * d * 60.0);
+    if (d < 0.02) { hit = 1.0; pz = z; stripe = 0.5 + 0.5 * sin(z * 1.5); break; }
+    t += max(d * stepK, 0.03);
+    if (t > 40.0) { break; }
+  }
+  let baseH = hue + pz * 0.02 + centroid * 0.2;
+  let col = hsl2rgb(baseH, 0.75, 0.18 + 0.4 * stripe);
+  let fade = hit * (1.0 - clamp(t / 40.0, 0.0, 1.0));
+  let g = glow * glowAcc * 0.04;
+  let a = clamp(fade + g, 0.0, 1.0);
+  return vec4f(col * a, a);
+}
+`;
+
+const raytunnel: NodeImpl = {
+  render(env, node, _inputs, params) {
+    const f = env.features;
+    const level = f ? Math.min(1, f.level * 2.2) : 0;
+    const centroid = f ? f.centroid : 0;
+    const aspect = env.width / env.height;
+    const radius = params.radius * (1 + 0.4 * level);
+    const data = new Float32Array([
+      params.fov, aspect, env.time, params.speed,
+      params.twist, radius, params.glow, params.hue,
+      params.roll, params.quality, level, centroid,
+    ]);
+    const pipeline = fullscreenPipeline(env.device, 'raytunnel', RAYTUNNEL_FS);
+    return runPass(env, pipeline, [uni(env, node.id, data)]);
+  },
+};
+
+// -- sdffractal: mandelbox distance estimator, orbit camera -----------------
+
+const SDFFRACTAL_FS = CAMERA_WGSL + /* wgsl */ `
+struct Uni { a: vec4f, b: vec4f, c: vec4f, d: vec4f };
+@group(0) @binding(0) var<uniform> u: Uni;
+
+fn de(p0: vec3f, scale: f32, iters: i32) -> f32 {
+  let minR2 = 0.25; let fixedR2 = 1.0;
+  var p = p0; var dr = 1.0;
+  for (var i = 0; i < iters; i++) {
+    p = clamp(p, vec3f(-1.0), vec3f(1.0)) * 2.0 - p;
+    let r2 = dot(p, p);
+    if (r2 < minR2) { let s = fixedR2 / minR2; p *= s; dr *= s; }
+    else if (r2 < fixedR2) { let s = fixedR2 / r2; p *= s; dr *= s; }
+    p = p * scale + p0;
+    dr = dr * abs(scale) + 1.0;
+  }
+  return length(p) / abs(dr);
+}
+
+fn calcN(p: vec3f, scale: f32, iters: i32) -> vec3f {
+  let e = vec2f(0.0015, 0.0);
+  return normalize(vec3f(
+    de(p + e.xyy, scale, iters) - de(p - e.xyy, scale, iters),
+    de(p + e.yxy, scale, iters) - de(p - e.yxy, scale, iters),
+    de(p + e.yyx, scale, iters) - de(p - e.yyx, scale, iters)));
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4f {
+  let eye = u.a.xyz; let fov = u.a.w;
+  let ctr = u.b.xyz; let aspect = u.b.w;
+  let scale = u.c.y; let iters = i32(u.c.z); let glow = u.c.w;
+  let hue = u.d.x; let quality = u.d.y; let centroid = u.d.z;
+
+  let ray = cameraRay(in.uv, aspect, eye, ctr, fov);
+  var t = 0.0; var steps = 0.0; var hit = 0.0; var hp = vec3f(0.0); var dmin = 1e9;
+  let stepK = mix(0.6, 0.95, clamp(quality, 0.0, 1.0));
+  for (var k = 0; k < 90; k++) {
+    let p = ray.ro + ray.rd * t;
+    let d = de(p, scale, iters);
+    dmin = min(dmin, d);
+    steps += 1.0;
+    if (d < 0.0008 * t + 0.0004) { hit = 1.0; hp = p; break; }
+    t += d * stepK;
+    if (t > 24.0) { break; }
+  }
+  let occ = 1.0 - steps / 90.0;
+  var lit = 0.0; var rim = 0.0;
+  if (hit > 0.5) {
+    let n = calcN(hp, scale, iters);
+    let ld = normalize(vec3f(0.5, 0.8, 0.3));
+    lit = clamp(dot(n, ld), 0.0, 1.0) * 0.8 + 0.2;
+    rim = pow(1.0 - clamp(dot(n, -ray.rd), 0.0, 1.0), 3.0);
+  }
+  let h = hue + dmin * 1.5 + centroid * 0.2;
+  let col = hsl2rgb(h, 0.7, 0.2 + 0.45 * lit * occ);
+  let edge = glow * (rim + (steps / 90.0) * 0.4);
+  let a = clamp(hit * occ + edge, 0.0, 1.0);
+  return vec4f(col * a + hsl2rgb(h, 0.6, 0.6) * edge * 0.5, a);
+}
+`;
+
+const sdffractal: NodeImpl = {
+  render(env, node, _inputs, params) {
+    const f = env.features;
+    const centroid = f ? f.centroid : 0;
+    const { eye, target } = cameraEye(camFromParams(params), env.time);
+    const aspect = env.width / env.height;
+    const data = new Float32Array([
+      eye[0], eye[1], eye[2], params.fov,
+      target[0], target[1], target[2], aspect,
+      env.time, params.scale, params.iters, params.glow,
+      params.hue, params.quality, centroid, 0,
+    ]);
+    const pipeline = fullscreenPipeline(env.device, 'sdffractal', SDFFRACTAL_FS);
+    return runPass(env, pipeline, [uni(env, node.id, data)]);
+  },
+};
+
+// -- terrain: scrolling 3D heightfield from spectrum history -----------------
+
+const TERRAIN_HIST = 64;
+const TERRAIN_FIELD = 4.0;
+
+const TERRAIN_FS = CAMERA_WGSL + /* wgsl */ `
+struct Uni { a: vec4f, b: vec4f, c: vec4f, d: vec4f };
+@group(0) @binding(0) var<uniform> u: Uni;
+@group(0) @binding(1) var<storage, read> field: array<f32>;
+
+const BINS = ${SPECTRUM_BINS}u;
+const HIST = ${TERRAIN_HIST}u;
+
+fn sampleH(x: f32, z: f32, writeIdx: u32, fieldSize: f32, height: f32) -> f32 {
+  let bx = (x / fieldSize * 0.5 + 0.5) * f32(BINS - 1u);
+  let az = (z / fieldSize * 0.5 + 0.5) * f32(HIST - 1u);
+  if (bx < 0.0 || bx > f32(BINS - 1u) || az < 0.0 || az > f32(HIST - 1u)) { return 0.0; }
+  let bx0 = floor(bx); let az0 = floor(az);
+  let fx = bx - bx0; let fz = az - az0;
+  let row0 = (writeIdx + HIST - 1u - u32(az0)) % HIST;
+  let row1 = (writeIdx + HIST - 2u - u32(az0)) % HIST;
+  let b0 = u32(bx0); let b1 = min(b0 + 1u, BINS - 1u);
+  let h00 = field[row0 * BINS + b0]; let h01 = field[row0 * BINS + b1];
+  let h10 = field[row1 * BINS + b0]; let h11 = field[row1 * BINS + b1];
+  let h0 = mix(h00, h01, fx); let h1 = mix(h10, h11, fx);
+  return mix(h0, h1, fz) * height;
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4f {
+  let eye = u.a.xyz; let fov = u.a.w;
+  let ctr = u.b.xyz; let aspect = u.b.w;
+  let height = u.c.y; let glow = u.c.z; let hue = u.c.w;
+  let quality = u.d.x; let writeIdx = u32(u.d.y); let fieldSize = u.d.z;
+
+  let ray = cameraRay(in.uv, aspect, eye, ctr, fov);
+  var t = 0.1; var hit = 0.0; var hp = vec3f(0.0);
+  let stepK = mix(0.6, 0.3, clamp(quality, 0.0, 1.0));
+  for (var k = 0; k < 110; k++) {
+    let p = ray.ro + ray.rd * t;
+    let h = sampleH(p.x, p.z, writeIdx, fieldSize, height);
+    let diff = p.y - h;
+    if (diff < 0.02) { hit = 1.0; hp = p; break; }
+    t += max(diff * stepK, 0.02);
+    if (t > 60.0) { break; }
+  }
+  if (hit < 0.5) { return vec4f(0.0); }
+  let e = 0.06;
+  let hl = sampleH(hp.x - e, hp.z, writeIdx, fieldSize, height);
+  let hr = sampleH(hp.x + e, hp.z, writeIdx, fieldSize, height);
+  let hb = sampleH(hp.x, hp.z - e, writeIdx, fieldSize, height);
+  let hf = sampleH(hp.x, hp.z + e, writeIdx, fieldSize, height);
+  let n = normalize(vec3f(hl - hr, 2.0 * e, hb - hf));
+  let ld = normalize(vec3f(0.4, 0.7, 0.5));
+  let lit = clamp(dot(n, ld), 0.0, 1.0) * 0.75 + 0.25;
+  let hh = hue + hp.y * 0.5;
+  let fog = 1.0 - clamp(t / 60.0, 0.0, 1.0);
+  let rim = pow(1.0 - clamp(dot(n, -ray.rd), 0.0, 1.0), 3.0) * glow;
+  let col = hsl2rgb(hh, 0.7, 0.15 + 0.45 * lit) * fog;
+  return vec4f(col * fog + hsl2rgb(hh, 0.6, 0.7) * rim * fog, fog);
+}
+`;
+
+const terrain: NodeImpl = {
+  render(env, node, _inputs, params) {
+    const state = env.states.get(env.ns + node.id);
+    const BINS = SPECTRUM_BINS;
+    if (!state.storage) {
+      state.storage = env.device.createBuffer({
+        size: BINS * TERRAIN_HIST * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      state.ring = 0;
+    }
+    if (!state.scratch) state.scratch = new Float32Array(BINS);
+    const f = env.features;
+    const row = state.scratch;
+    if (f) for (let b = 0; b < BINS; b++) row[b] = binFrac(f.spectrum[b]);
+    else row.fill(0);
+    env.device.queue.writeBuffer(
+      state.storage,
+      state.ring * BINS * 4,
+      row as Float32Array<ArrayBuffer>,
+    );
+    state.ring = (state.ring + 1) % TERRAIN_HIST;
+
+    const { eye, target } = cameraEye(camFromParams(params), env.time);
+    const aspect = env.width / env.height;
+    const data = new Float32Array([
+      eye[0], eye[1], eye[2], params.fov,
+      target[0], target[1], target[2], aspect,
+      env.time, params.height, params.glow, params.hue,
+      params.quality, state.ring, TERRAIN_FIELD, 0,
+    ]);
+    const pipeline = fullscreenPipeline(env.device, 'terrain', TERRAIN_FS);
+    return runPass(env, pipeline, [uni(env, node.id, data), { buffer: state.storage }]);
+  },
+};
+
+// -- 3D raster (VISUALIZER_3D_PLAN.md, PR2) ----------------------------------
+// Real geometry with a depth buffer (bars3d) and additive perspective
+// billboards (particles3d). Both build their own render pass (the fullscreen
+// runPass helper has no depth/vertex-buffer support) and return a flattened
+// layer like every other node. Entry points avoid the names vs/fs so
+// COMMON_WGSL (prepended for hsl2rgb) doesn't clash.
+
+// -- bars3d: instanced cubes, spectrum heightfield, lambert + fresnel --------
+
+const BARS3D_WGSL = COMMON_WGSL + /* wgsl */ `
+struct Uni { mvp: mat4x4f, cam: vec4f, light: vec4f }; // cam.w = glow
+@group(0) @binding(0) var<uniform> u: Uni;
+struct Inst { a: vec4f, b: vec4f }; // a = offX, offZ, width, height ; b.x = hue
+@group(0) @binding(1) var<storage, read> inst: array<Inst>;
+
+struct VOut {
+  @builtin(position) pos: vec4f,
+  @location(0) nrm: vec3f,
+  @location(1) world: vec3f,
+  @location(2) @interpolate(flat) hue: f32,
+};
+
+@vertex
+fn bvs(@location(0) p: vec3f, @location(1) n: vec3f, @builtin(instance_index) ii: u32) -> VOut {
+  let it = inst[ii];
+  let off = vec3f(it.a.x, 0.0, it.a.y);
+  let world = off + vec3f(p.x * it.a.z, p.y * it.a.w, p.z * it.a.z);
+  var o: VOut;
+  o.pos = u.mvp * vec4f(world, 1.0);
+  o.nrm = n;
+  o.world = world;
+  o.hue = it.b.x;
+  return o;
+}
+
+@fragment
+fn bfs(in: VOut) -> @location(0) vec4f {
+  let N = normalize(in.nrm);
+  let L = normalize(u.light.xyz);
+  let V = normalize(u.cam.xyz - in.world);
+  let diff = clamp(dot(N, L), 0.0, 1.0) * 0.8 + 0.2;
+  let fres = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 3.0);
+  let base = hsl2rgb(in.hue, 0.7, 0.22 + 0.35 * diff);
+  let col = base + hsl2rgb(in.hue, 0.6, 0.7) * fres * u.cam.w;
+  return vec4f(col, 1.0);
+}
+`;
+
+const BARS3D_MAX = 256; // 16×16 grid cap
+const BARS3D_STRIDE = 8;
+
+const bars3d: NodeImpl = {
+  render(env, node, _inputs, params) {
+    const state = env.states.get(env.ns + node.id);
+    const G = Math.max(2, Math.min(16, Math.round(params.count)));
+    const N = G * G;
+    const spacing = params.spacing;
+    const width = spacing * 0.6;
+    const f = env.features;
+    const BINS = SPECTRUM_BINS;
+
+    if (!state.instanceData) state.instanceData = new Float32Array(BARS3D_MAX * BARS3D_STRIDE);
+    const inst = state.instanceData;
+    for (let i = 0; i < N; i++) {
+      const col = i % G;
+      const rowi = Math.floor(i / G);
+      const bin = (rowi * G + col) % BINS;
+      const hgt = f ? binFrac(f.spectrum[bin]) : 0.05;
+      const o = i * BARS3D_STRIDE;
+      inst[o] = (col - (G - 1) / 2) * spacing;
+      inst[o + 1] = (rowi - (G - 1) / 2) * spacing;
+      inst[o + 2] = width;
+      inst[o + 3] = 0.05 + hgt * params.heightScale;
+      inst[o + 4] = (params.hue + (bin / BINS) * 0.3) % 1;
+    }
+    if (!state.storage) {
+      state.storage = env.device.createBuffer({
+        size: BARS3D_MAX * BARS3D_STRIDE * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+    }
+    env.device.queue.writeBuffer(state.storage, 0, inst);
+
+    const { eye, target } = cameraEye(camFromParams(params), env.time);
+    const aspect = env.width / env.height;
+    const mvp = viewProj(eye, target, params.fov, aspect);
+    const udata = new Float32Array(24);
+    udata.set(mvp, 0);
+    udata[16] = eye[0]; udata[17] = eye[1]; udata[18] = eye[2]; udata[19] = params.glow;
+    udata[20] = 0.4; udata[21] = 0.8; udata[22] = 0.5;
+    const ubuf = state.uniform(env.device, udata.byteLength);
+    env.device.queue.writeBuffer(ubuf, 0, udata);
+
+    const cube = unitCube(env.device);
+    const pipeline = customPipeline(env.device, 'bars3d', () => {
+      const module = env.device.createShaderModule({ code: BARS3D_WGSL });
+      return env.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: {
+          module,
+          entryPoint: 'bvs',
+          buffers: [{
+            arrayStride: 24,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              { shaderLocation: 1, offset: 12, format: 'float32x3' },
+            ],
+          }],
+        },
+        fragment: { module, entryPoint: 'bfs', targets: [{ format: RT_FORMAT }] },
+        primitive: { topology: 'triangle-list', cullMode: 'none' },
+        depthStencil: { format: DEPTH_FORMAT, depthWriteEnabled: true, depthCompare: 'less' },
+      });
+    });
+
+    const out = env.pool.acquire(env.width, env.height);
+    const depth = env.pool.acquireDepth(env.width, env.height);
+    const pass = env.encoder.beginRenderPass({
+      colorAttachments: [
+        { view: out.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' },
+      ],
+      depthStencilAttachment: {
+        view: depth.createView(),
+        depthClearValue: 1,
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store',
+      },
+    });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(
+      0,
+      env.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: ubuf } },
+          { binding: 1, resource: { buffer: state.storage } },
+        ],
+      }),
+    );
+    pass.setVertexBuffer(0, cube.buffer);
+    pass.draw(cube.count, N);
+    pass.end();
+    return out;
+  },
+};
+
+// -- particles3d: additive perspective billboards (no depth) -----------------
+
+const PARTICLES3D_WGSL = COMMON_WGSL + /* wgsl */ `
+struct Uni { mvp: mat4x4f, misc: vec4f }; // misc.x = aspect
+@group(0) @binding(0) var<uniform> u: Uni;
+struct Inst { ps: vec4f, col: vec4f }; // ps = xyz, size ; col = hue, alpha
+@group(0) @binding(1) var<storage, read> inst: array<Inst>;
+
+struct POut {
+  @builtin(position) pos: vec4f,
+  @location(0) corner: vec2f,
+  @location(1) @interpolate(flat) idx: u32,
+};
+
+@vertex
+fn p3vs(@builtin(vertex_index) v: u32, @builtin(instance_index) ii: u32) -> POut {
+  var corners = array<vec2f, 6>(
+    vec2f(-1, -1), vec2f(1, -1), vec2f(-1, 1),
+    vec2f(-1, 1), vec2f(1, -1), vec2f(1, 1));
+  let c = corners[v];
+  let it = inst[ii];
+  var clip = u.mvp * vec4f(it.ps.xyz, 1.0);
+  // Screen-space billboard with perspective shrink (offset added pre-divide).
+  clip.x = clip.x + c.x * it.ps.w / u.misc.x;
+  clip.y = clip.y + c.y * it.ps.w;
+  var o: POut;
+  o.pos = clip;
+  o.corner = c;
+  o.idx = ii;
+  return o;
+}
+
+@fragment
+fn p3fs(in: POut) -> @location(0) vec4f {
+  let it = inst[in.idx];
+  let d = length(in.corner);
+  let a = smoothstep(1.0, 0.0, d) * it.col.y;
+  return vec4f(hsl2rgb(it.col.x, 0.8, 0.6) * a, a);
+}
+`;
+
+const PARTICLES3D_MAX = 1200;
+const PARTICLES3D_STRIDE = 8;
+
+function randDir(): [number, number, number] {
+  const u = Math.random() * 2 - 1;
+  const t = Math.random() * Math.PI * 2;
+  const r = Math.sqrt(1 - u * u);
+  return [r * Math.cos(t), u, r * Math.sin(t)];
+}
+
+const particles3d: NodeImpl = {
+  render(env, node, _inputs, params) {
+    const state = env.states.get(env.ns + node.id);
+    const f = env.features;
+
+    if (f) {
+      for (const pitch of f.notes) {
+        for (let i = 0; i < 10; i++) {
+          const d = randDir();
+          state.particles.push({
+            x: d[0] * 0.2, y: d[1] * 0.2, z: d[2] * 0.2,
+            vx: d[0] * 2, vy: d[1] * 2, vz: d[2] * 2,
+            life: 1, hue: (pitch % 12) / 12,
+          });
+        }
+      }
+      const burst = Math.round(f.onset * params.rate * 20);
+      for (let i = 0; i < burst; i++) {
+        const d = randDir();
+        state.particles.push({
+          x: 0, y: 0, z: 0,
+          vx: d[0] * 3, vy: d[1] * 3, vz: d[2] * 3,
+          life: 1, hue: f.centroid,
+        });
+      }
+    }
+    if (state.particles.length > PARTICLES3D_MAX) {
+      state.particles.splice(0, state.particles.length - PARTICLES3D_MAX);
+    }
+    const dt = env.dt;
+    const spread = params.spread;
+    const live: Particle[] = [];
+    for (const p of state.particles) {
+      p.x += p.vx * dt * spread;
+      p.y += p.vy * dt * spread;
+      p.z += p.vz * dt * spread;
+      p.vx *= 0.98; p.vy *= 0.98; p.vz *= 0.98;
+      p.life -= 0.4 * dt;
+      if (p.life > 0) live.push(p);
+    }
+    state.particles = live;
+
+    if (!state.instanceData) state.instanceData = new Float32Array(PARTICLES3D_MAX * PARTICLES3D_STRIDE);
+    const inst = state.instanceData;
+    for (let i = 0; i < live.length; i++) {
+      const p = live[i];
+      const o = i * PARTICLES3D_STRIDE;
+      inst[o] = p.x; inst[o + 1] = p.y; inst[o + 2] = p.z;
+      inst[o + 3] = params.size * (0.3 + 0.7 * p.life);
+      inst[o + 4] = p.hue;
+      inst[o + 5] = p.life;
+    }
+    if (!state.storage) {
+      state.storage = env.device.createBuffer({
+        size: PARTICLES3D_MAX * PARTICLES3D_STRIDE * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+    }
+    if (live.length > 0) env.device.queue.writeBuffer(state.storage, 0, inst);
+
+    const { eye, target } = cameraEye(camFromParams(params), env.time);
+    const aspect = env.width / env.height;
+    const mvp = viewProj(eye, target, params.fov, aspect);
+    const udata = new Float32Array(20);
+    udata.set(mvp, 0);
+    udata[16] = aspect;
+    const ubuf = state.uniform(env.device, udata.byteLength);
+    env.device.queue.writeBuffer(ubuf, 0, udata);
+
+    const pipeline = customPipeline(env.device, 'particles3d', () => {
+      const module = env.device.createShaderModule({ code: PARTICLES3D_WGSL });
+      return env.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'p3vs' },
+        fragment: {
+          module,
+          entryPoint: 'p3fs',
+          targets: [{
+            format: RT_FORMAT,
+            blend: {
+              color: { srcFactor: 'one', dstFactor: 'one' },
+              alpha: { srcFactor: 'one', dstFactor: 'one' },
+            },
+          }],
+        },
+        primitive: { topology: 'triangle-list' },
+      });
+    });
+
+    const out = env.pool.acquire(env.width, env.height);
+    const pass = env.encoder.beginRenderPass({
+      colorAttachments: [
+        { view: out.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' },
+      ],
+    });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(
+      0,
+      env.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: ubuf } },
+          { binding: 1, resource: { buffer: state.storage } },
+        ],
+      }),
+    );
+    if (live.length > 0) pass.draw(6, live.length);
+    pass.end();
+    return out;
+  },
+};
+
 // -- registry -------------------------------------------------------------------
 
 export const NODE_IMPLS: Record<string, NodeImpl> = {
@@ -1005,6 +1569,11 @@ export const NODE_IMPLS: Record<string, NodeImpl> = {
   particles,
   shapes,
   gradient,
+  raytunnel,
+  sdffractal,
+  terrain,
+  bars3d,
+  particles3d,
   image,
   video,
   webcam,

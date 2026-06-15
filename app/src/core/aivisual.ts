@@ -144,6 +144,51 @@ arrives. The note tells the user what to wire on the main canvas.
 Note bursts feed a zooming feedback loop — the classic infinite tunnel —
 then mirror-fold into a mandala. No wire cycles needed: \`feedback\` holds
 the previous frame internally.
+
+### 4. 3D Mandelbox dive (raymarch)
+\`\`\`json
+{
+  "kind": "kkvis", "name": "Fractal Dive",
+  "nodes": [
+    { "id": "feat", "type": "features" },
+    { "id": "frac", "type": "sdffractal", "params": { "dist": 5, "spin": 0.06, "scale": 2.5, "glow": 0.6, "hue": 0.6 } },
+    { "id": "glow", "type": "bloom", "params": { "threshold": 0.35, "amount": 1.1 } },
+    { "id": "out", "type": "output" }
+  ],
+  "wires": [
+    { "from": { "node": "frac", "port": "out" }, "to": { "node": "glow", "port": "in" } },
+    { "from": { "node": "glow", "port": "out" }, "to": { "node": "out", "port": "in" } },
+    { "from": { "node": "feat", "port": "bass" }, "to": { "node": "frac", "port": "scale" } }
+  ]
+}
+\`\`\`
+The 3D sources (\`sdffractal\`/\`terrain\`/\`bars3d\`/\`particles3d\` orbit via
+their camera params, \`raytunnel\` flies forward) each output a flat layer, so
+bloom/feedback/blend compose them exactly like a 2D source.
+\`dist\`/\`yaw\`/\`pitch\`/\`spin\` move the camera; here bass scales the
+Mandelbox so it breathes. Note: multiply-mode control (everything but hues)
+only scales a param DOWN from its set value, so leave motion params like tunnel
+\`speed\` unwired if you want constant motion.
+
+### 5. 3D spectrum city (raster geometry)
+\`\`\`json
+{
+  "kind": "kkvis", "name": "Spectrum City",
+  "nodes": [
+    { "id": "city", "type": "bars3d", "params": { "dist": 9, "pitch": 0.45, "spin": 0.05, "count": 8, "heightScale": 3, "hue": 0.6 } },
+    { "id": "glow", "type": "bloom", "params": { "threshold": 0.35, "amount": 1.1 } },
+    { "id": "out", "type": "output" }
+  ],
+  "wires": [
+    { "from": { "node": "city", "port": "out" }, "to": { "node": "glow", "port": "in" } },
+    { "from": { "node": "glow", "port": "out" }, "to": { "node": "out", "port": "in" } }
+  ]
+}
+\`\`\`
+\`bars3d\` is real instanced geometry with a depth buffer — a grid of cubes
+whose heights are the live spectrum. \`particles3d\` is the matching swarm:
+note/onset bursts as additive 3D billboards (pair it with \`feedback\` for
+trails). Both react to audio internally, so no Features wire is required.
 `;
 
 export function generateVisualSpecPack(): string {

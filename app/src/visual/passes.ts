@@ -10,6 +10,9 @@ import type { VisFeatures } from './types';
 /** Intermediate render-target format (canvas blit converts at the end). */
 export const RT_FORMAT: GPUTextureFormat = 'rgba8unorm';
 
+/** Depth-buffer format for the raster 3D nodes (bars3d). */
+export const DEPTH_FORMAT: GPUTextureFormat = 'depth24plus';
+
 /** Fullscreen-triangle vertex stage + shared WGSL helpers. */
 export const COMMON_WGSL = /* wgsl */ `
 struct VsOut {
@@ -35,6 +38,28 @@ fn hsl2rgb(h: f32, s: f32, l: f32) -> vec3f {
     rgb[n] = l - a * max(-1.0, min(min(k - 3, 9 - k), 1.0));
   }
   return rgb;
+}
+`;
+
+/**
+ * Camera-ray builder for the 3D (raymarch) nodes — appended after COMMON_WGSL
+ * by nodes that need it. `eye`/`target`/`fov` come from camera3d.cameraEye on
+ * the CPU; this turns the fullscreen uv into a world-space ray. Up is +Y;
+ * pitch is range-clamped so the up-vector never degenerates.
+ */
+export const CAMERA_WGSL = /* wgsl */ `
+struct Ray { ro: vec3f, rd: vec3f };
+
+fn cameraRay(uv: vec2f, aspect: f32, eye: vec3f, ctr: vec3f, fov: f32) -> Ray {
+  let fwd = normalize(ctr - eye);
+  let right = normalize(cross(fwd, vec3f(0.0, 1.0, 0.0)));
+  let up = cross(right, fwd);
+  let ndc = vec2f((uv.x * 2.0 - 1.0) * aspect, (1.0 - uv.y) * 2.0 - 1.0);
+  let f = 1.0 / tan(fov * 0.5);
+  var r: Ray;
+  r.ro = eye;
+  r.rd = normalize(fwd * f + right * ndc.x + up * ndc.y);
+  return r;
 }
 `;
 
@@ -119,6 +144,8 @@ const RT_USAGE =
 export class TexturePool {
   private free = new Map<string, GPUTexture[]>();
   private used: { key: string; tex: GPUTexture }[] = [];
+  private freeDepth = new Map<string, GPUTexture[]>();
+  private usedDepth: { key: string; tex: GPUTexture }[] = [];
 
   constructor(private readonly device: GPUDevice) {}
 
@@ -131,6 +158,20 @@ export class TexturePool {
     return tex;
   }
 
+  /** Frame-scoped depth attachment for raster passes (returned on endFrame). */
+  acquireDepth(width: number, height: number): GPUTexture {
+    const key = `${width}x${height}`;
+    const tex =
+      this.freeDepth.get(key)?.pop() ??
+      this.device.createTexture({
+        size: { width, height },
+        format: DEPTH_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+    this.usedDepth.push({ key, tex });
+    return tex;
+  }
+
   endFrame(): void {
     for (const { key, tex } of this.used) {
       let list = this.free.get(key);
@@ -138,6 +179,12 @@ export class TexturePool {
       list.push(tex);
     }
     this.used = [];
+    for (const { key, tex } of this.usedDepth) {
+      let list = this.freeDepth.get(key);
+      if (!list) this.freeDepth.set(key, (list = []));
+      list.push(tex);
+    }
+    this.usedDepth = [];
   }
 
   /** Drop everything (canvas resize → stale sizes accumulate otherwise). */
@@ -145,7 +192,59 @@ export class TexturePool {
     this.endFrame();
     for (const list of this.free.values()) for (const tex of list) tex.destroy();
     this.free.clear();
+    for (const list of this.freeDepth.values()) for (const tex of list) tex.destroy();
+    this.freeDepth.clear();
   }
+}
+
+// -- cube geometry (raster 3D) ------------------------------------------------
+// One device-cached non-indexed unit cube (36 verts, position + normal). Bars
+// instance it; y spans 0..1 so a bar grows up from the ground plane.
+
+const cubeBuffers = new WeakMap<GPUDevice, { buffer: GPUBuffer; count: number }>();
+
+function buildUnitCube(): Float32Array {
+  // 6 faces × 2 triangles × 3 verts, each [px,py,pz, nx,ny,nz]. y in [0,1].
+  const faces: Array<{ n: [number, number, number]; verts: Array<[number, number, number]> }> = [];
+  const add = (
+    n: [number, number, number],
+    a: [number, number, number],
+    b: [number, number, number],
+    c: [number, number, number],
+    d: [number, number, number],
+  ) => faces.push({ n, verts: [a, b, c, a, c, d] });
+  // x = ±0.5, z = ±0.5, y = 0..1
+  add([0, 0, 1], [-0.5, 0, 0.5], [0.5, 0, 0.5], [0.5, 1, 0.5], [-0.5, 1, 0.5]); // front +z
+  add([0, 0, -1], [0.5, 0, -0.5], [-0.5, 0, -0.5], [-0.5, 1, -0.5], [0.5, 1, -0.5]); // back -z
+  add([1, 0, 0], [0.5, 0, 0.5], [0.5, 0, -0.5], [0.5, 1, -0.5], [0.5, 1, 0.5]); // right +x
+  add([-1, 0, 0], [-0.5, 0, -0.5], [-0.5, 0, 0.5], [-0.5, 1, 0.5], [-0.5, 1, -0.5]); // left -x
+  add([0, 1, 0], [-0.5, 1, 0.5], [0.5, 1, 0.5], [0.5, 1, -0.5], [-0.5, 1, -0.5]); // top +y
+  add([0, -1, 0], [-0.5, 0, -0.5], [0.5, 0, -0.5], [0.5, 0, 0.5], [-0.5, 0, 0.5]); // bottom -y
+  const data = new Float32Array(faces.length * 6 * 6);
+  let o = 0;
+  for (const f of faces) {
+    for (const v of f.verts) {
+      data[o++] = v[0]; data[o++] = v[1]; data[o++] = v[2];
+      data[o++] = f.n[0]; data[o++] = f.n[1]; data[o++] = f.n[2];
+    }
+  }
+  return data;
+}
+
+/** Device-cached unit cube vertex buffer (pos+normal, 36 verts). */
+export function unitCube(device: GPUDevice): { buffer: GPUBuffer; count: number } {
+  let c = cubeBuffers.get(device);
+  if (!c) {
+    const data = buildUnitCube();
+    const buffer = device.createBuffer({
+      size: data.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(buffer, 0, data);
+    c = { buffer, count: data.length / 6 };
+    cubeBuffers.set(device, c);
+  }
+  return c;
 }
 
 export function createPersistentTexture(device: GPUDevice, width: number, height: number): GPUTexture {
@@ -161,6 +260,9 @@ export interface Particle {
   vy: number;
   life: number;
   hue: number;
+  /** 3D depth + its velocity (particles3d). The 2D particles node leaves these 0. */
+  z: number;
+  vz: number;
 }
 
 /** Mutable per-node-instance state surviving across frames. */
@@ -184,6 +286,9 @@ export class NodeState {
   /** CPU particle sim. */
   particles: Particle[] = [];
   instanceData: Float32Array | null = null;
+  /** Ring-buffer write cursor + CPU staging row (terrain spectrum history). */
+  ring = 0;
+  scratch: Float32Array | null = null;
   /** 2D rasterization surface (Text Layer). */
   canvas2d: OffscreenCanvas | null = null;
   /** Timestamp marker (typewriter restart on content change). */

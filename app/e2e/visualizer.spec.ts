@@ -269,6 +269,110 @@ test('visual wire chains containers: A renders into B via Visual In', async ({ p
   expect(await page.evaluate(() => window.__kk.visGpuErrors())).toBe(0);
 });
 
+test('3D raymarch nodes render without GPU errors', async ({ page }) => {
+  const errors = captureErrors(page);
+  await bootWithAudio(page);
+  const rig = await classicRig(page);
+
+  const visId = await page.evaluate(({ synth }) => {
+    const s = window.__kk;
+    const vis = s.addModule('visualizer', 600, 500);
+    s.connect({ moduleId: synth, portId: 'out' }, { moduleId: vis.id, portId: 'in' });
+    // All three raymarch sources blended together so every 3D shader compiles
+    // and runs each frame; a Features bass wire exercises a 3D mod port.
+    s.setVisGraph(vis.id, {
+      nodes: [
+        { id: 'feat', type: 'features', x: 40, y: 320, params: {} },
+        { id: 'tun', type: 'raytunnel', x: 40, y: 40, params: { speed: 1.2, glow: 0.6 } },
+        { id: 'frac', type: 'sdffractal', x: 40, y: 140, params: { dist: 5, scale: 2.5, iters: 10 } },
+        { id: 'terr', type: 'terrain', x: 40, y: 240, params: { height: 1.4, dist: 6, pitch: 0.3 } },
+        { id: 'b1', type: 'blend', x: 240, y: 90, params: { mode: 2 } },
+        { id: 'b2', type: 'blend', x: 440, y: 140, params: { mode: 2 } },
+        { id: 'glow', type: 'bloom', x: 640, y: 140, params: { threshold: 0.4, amount: 1 } },
+        { id: 'out', type: 'output', x: 840, y: 140, params: {} },
+      ],
+      wires: [
+        { id: 'w1', from: { nodeId: 'tun', portId: 'out' }, to: { nodeId: 'b1', portId: 'a' } },
+        { id: 'w2', from: { nodeId: 'frac', portId: 'out' }, to: { nodeId: 'b1', portId: 'b' } },
+        { id: 'w3', from: { nodeId: 'b1', portId: 'out' }, to: { nodeId: 'b2', portId: 'a' } },
+        { id: 'w4', from: { nodeId: 'terr', portId: 'out' }, to: { nodeId: 'b2', portId: 'b' } },
+        { id: 'w5', from: { nodeId: 'b2', portId: 'out' }, to: { nodeId: 'glow', portId: 'in' } },
+        { id: 'w6', from: { nodeId: 'glow', portId: 'out' }, to: { nodeId: 'out', portId: 'in' } },
+        { id: 'w7', from: { nodeId: 'feat', portId: 'bass' }, to: { nodeId: 'frac', portId: 'scale' } },
+      ],
+    });
+    return vis.id;
+  }, { synth: rig.synth });
+  await play(page);
+
+  const gpu = await page.evaluate(() => 'gpu' in navigator);
+  if (gpu) {
+    await page.evaluate((id) => {
+      const c = window.__kkCanvas;
+      const p = c.clientPointFor(id);
+      if (p) c.panBy(400 - p.x, 300 - p.y);
+      window.__kk.openVisualizer(id);
+    }, visId);
+    await expect(page.locator('.vis-overlay')).toBeVisible();
+    const before = await page.evaluate(() => window.__kk.visFramesRendered());
+    await expect
+      .poll(() => page.evaluate(() => window.__kk.visFramesRendered()), { timeout: 5000 })
+      .toBeGreaterThan(before + 10);
+    await page.locator('.vis-overlay button[title="Close (Esc)"]').click();
+  }
+  expect(errors).toEqual([]);
+  expect(await page.evaluate(() => window.__kk.visGpuErrors())).toBe(0);
+});
+
+test('3D raster nodes (bars + particles) render without GPU errors', async ({ page }) => {
+  const errors = captureErrors(page);
+  await bootWithAudio(page);
+  const rig = await classicRig(page);
+
+  const visId = await page.evaluate(({ synth, sequencer }) => {
+    const s = window.__kk;
+    const vis = s.addModule('visualizer', 600, 500);
+    s.connect({ moduleId: synth, portId: 'out' }, { moduleId: vis.id, portId: 'in' });
+    s.connect({ moduleId: sequencer, portId: 'notes' }, { moduleId: vis.id, portId: 'notes' });
+    // bars3d (depth buffer) + particles3d (additive, no depth) blended → bloom.
+    s.setVisGraph(vis.id, {
+      nodes: [
+        { id: 'city', type: 'bars3d', x: 40, y: 40, params: { dist: 9, pitch: 0.45, count: 8, heightScale: 3 } },
+        { id: 'swarm', type: 'particles3d', x: 40, y: 200, params: { dist: 6, rate: 0.8, size: 1 } },
+        { id: 'mix', type: 'blend', x: 260, y: 120, params: { mode: 1 } },
+        { id: 'glow', type: 'bloom', x: 460, y: 120, params: { threshold: 0.4, amount: 1 } },
+        { id: 'out', type: 'output', x: 660, y: 120, params: {} },
+      ],
+      wires: [
+        { id: 'w1', from: { nodeId: 'city', portId: 'out' }, to: { nodeId: 'mix', portId: 'a' } },
+        { id: 'w2', from: { nodeId: 'swarm', portId: 'out' }, to: { nodeId: 'mix', portId: 'b' } },
+        { id: 'w3', from: { nodeId: 'mix', portId: 'out' }, to: { nodeId: 'glow', portId: 'in' } },
+        { id: 'w4', from: { nodeId: 'glow', portId: 'out' }, to: { nodeId: 'out', portId: 'in' } },
+      ],
+    });
+    return vis.id;
+  }, { synth: rig.synth, sequencer: rig.sequencer });
+  await play(page);
+
+  const gpu = await page.evaluate(() => 'gpu' in navigator);
+  if (gpu) {
+    await page.evaluate((id) => {
+      const c = window.__kkCanvas;
+      const p = c.clientPointFor(id);
+      if (p) c.panBy(400 - p.x, 300 - p.y);
+      window.__kk.openVisualizer(id);
+    }, visId);
+    await expect(page.locator('.vis-overlay')).toBeVisible();
+    const before = await page.evaluate(() => window.__kk.visFramesRendered());
+    await expect
+      .poll(() => page.evaluate(() => window.__kk.visFramesRendered()), { timeout: 5000 })
+      .toBeGreaterThan(before + 10);
+    await page.locator('.vis-overlay button[title="Close (Esc)"]').click();
+  }
+  expect(errors).toEqual([]);
+  expect(await page.evaluate(() => window.__kk.visGpuErrors())).toBe(0);
+});
+
 test('double-clicking the tile scene opens the visual graph editor', async ({ page }) => {
   await boot(page);
   const id = await page.evaluate(() => {

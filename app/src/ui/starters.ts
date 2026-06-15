@@ -3,6 +3,7 @@ import { appState } from '../state';
 import { DRUM_BASE_NOTE, renderDefaultKit } from '../core/drumkit';
 import { OSC_WAVES, VCF_MODES, REVERB_ALGOS } from '../core/registry';
 import { fitFaceToContent, type FaceSpec } from '../core/face';
+import type { VisGraphData } from '../visual/types';
 
 /** Uniform shrink applied to every built-in face: smaller knobs + tighter spacing. */
 const FACE_SCALE = 0.75;
@@ -649,6 +650,111 @@ export function addPluckYea(cx: number, cy: number): void {
   });
 }
 
+// -- 3D visualizer starters (VISUALIZER_3D_PLAN.md, PR1) -------------------
+// Each drops one visualizer container with a hand-authored 3D graph. Helpers
+// mirror migrate.ts's initVisGraph shape.
+
+const vn = (id: string, type: string, params: Record<string, number> = {}): { id: string; type: string; x: number; y: number; params: Record<string, number> } =>
+  ({ id, type, x: 0, y: 0, params });
+const vw = (id: string, from: [string, string], to: [string, string]) =>
+  ({ id, from: { nodeId: from[0], portId: from[1] }, to: { nodeId: to[0], portId: to[1] } });
+
+/** Add a visualizer container with the given graph, auto-laid-out by depth. */
+function addVisualizer(label: string, cx: number, cy: number, graph: VisGraphData): void {
+  const m = appState.addModule('visualizer', cx - 140, cy - 120);
+  m.label = label;
+  // Layout by topological depth so the sub-canvas reads left→right.
+  const depth = new Map<string, number>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const w of graph.wires) {
+      const d = (depth.get(w.from.nodeId) ?? 0) + 1;
+      if (d > (depth.get(w.to.nodeId) ?? 0)) { depth.set(w.to.nodeId, d); changed = true; }
+    }
+  }
+  const rows = new Map<number, number>();
+  for (const n of graph.nodes) {
+    const d = depth.get(n.id) ?? 0;
+    const row = rows.get(d) ?? 0;
+    rows.set(d, row + 1);
+    n.x = 40 + d * 190;
+    n.y = 40 + row * 130;
+  }
+  appState.setModuleData(m.id, 'graph', graph);
+}
+
+/**
+ * Tunnel Ride: forward-flying raymarched tunnel → feedback trails → bloom.
+ * Motion is constant (always flies, even silent); the tunnel radius pulses
+ * with the level internally, so no Features wire is needed.
+ */
+export function addTunnelRide(cx: number, cy: number): void {
+  addVisualizer('Tunnel Ride', cx, cy, {
+    nodes: [
+      vn('tun', 'raytunnel', { speed: 1.2, twist: 0.1, radius: 0.9, glow: 0.6, hue: 0.6 }),
+      vn('fb', 'feedback', { zoom: 0.1, spin: 0.05, fade: 0.82 }),
+      vn('glow', 'bloom', { threshold: 0.3, amount: 1 }),
+      vn('out', 'output'),
+    ],
+    wires: [
+      vw('w1', ['tun', 'out'], ['fb', 'in']),
+      vw('w2', ['fb', 'out'], ['glow', 'in']),
+      vw('w3', ['glow', 'out'], ['out', 'in']),
+    ],
+  });
+}
+
+/** Fractal Dive: orbiting Mandelbox; bass→scale breathes, onset→spin kicks. */
+export function addFractalDive(cx: number, cy: number): void {
+  addVisualizer('Fractal Dive', cx, cy, {
+    nodes: [
+      vn('feat', 'features'),
+      vn('frac', 'sdffractal', { dist: 5, pitch: 0.2, spin: 0.06, scale: 2.5, iters: 11, glow: 0.6, hue: 0.6 }),
+      vn('glow', 'bloom', { threshold: 0.35, amount: 1.1 }),
+      vn('out', 'output'),
+    ],
+    wires: [
+      vw('w1', ['frac', 'out'], ['glow', 'in']),
+      vw('w2', ['glow', 'out'], ['out', 'in']),
+      // bass scales the Mandelbox scale (1.8–2.5 via clamp) → it breathes.
+      vw('w3', ['feat', 'bass'], ['frac', 'scale']),
+    ],
+  });
+}
+
+/** Spectrum City: orbiting 3D bar grid (instanced cubes) with bloom. */
+export function addSpectrumCity(cx: number, cy: number): void {
+  addVisualizer('Spectrum City', cx, cy, {
+    nodes: [
+      vn('city', 'bars3d', { dist: 9, pitch: 0.45, spin: 0.05, count: 8, spacing: 0.7, heightScale: 3, glow: 0.6, hue: 0.6 }),
+      vn('glow', 'bloom', { threshold: 0.35, amount: 1.1 }),
+      vn('out', 'output'),
+    ],
+    wires: [
+      vw('w1', ['city', 'out'], ['glow', 'in']),
+      vw('w2', ['glow', 'out'], ['out', 'in']),
+    ],
+  });
+}
+
+/** Particle Galaxy: note/onset bursts as additive 3D billboards, feedback + bloom. */
+export function addParticleGalaxy(cx: number, cy: number): void {
+  addVisualizer('Particle Galaxy', cx, cy, {
+    nodes: [
+      vn('swarm', 'particles3d', { dist: 6, spin: 0.08, rate: 0.6, size: 1, spread: 1.2, hue: 0.6 }),
+      vn('fb', 'feedback', { zoom: 0.06, spin: 0.03, fade: 0.85 }),
+      vn('glow', 'bloom', { threshold: 0.3, amount: 1.2 }),
+      vn('out', 'output'),
+    ],
+    wires: [
+      vw('w1', ['swarm', 'out'], ['fb', 'in']),
+      vw('w2', ['fb', 'out'], ['glow', 'in']),
+      vw('w3', ['glow', 'out'], ['out', 'in']),
+    ],
+  });
+}
+
 export interface StarterPatch {
   name: string;
   description: string;
@@ -702,6 +808,38 @@ export const STARTERS: StarterPatch[] = [
     add: () => {
       const c = patchCanvas.viewCenter();
       addPluckYea(c.x, c.y);
+    },
+  },
+  {
+    name: 'Tunnel Ride',
+    description: '3D visualizer: a raymarched endless tunnel flying forward through feedback trails + bloom — wire audio into its input',
+    add: () => {
+      const c = patchCanvas.viewCenter();
+      addTunnelRide(c.x, c.y);
+    },
+  },
+  {
+    name: 'Fractal Dive',
+    description: '3D visualizer: an orbiting Mandelbox fractal with fresnel glow; bass makes it breathe — wire audio into its input',
+    add: () => {
+      const c = patchCanvas.viewCenter();
+      addFractalDive(c.x, c.y);
+    },
+  },
+  {
+    name: 'Spectrum City',
+    description: '3D visualizer: an orbiting neon city of instanced cubes whose heights are the live spectrum + bloom — wire audio into its input',
+    add: () => {
+      const c = patchCanvas.viewCenter();
+      addSpectrumCity(c.x, c.y);
+    },
+  },
+  {
+    name: 'Particle Galaxy',
+    description: '3D visualizer: note/onset bursts explode as additive glowing billboards through an orbiting camera — wire a note + audio source',
+    add: () => {
+      const c = patchCanvas.viewCenter();
+      addParticleGalaxy(c.x, c.y);
     },
   },
 ];
