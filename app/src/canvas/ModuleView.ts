@@ -11,7 +11,7 @@ import type { ModuleDef, ParamSpec, PortSpec } from '../core/module';
 import type { ModuleInstance } from '../core/module';
 import type { ControlCurve } from '../core/types';
 import { PORT_TYPE_COLORS } from '../core/types';
-import { MODMATRIX_SIZE, WAVEFORMS } from '../core/registry';
+import { WAVEFORMS } from '../core/registry';
 import { clipFromData } from '../core/composer';
 import { isTouchMode } from '../core/mobile';
 import { appState } from '../state';
@@ -38,6 +38,7 @@ import { VisualizerFace } from './faces/visualizer';
 import { IntelligenceFace } from './faces/intelligence';
 import { LevelsFace } from './faces/levels';
 import { RecorderFace } from './faces/recorder';
+import { ModmatrixFace } from './faces/modmatrix';
 export { tickHiddenTintSource } from './faces/visThumb';
 
 
@@ -157,7 +158,7 @@ export class ModuleView extends Container {
     composer: { build: (v) => v.buildComposerFace(10, TITLE_H + 6, v.w - 20), customLayout: true, unbounded: true },
     levels: { make: () => new LevelsFace(), customLayout: true },
     recorder: { make: () => new RecorderFace(), customLayout: true },
-    modmatrix: { build: (v) => v.buildModMatrixFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawModMatrix(), customLayout: true },
+    modmatrix: { make: () => new ModmatrixFace(), customLayout: true },
     intelligence: { make: () => new IntelligenceFace(), customLayout: true },
 
     // -- compositional: param band + optional edge rails / display below ----
@@ -1470,121 +1471,6 @@ export class ModuleView extends Container {
    * slot rows + frame tables). */
   refreshSample(): void {
     this.face.refreshSample?.(this);
-  }
-
-  // -- modulation matrix face -------------------------------------------------
-
-  private matrixG: Graphics | null = null;
-  private matrixRect = { x: 0, y: 0, w: 0, h: 0 };
-
-  /** 4×4 depth grid: rows = control inputs, columns = control outputs. */
-  private buildModMatrixFace(x: number, y: number, w: number): void {
-    const labelW = 30;
-    const labelH = 14;
-    const gx = x + labelW;
-    const gy = y + labelH;
-    const gw = w - labelW;
-    const gh = Math.max(60, this.h - gy - 14);
-    this.matrixRect = { x: gx, y: gy, w: gw, h: gh };
-
-    const n = MODMATRIX_SIZE;
-    for (let j = 0; j < n; j++) {
-      const t = new Text({ text: `→${j + 1}`, style: { fontSize: 9, fill: theme.textDim } });
-      t.anchor.set(0.5, 0);
-      t.position.set(gx + (j + 0.5) * (gw / n), y);
-      t.eventMode = 'none';
-      this.addChild(t);
-    }
-    for (let i = 0; i < n; i++) {
-      const t = new Text({ text: `${i + 1}`, style: { fontSize: 9, fill: theme.textDim } });
-      t.anchor.set(1, 0.5);
-      t.position.set(gx - 6, gy + (i + 0.5) * (gh / n));
-      t.eventMode = 'none';
-      this.addChild(t);
-    }
-
-    this.matrixG = new Graphics();
-    this.addChild(this.matrixG);
-    this.drawModMatrix();
-
-    const hit = new Graphics().rect(gx, gy, gw, gh).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'ns-resize';
-    let lastTap = { cell: '', at: 0 };
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      const local = this.toLocal(e.global);
-      const i = Math.min(n - 1, Math.max(0, Math.floor(((local.y - gy) / gh) * n)));
-      const j = Math.min(n - 1, Math.max(0, Math.floor(((local.x - gx) / gw) * n)));
-      const paramId = `m${i + 1}${j + 1}`;
-      // Double-click zeroes the crossing.
-      const now = performance.now();
-      if (lastTap.cell === paramId && now - lastTap.at < 350) {
-        appState.beginUndoable();
-        appState.setParam(this.instance.id, paramId, 0);
-        this.drawModMatrix();
-        return;
-      }
-      lastTap = { cell: paramId, at: now };
-
-      appState.beginUndoable();
-      const start = this.instance.params[paramId] ?? 0;
-      const sy = e.clientY;
-      const onMove = (ev: PointerEvent) => {
-        const v = Math.min(1, Math.max(-1, start + (sy - ev.clientY) / 80));
-        appState.setParam(this.instance.id, paramId, v);
-        this.tooltip.showNow([`${i + 1}→${j + 1}: ${v.toFixed(2)}`], ev.clientX, ev.clientY);
-        this.drawModMatrix();
-      };
-      const onUp = () => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        this.tooltip.hide();
-      };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-    });
-    hit.on('pointerover', (e) =>
-      this.tooltip.show(
-        ['Mod matrix', 'Rows: inputs. Columns: outputs. Drag a cell up/down to set depth (±1); double-click zeroes it.'],
-        e.clientX,
-        e.clientY,
-      ),
-    );
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-  }
-
-  private drawModMatrix(): void {
-    if (!this.matrixG) return;
-    const { x, y, w, h } = this.matrixRect;
-    const n = MODMATRIX_SIZE;
-    const cw = w / n;
-    const ch = h / n;
-    const g = this.matrixG;
-    g.clear();
-    for (let i = 0; i < n; i++) {
-      for (let j = 0; j < n; j++) {
-        const cx = x + j * cw;
-        const cy = y + i * ch;
-        const amt = this.instance.params[`m${i + 1}${j + 1}`] ?? 0;
-        g.roundRect(cx + 1, cy + 1, cw - 2, ch - 2, 3).fill(theme.inset);
-        if (Math.abs(amt) > 0.005) {
-          // Bar grows from the cell's vertical center: up = +, down = −.
-          const mid = cy + ch / 2;
-          const barH = (Math.abs(amt) * (ch - 6)) / 2;
-          g.roundRect(
-            cx + 3,
-            amt > 0 ? mid - barH : mid,
-            cw - 6,
-            barH,
-            2,
-          ).fill(amt > 0 ? this.accent() : 0x52e07a);
-        } else {
-          g.circle(cx + cw / 2, cy + ch / 2, 1.5).fill(theme.textDim);
-        }
-      }
-    }
   }
 
   refreshParams(): void {
