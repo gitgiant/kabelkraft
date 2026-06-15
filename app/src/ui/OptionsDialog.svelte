@@ -7,7 +7,7 @@
   import { appSettings, updateSettings, UI_SCALES, type AppSettings } from '../core/settings';
   import { autosaveSize, clearAutosave } from '../core/autosave';
   import { loadSettings, type AiSettings } from '../core/aiprovider';
-  import { setTheme } from '../theme';
+  import { setTheme, THEMES } from '../theme';
   import { Engine } from '../engine/engine';
   import { audioPermissionGranted, ensureAudioPermission, listAudioDevices, onDeviceChange } from '../engine/devices';
   import { VIS_RATES, VIS_RES_SCALES } from '../visual/display';
@@ -657,8 +657,7 @@
               <span>Theme</span>
               <select class="opt-theme" bind:value={cfg.display.theme}
                 onchange={() => { setTheme(cfg.display.theme); cfg = structuredClone(appSettings()); }}>
-                <option value="dark">Dark</option>
-                <option value="light">Light</option>
+                {#each Object.entries(THEMES) as [id, t] (id)}<option value={id}>{t.label}</option>{/each}
               </select>
             </label>
             <label class="row">

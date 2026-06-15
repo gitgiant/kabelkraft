@@ -32,6 +32,12 @@
   import { patchCanvas } from '../canvas/PatchCanvas';
   import { appState } from '../state';
   import { onSettingsChange } from '../core/settings';
+  import { theme, cssHex, isLightTheme } from '../theme';
+
+  // Theme-aware canvas colors (read at draw time — drawAll runs every frame).
+  const gbg = () => cssHex(theme.graphBg);
+  /** Grid lines / overlays: light foreground on dark themes, dark on light. */
+  const fg = (a: number) => (isLightTheme() ? `rgba(40,40,52,${a})` : `rgba(255,255,255,${a})`);
 
   // PRD §8.3 reworked: full piano-roll editor for the Composer module.
   // Keys on the left, zoomable free-time note grid, per-note parameter lane,
@@ -250,7 +256,7 @@
     if (!keysEl) return;
     const { h } = gridSize();
     const ctx = keysEl.getContext('2d')!;
-    ctx.fillStyle = '#0c0c12';
+    ctx.fillStyle = gbg();
     ctx.fillRect(0, 0, KEYS_W, h);
     const first = Math.max(0, yToPitch(h));
     const last = Math.min(127, yToPitch(0));
@@ -274,7 +280,7 @@
     if (!gridEl) return;
     const { w, h } = gridSize();
     const ctx = gridEl.getContext('2d')!;
-    ctx.fillStyle = '#0c0c12';
+    ctx.fillStyle = gbg();
     ctx.fillRect(0, 0, w, h);
 
     // Row shading for black keys, octave separators.
@@ -283,11 +289,11 @@
     for (let p = first; p <= last; p++) {
       const y = pitchToY(p);
       if (BLACK.has(p % 12)) {
-        ctx.fillStyle = 'rgba(255,255,255,0.025)';
+        ctx.fillStyle = fg(0.04);
         ctx.fillRect(0, y, w, rowH);
       }
       if (p % 12 === 11) {
-        ctx.fillStyle = 'rgba(255,255,255,0.09)';
+        ctx.fillStyle = fg(0.12);
         ctx.fillRect(0, y - 0.5, w, 1);
       }
     }
@@ -297,13 +303,13 @@
     const firstBeat = Math.max(0, Math.floor(xToBeat(0)));
     const lastBeat = Math.ceil(xToBeat(w));
     if (g > 0 && g * zoomX > 5) {
-      ctx.fillStyle = 'rgba(255,255,255,0.045)';
+      ctx.fillStyle = fg(0.06);
       for (let b = Math.floor(firstBeat / g) * g; b <= lastBeat; b += g) {
         ctx.fillRect(beatToX(b), 0, 1, h);
       }
     }
     for (let b = firstBeat; b <= lastBeat; b++) {
-      ctx.fillStyle = b % 4 === 0 ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.08)';
+      ctx.fillStyle = b % 4 === 0 ? fg(0.22) : fg(0.1);
       ctx.fillRect(beatToX(b), 0, 1, h);
     }
 
@@ -337,7 +343,7 @@
 
     // Marquee.
     if (marquee) {
-      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+      ctx.strokeStyle = fg(0.8);
       ctx.setLineDash([4, 3]);
       ctx.strokeRect(
         Math.min(marquee.x0, marquee.x1) + 0.5,
@@ -353,7 +359,7 @@
       const pos = ((appState.transport.songPosition % clipLength) + clipLength) % clipLength;
       const px = beatToX(pos);
       if (px >= 0 && px <= w) {
-        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.fillStyle = fg(0.85);
         ctx.fillRect(px, 0, 1.5, h);
       }
     }
@@ -363,11 +369,11 @@
     if (!laneEl) return;
     const { w } = gridSize();
     const ctx = laneEl.getContext('2d')!;
-    ctx.fillStyle = '#0c0c12';
+    ctx.fillStyle = gbg();
     ctx.fillRect(0, 0, w, LANE_H);
     const bipolar = laneParam === 'pan';
     const zeroY = bipolar ? LANE_H / 2 : LANE_H - 2;
-    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.fillStyle = fg(0.18);
     ctx.fillRect(0, zeroY, w, 1);
     for (const n of notes) {
       const x = beatToX(n.start);

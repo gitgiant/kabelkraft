@@ -189,6 +189,16 @@ export class PatchCanvas {
         if (v.instance.type === 'composer') v.rebuild();
       }
     });
+    // Opening the graph editor / big view grows the visualizer tile in place
+    // (state mutates instance.w/h); rebuild so the tile frame matches the
+    // pinned panel instead of the panel spilling past a stale small tile.
+    const rebuildVisualizers = () => {
+      for (const v of this.views.values()) {
+        if (v.instance.type === 'visualizer') v.rebuild();
+      }
+    };
+    appState.on('visEditorChanged', rebuildVisualizers);
+    appState.on('visualizerChanged', rebuildVisualizers);
     appState.on('paramChanged', () => {
       // A synth whose mode changed needs a fresh face (mode-scoped params).
       let rebuilt = false;

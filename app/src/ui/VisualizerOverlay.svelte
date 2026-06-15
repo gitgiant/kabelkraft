@@ -5,6 +5,7 @@
   import { FrameGate, VIS_RATES, VIS_RES_SCALES, clampVisDisplay, visDisplayOf } from '../visual/display';
   import { appSettings } from '../core/settings';
   import { binFrac } from '../visual/features';
+  import { theme, cssHex } from '../theme';
   import { approximateScenes, visGraphOf } from '../visual/migrate';
   import { ContainerRenderer, graphSupported, webgpuAvailable } from '../visual/runtime';
   import type { VisFeatures, VisGraphData } from '../visual/types';
@@ -115,7 +116,7 @@
     const win = window.open('', 'kk-vis-popout', 'width=960,height=540');
     if (!win) return;
     win.document.title = 'KabelKraft Visualizer';
-    win.document.body.style.cssText = 'margin:0;background:#0c0c12;overflow:hidden';
+    win.document.body.style.cssText = `margin:0;background:${cssHex(theme.graphBg)};overflow:hidden`;
     const canvas = win.document.createElement('canvas');
     canvas.style.cssText = 'width:100vw;height:100vh;display:block';
     win.document.body.appendChild(canvas);
@@ -200,7 +201,7 @@
     if (!ctx) return;
     const W = (canvasEl.width = Math.round(canvasEl.clientWidth * res));
     const H = (canvasEl.height = Math.round(canvasEl.clientHeight * res));
-    ctx.fillStyle = '#0c0c12';
+    ctx.fillStyle = cssHex(theme.graphBg);
     ctx.fillRect(0, 0, W, H);
     if (!features) return;
 
@@ -324,7 +325,7 @@
   .vis-overlay {
     position: fixed;
     transform-origin: 0 0;
-    background: #0c0c12;
+    background: var(--graph-bg);
     border: 1px solid var(--panel-border);
     border-radius: 10px;
     display: flex;
@@ -356,9 +357,9 @@
   }
   .vis-ctl {
     font-size: 11px;
-    background: #1c1c26;
+    background: var(--control);
     color: var(--text, #cfcfda);
-    border: 1px solid #34343f;
+    border: 1px solid var(--panel-border);
     border-radius: 5px;
     padding: 2px 4px;
   }

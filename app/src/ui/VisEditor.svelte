@@ -9,7 +9,7 @@
   import { visGraphOf } from '../visual/migrate';
   import { VIS_NODE_DEFS } from '../visual/registry';
   import { ContainerRenderer, webgpuAvailable } from '../visual/runtime';
-  import type { VisGraphData, VisNodeDef, VisNodeInstance, VisPortType, VisWire } from '../visual/types';
+  import type { VisGraphData, VisNodeDef, VisNodeInstance, VisParamSpec, VisPortType, VisWire } from '../visual/types';
 
   // Visual graph editor — edits a visualizer container's nested node graph
   // (VISUALIZER_ENGINE_PLAN.md Phase 2). Opens IN PLACE: the tile grows (like
@@ -248,11 +248,16 @@
     apply();
   }
 
+  /** Delete a wire by id (double-click gesture, matches the main canvas). */
+  function deleteWire(id: string): void {
+    graph.wires = graph.wires.filter((w) => w.id !== id);
+    if (selectedWire === id) selectedWire = null;
+    apply();
+  }
+
   function removeSelected(): void {
     if (selectedWire) {
-      graph.wires = graph.wires.filter((w) => w.id !== selectedWire);
-      selectedWire = null;
-      apply();
+      deleteWire(selectedWire);
       return;
     }
     if (!selectedNode) return;
@@ -437,6 +442,36 @@
     paramGestureActive = false;
   }
 
+  // Draggable value field — gesture parity with the main canvas knobs:
+  // vertical drag to change, double-click resets to default.
+  let paramDrag: { node: VisNodeInstance; p: VisParamSpec; startY: number; startVal: number } | null = null;
+
+  function beginParamDrag(e: PointerEvent, node: VisNodeInstance, p: VisParamSpec): void {
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    paramDrag = { node, p, startY: e.clientY, startVal: node.params[p.id] ?? p.default };
+  }
+
+  function paramDragMove(e: PointerEvent): void {
+    if (!paramDrag) return;
+    const { node, p, startY, startVal } = paramDrag;
+    const range = p.max - p.min;
+    // 150px of travel sweeps the full range; up = increase.
+    const next = Math.min(p.max, Math.max(p.min, startVal + ((startY - e.clientY) / 150) * range));
+    onParamInput(node, p.id, next);
+  }
+
+  function paramDragEnd(): void {
+    if (!paramDrag) return;
+    paramDrag = null;
+    onParamCommit();
+  }
+
+  function resetParam(node: VisNodeInstance, p: VisParamSpec): void {
+    appState.beginUndoable();
+    node.params[p.id] = p.default;
+    apply(false);
+  }
+
   // -- AI generation (VISUALIZER_ENGINE_PLAN.md Phase 5) ------------------------
 
   let aiPrompt = $state('');
@@ -567,16 +602,26 @@
         >
           {#each graph.wires as w (w.id)}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- Wide invisible hit-stroke: thin wires stay easy to grab. -->
             <path
-              class="wire"
-              class:selected={selectedWire === w.id}
+              class="wire-hit"
               d={wirePath(w)}
-              stroke={wireColor(w)}
               onpointerdown={(e) => {
                 e.stopPropagation();
                 selectedWire = w.id;
                 selectedNode = null;
               }}
+              ondblclick={(e) => {
+                e.stopPropagation();
+                deleteWire(w.id);
+              }}
+            />
+            <path
+              class="wire"
+              class:selected={selectedWire === w.id}
+              d={wirePath(w)}
+              stroke={wireColor(w)}
+              pointer-events="none"
             />
           {/each}
           {#if dragWire}
@@ -758,16 +803,21 @@
                   {/each}
                 </select>
               {:else}
-                <input
-                  type="range"
-                  min={p.min}
-                  max={p.max}
-                  step={(p.max - p.min) / 100}
-                  value={node.params[p.id] ?? p.default}
-                  oninput={(e) => onParamInput(node, p.id, Number((e.currentTarget as HTMLInputElement).value))}
-                  onchange={onParamCommit}
-                />
-                <span class="pval">{(node.params[p.id] ?? p.default).toFixed(2)}</span>
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div
+                  class="pdrag"
+                  title="Drag to change · double-click to reset"
+                  onpointerdown={(e) => beginParamDrag(e, node, p)}
+                  onpointermove={paramDragMove}
+                  onpointerup={paramDragEnd}
+                  ondblclick={() => resetParam(node, p)}
+                >
+                  <div
+                    class="pfill"
+                    style="width:{(((node.params[p.id] ?? p.default) - p.min) / (p.max - p.min)) * 100}%"
+                  ></div>
+                  <span class="pval">{(node.params[p.id] ?? p.default).toFixed(2)}</span>
+                </div>
               {/if}
             </div>
           {/each}
@@ -839,14 +889,14 @@
   .graph-scroll {
     flex: 1;
     overflow: auto;
-    background: #0c0c12;
+    background: var(--graph-bg);
   }
   svg {
     display: block;
   }
   .node .body {
-    fill: #1c1c26;
-    stroke: #34343f;
+    fill: var(--control);
+    stroke: var(--panel-border);
     stroke-width: 1;
     cursor: grab;
   }
@@ -855,14 +905,14 @@
     stroke-width: 1.5;
   }
   .node .title {
-    fill: #e8e8ee;
+    fill: var(--text);
     font-size: 11px;
     font-weight: 700;
     text-anchor: middle;
     pointer-events: none;
   }
   .plabel {
-    fill: #8a8a96;
+    fill: var(--text-dim);
     font-size: 9px;
     pointer-events: none;
   }
@@ -871,26 +921,32 @@
   }
   .port {
     cursor: crosshair;
-    stroke: #0c0c12;
+    stroke: var(--graph-bg);
     stroke-width: 1.5;
   }
   .rail-head {
-    fill: #8a8a96;
+    fill: var(--text-dim);
     font-size: 9px;
     font-weight: 700;
     letter-spacing: 0.08em;
   }
   .rail-label {
-    fill: #8a8a96;
+    fill: var(--text-dim);
     font-size: 9px;
     pointer-events: none;
   }
   .pole-port {
-    stroke: #34343f;
+    stroke: var(--panel-border);
   }
   .wire {
     fill: none;
     stroke-width: 2.5;
+    cursor: pointer;
+  }
+  .wire-hit {
+    fill: none;
+    stroke: transparent;
+    stroke-width: 14;
     cursor: pointer;
   }
   .wire.selected {
@@ -913,7 +969,7 @@
   .preview {
     width: 100%;
     height: 120px;
-    background: #0c0c12;
+    background: var(--graph-bg);
     border-radius: 6px;
     flex-shrink: 0;
   }
@@ -942,14 +998,37 @@
     flex-shrink: 0;
     color: var(--text, #cfcfda);
   }
-  .param input[type='range'] {
+  .pdrag {
     flex: 1;
     min-width: 0;
+    position: relative;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0 6px;
+    background: var(--control);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    cursor: ns-resize;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+  }
+  .pfill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    background: var(--accent);
+    opacity: 0.28;
+    pointer-events: none;
   }
   .pval {
-    width: 34px;
+    position: relative;
     text-align: right;
-    color: var(--text-dim, #8a8a96);
+    color: var(--text, #cfcfda);
+    pointer-events: none;
   }
   .param select {
     flex: 1;
@@ -958,8 +1037,8 @@
     display: block;
     font-size: 11px;
     padding: 5px 8px;
-    background: #1c1c26;
-    border: 1px dashed #34343f;
+    background: var(--control);
+    border: 1px dashed var(--panel-border);
     border-radius: 6px;
     cursor: pointer;
     color: var(--text, #cfcfda);
@@ -974,8 +1053,8 @@
     width: 100%;
     font-size: 12px;
     padding: 5px 8px;
-    background: #1c1c26;
-    border: 1px solid #34343f;
+    background: var(--control);
+    border: 1px solid var(--panel-border);
     border-radius: 6px;
     color: var(--text, #e8e8ee);
   }

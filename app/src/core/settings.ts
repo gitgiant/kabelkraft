@@ -9,7 +9,9 @@
 
 import { DEFAULT_SETTINGS as DEFAULT_AI_SETTINGS, sanitizeAiSettings, type AiSettings } from './aisettings';
 
-export type ThemeName = 'dark' | 'light';
+export type ThemeName = 'dark' | 'light' | 'solarized-dark' | 'solarized-light';
+
+const THEME_NAMES: readonly ThemeName[] = ['dark', 'light', 'solarized-dark', 'solarized-light'];
 
 /** Touch controls: auto-detect a coarse pointer, or force on/off. */
 export type TouchModePref = 'auto' | 'on' | 'off';
@@ -97,7 +99,7 @@ export function sanitizeSettings(raw: unknown): AppSettings {
   return {
     version: 1,
     display: {
-      theme: s.display?.theme === 'light' ? 'light' : 'dark',
+      theme: THEME_NAMES.includes(s.display?.theme as ThemeName) ? (s.display!.theme as ThemeName) : 'dark',
       uiScale: clamp(s.display?.uiScale, 0.75, 1.5, d.display.uiScale),
       visMaxFps: clamp(s.display?.visMaxFps, 1, 240, d.display.visMaxFps),
       visMaxRes: clamp(s.display?.visMaxRes, 0.25, 1, d.display.visMaxRes),

@@ -2005,7 +2005,7 @@ export class ModuleView extends Container {
   private buildComposerFace(x: number, y: number, w: number): void {
     const h = this.h - y - 12;
     this.compRect = { x, y, w, h };
-    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(0x0c0c12);
+    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(theme.graphBg);
     bg.eventMode = 'static';
     bg.cursor = 'pointer';
     bg.on('pointertap', (e) => {
@@ -2081,7 +2081,7 @@ export class ModuleView extends Container {
   private buildVisFace(x: number, y: number, w: number): void {
     const h = this.h - y - 12;
     this.visRect = { x, y, w, h };
-    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(0x0c0c12);
+    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(theme.graphBg);
     // Double-click anywhere on the scene opens the graph editor.
     bg.eventMode = 'static';
     bg.cursor = 'pointer';
@@ -2303,7 +2303,7 @@ export class ModuleView extends Container {
 
   private buildTextFace(x: number, y: number, w: number): void {
     const h = this.h - y - 12;
-    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(0x0c0c12);
+    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(theme.graphBg);
     this.addChild(bg);
 
     this.textFaceStatus = new Text({ text: '', style: { fontSize: 10, fill: theme.textDim } });
