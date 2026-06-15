@@ -13,13 +13,6 @@ import type { ControlCurve } from '../core/types';
 import { PORT_TYPE_COLORS } from '../core/types';
 import { MODMATRIX_SIZE, WAVEFORMS } from '../core/registry';
 import { clipFromData } from '../core/composer';
-import { sampleKey } from '../core/samples';
-import {
-  buildWavetable,
-  defaultWavetable,
-  framePoints,
-  type WtTable,
-} from '../core/wavetable';
 import { isTouchMode } from '../core/mobile';
 import { appState } from '../state';
 import { ensureAudioPermission, listAudioDevices } from '../engine/devices';
@@ -43,6 +36,7 @@ import { GranularFace } from './faces/granular';
 import { StepGridFace } from './faces/sequencer';
 import { TextFace } from './faces/text';
 import { SamplerFace } from './faces/sampler';
+import { WtoscFace } from './faces/wtosc';
 
 
 /**
@@ -235,7 +229,7 @@ export class ModuleView extends Container {
     sequencer: { make: () => new StepGridFace(), customLayout: true },
     smpl: { make: () => new SamplerFace(), customLayout: true },
     visualizer: { build: (v) => v.buildParamFace({ display: (c) => v.buildVisFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true, unbounded: true },
-    wtosc: { build: (v) => v.buildParamFace({ bottomRow: 'wavetable', display: (c) => v.buildWtDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4)) }), customLayout: true },
+    wtosc: { make: () => new WtoscFace(), customLayout: true },
     pluck: { make: () => new StringFace(), customLayout: true },
     resonator: { make: () => new StringFace(), customLayout: true },
     addosc: { make: () => new SpectrumFace(), customLayout: true },
@@ -374,12 +368,7 @@ export class ModuleView extends Container {
     this.lastCompData = null;
     this.visG = null;
     this.midiDeviceText = null;
-    // (peq/vcf curve state now lives on their FaceRenderer objects)
-    this.wtRowTextA = null;
-    this.wtRowTextB = null;
-    this.wtDisplay = null;
-    this.wtTableA = null;
-    this.wtTableB = null;
+    // (peq/vcf curve + wtosc table state now lives on their FaceRenderer objects)
     this.recButton = null;
     this.recLabel = null;
     this.recElapsed = null;
@@ -1164,7 +1153,7 @@ export class ModuleView extends Container {
    */
   buildParamFace(opts: {
     rail?: 'vmeterOut' | 'vmeterIn' | 'grmeter';
-    bottomRow?: 'wavetable' | 'midi' | 'audioIn' | 'audioOut';
+    bottomRow?: 'midi' | 'audioIn' | 'audioOut';
     display?: (ctx: { x: number; top: number; gw: number; band: number; bottom: number }) => void;
   } = {}): void {
     const x = 10;
@@ -1187,10 +1176,7 @@ export class ModuleView extends Container {
 
     // Bottom-anchored utility row.
     let bottom = this.h - 8;
-    if (opts.bottomRow === 'wavetable') {
-      this.buildWavetableRow(x, this.h - 40, w);
-      bottom -= 42;
-    } else if (opts.bottomRow === 'midi') {
+    if (opts.bottomRow === 'midi') {
       this.buildMidiDeviceRow(x, this.h - 24, w);
       bottom -= 26;
     } else if (opts.bottomRow === 'audioIn') {
@@ -1772,141 +1758,6 @@ export class ModuleView extends Container {
   // -- drum machine face -----------------------------------------------------
 
 
-  // -- synth wavetable loader --------------------------------------------------
-
-  private wtRowTextA: Text | null = null;
-  private wtRowTextB: Text | null = null;
-
-  private buildWavetableRow(x: number, y: number, w: number): void {
-    this.wtRowTextA = this.buildWtSlotRow(x, y, w, 0);
-    this.wtRowTextB = this.buildWtSlotRow(x, y + 18, w, 1);
-    this.updateWtRowText();
-  }
-
-  /** One A/B wavetable-slot row: label text + click-to-load hit rect. */
-  private buildWtSlotRow(x: number, y: number, w: number, slot: number): Text {
-    const text = new Text({ text: '', style: { fontSize: 10, fill: theme.textDim } });
-    text.position.set(x, y);
-    this.addChild(text);
-
-    const hit = new Graphics().rect(x - 4, y - 3, w + 8, 17).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'pointer';
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'audio/*';
-      input.onchange = () => {
-        const file = input.files?.[0];
-        if (file) void appState.loadSampleFile(this.instance.id, file, slot);
-      };
-      input.click();
-    });
-    hit.on('pointerover', (e) =>
-      this.tooltip.show(
-        [
-          `Wavetable ${slot === 1 ? 'B' : 'A'}`,
-          'Click to load a wavetable file (2048-sample frames; short files become one cycle). Morph crossfades A↔B.',
-        ],
-        e.clientX,
-        e.clientY,
-      ),
-    );
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-    return text;
-  }
-
-  private updateWtRowText(): void {
-    const data = this.instance.data ?? {};
-    if (this.wtRowTextA) {
-      const a = (data.sampleNameA as string) || '';
-      this.wtRowTextA.text = a ? `A: ${a}` : 'A: built-in — click to load';
-    }
-    if (this.wtRowTextB) {
-      const b = (data.sampleNameB as string) || '';
-      this.wtRowTextB.text = b ? `B: ${b}` : 'B: (empty) — click to load';
-    }
-  }
-
-  // -- wavetable display: 2.5D frame stack + resolved output cycle -----------
-
-  private wtDisplay: Graphics | null = null;
-  private wtDisplayRect = { x: 0, y: 0, w: 0, h: 0 };
-  private wtTableA: WtTable | null = null;
-  private wtTableB: WtTable | null = null;
-  private wtLastDraw = { pos: -1, morph: -1 };
-
-  private buildWtDisplay(x: number, y: number, w: number, h: number): void {
-    this.wtDisplayRect = { x, y, w, h: Math.max(40, h) };
-    this.wtDisplay = new Graphics();
-    this.addChild(this.wtDisplay);
-    this.rebuildWtTables();
-    this.wtLastDraw = { pos: -1, morph: -1 };
-    this.drawWtDisplay(0, 0);
-  }
-
-  /** (Re)build the A/B frame tables from loaded PCM, or the built-in default for A. */
-  private rebuildWtTables(): void {
-    const a = appState.samples.get(sampleKey(this.instance.id, 0));
-    const b = appState.samples.get(sampleKey(this.instance.id, 1));
-    this.wtTableA = (a && buildWavetable(a.channels[0])) || defaultWavetable();
-    this.wtTableB = (b && buildWavetable(b.channels[0])) || null;
-    this.wtLastDraw = { pos: -1, morph: -1 }; // force redraw with fresh tables
-  }
-
-  private drawWtDisplay(pos: number, morph: number): void {
-    const g = this.wtDisplay;
-    if (!g || !this.wtTableA) return;
-    const { x, y, w, h } = this.wtDisplayRect;
-    g.clear();
-    g.roundRect(x, y, w, h, 4).fill({ color: 0x0d0d14 }).stroke({ width: 1, color: 0x2a2a36 });
-
-    const stackH = h * 0.6;
-    const cycleH = h - stackH;
-    const N = 72;
-
-    // -- 2.5D frame stack (back-to-front), highlight the frame at `pos` ------
-    const wtA = this.wtTableA;
-    const shown = Math.min(wtA.frames, 16);
-    const depthX = w * 0.22;
-    const plotW = w - depthX - 10;
-    const rowTop = y + 8;
-    const rowH = stackH - 16;
-    const curFrame = pos * (wtA.frames - 1);
-    for (let s = 0; s < shown; s++) {
-      const f = shown === 1 ? 0 : (s / (shown - 1)) * (wtA.frames - 1);
-      const depth = shown === 1 ? 1 : s / (shown - 1); // 0 = back, 1 = front
-      const ox = x + 6 + (1 - depth) * depthX;
-      const oy = rowTop + depth * (rowH - 14) + 10;
-      const amp = 5 + depth * 7;
-      const near = Math.abs(f - curFrame) < (wtA.frames - 1) / shown / 2 + 0.5;
-      const pts = framePoints(wtA, wtA.frames > 1 ? f / (wtA.frames - 1) : 0, N);
-      for (let k = 0; k < N; k++) {
-        const px = ox + (k / (N - 1)) * plotW;
-        const py = oy - pts[k] * amp;
-        if (k === 0) g.moveTo(px, py);
-        else g.lineTo(px, py);
-      }
-      g.stroke({ width: near ? 1.6 : 1, color: near ? 0xffb13d : 0x4a4a64, alpha: near ? 1 : 0.5 + depth * 0.3 });
-    }
-
-    // -- resolved output cycle (A@pos crossfaded with B@pos by morph) --------
-    const cy = y + stackH + cycleH / 2;
-    const cAmp = cycleH / 2 - 6;
-    const aPts = framePoints(wtA, pos, N);
-    const bPts = morph > 0 && this.wtTableB ? framePoints(this.wtTableB, pos, N) : null;
-    for (let k = 0; k < N; k++) {
-      const v = bPts ? aPts[k] * (1 - morph) + bPts[k] * morph : aPts[k];
-      const px = x + 6 + (k / (N - 1)) * (w - 12);
-      const py = cy - v * cAmp;
-      if (k === 0) g.moveTo(px, py);
-      else g.lineTo(px, py);
-    }
-    g.stroke({ width: 1.8, color: 0xffb13d });
-  }
-
   // -- recorder face -----------------------------------------------------------
 
   private recButton: Graphics | null = null;
@@ -1962,11 +1813,9 @@ export class ModuleView extends Container {
     this.recLabel.text = recording ? '■ STOP' : '● REC';
   }
 
-  /** A sample/wavetable loaded: refresh wt slot rows + tables, then let the
-   * face redraw its own waveform (sampler/granular). */
+  /** A sample/wavetable loaded: let the face redraw (sampler waveform, wtosc
+   * slot rows + frame tables). */
   refreshSample(): void {
-    this.updateWtRowText();
-    if (this.wtDisplay) this.rebuildWtTables();
     this.face.refreshSample?.(this);
   }
 
@@ -2171,16 +2020,6 @@ export class ModuleView extends Container {
       this.drawRecButton();
     }
     if (this.visG) this.drawVisScene();
-    if (this.wtDisplay) {
-      const d = appState.wtData[this.instance.id];
-      const params = this.instance.params;
-      const pos = d ? d.pos : Math.min(1, Math.max(0, Number(params.wtPos) || 0));
-      const morph = d ? d.morph : Math.min(1, Math.max(0, Number(params.morph) || 0));
-      if (Math.abs(pos - this.wtLastDraw.pos) > 0.002 || Math.abs(morph - this.wtLastDraw.morph) > 0.002) {
-        this.wtLastDraw = { pos, morph };
-        this.drawWtDisplay(pos, morph);
-      }
-    }
     if (this.compG) {
       let pos = -1;
       if (appState.transport.playing) {
