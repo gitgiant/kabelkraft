@@ -11,13 +11,7 @@ import type { ModuleDef, ParamSpec, PortSpec } from '../core/module';
 import type { ModuleInstance } from '../core/module';
 import type { ControlCurve } from '../core/types';
 import { PORT_TYPE_COLORS } from '../core/types';
-import {
-  MODMATRIX_SIZE,
-  SEQ_PITCH_MAX,
-  SEQ_PITCH_MIN,
-  WAVEFORMS,
-  type SeqStep,
-} from '../core/registry';
+import { MODMATRIX_SIZE, WAVEFORMS } from '../core/registry';
 import { clipFromData } from '../core/composer';
 import { sampleKey } from '../core/samples';
 import {
@@ -46,8 +40,8 @@ import { ButtonFace, KnobFace, SliderFace, XyFace } from './faces/controls';
 import { StringFace } from './faces/string';
 import { SpectrumFace } from './faces/spectrum';
 import { GranularFace } from './faces/granular';
+import { StepGridFace } from './faces/sequencer';
 
-const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
 /**
  * Shared GPU tile thumbnails: one offscreen renderer per visualizer module,
@@ -118,9 +112,6 @@ export function hslToHex(h: number, s: number, l: number): number {
   return (Math.round(f(0) * 255) << 16) | (Math.round(f(8) * 255) << 8) | Math.round(f(4) * 255);
 }
 
-function noteName(pitch: number): string {
-  return `${NOTE_NAMES[((pitch % 12) + 12) % 12]}${Math.floor(pitch / 12) - 1}`;
-}
 
 export const PORT_RADIUS = 7;
 const TITLE_H = 24;
@@ -239,7 +230,7 @@ export class ModuleView extends Container {
     // -- compositional: param band + optional edge rails / display below ----
     keyboard: { build: (v) => v.buildParamFace({ display: (c) => v.buildKeys(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
     transport: { build: (v) => v.buildParamFace({ display: (c) => v.buildTransportButtons(v.w / 2 - 84, c.top + c.band + 10) }), customLayout: true, fixedMin: true },
-    sequencer: { build: (v) => v.buildParamFace({ display: (c) => v.buildStepGrid(c.x, c.top + c.band + 6, c.gw) }), customLayout: true },
+    sequencer: { make: () => new StepGridFace(), customLayout: true },
     smpl: { build: (v) => v.buildParamFace({ display: (c) => v.buildSamplerFace(c.x, c.top + c.band + 6, c.gw) }), customLayout: true },
     visualizer: { build: (v) => v.buildParamFace({ display: (c) => v.buildVisFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true, unbounded: true },
     wtosc: { build: (v) => v.buildParamFace({ bottomRow: 'wavetable', display: (c) => v.buildWtDisplay(c.x, c.top + c.band + 4, c.gw, c.bottom - (c.top + c.band + 4)) }), customLayout: true },
@@ -392,8 +383,6 @@ export class ModuleView extends Container {
     this.recElapsed = null;
     this.waveform = null;
     this.sampleNameText = null;
-    this.stepGrid = null;
-    this.lastDrawnStep = -1;
 
     this.body = new Graphics();
     this.addChild(this.body);
@@ -2153,187 +2142,6 @@ export class ModuleView extends Container {
     g.stroke({ width: 1, color: 0xffb13d, alpha: 0.9 });
   }
 
-  // -- sequencer step grid ---------------------------------------------------
-
-  private stepGrid: Graphics | null = null;
-  private stepGridRect = { x: 0, y: 0, w: 0, h: 0 };
-  private lastDrawnStep = -1;
-
-  private steps(): SeqStep[] {
-    return (this.instance.data?.steps as SeqStep[]) ?? [];
-  }
-
-  /** Rows visible in the pitch grid (one octave). */
-  private static readonly SEQ_GRID_ROWS = 12;
-
-  /** Lowest pitch of the visible grid window — stored, else fit to pattern. */
-  private seqGridLo(): number {
-    const maxLo = SEQ_PITCH_MAX - ModuleView.SEQ_GRID_ROWS + 1;
-    const stored = Number(this.instance.data?.gridLo);
-    if (Number.isFinite(stored) && stored > 0) {
-      return Math.min(maxLo, Math.max(SEQ_PITCH_MIN, Math.round(stored)));
-    }
-    const on = this.steps().filter((s) => s.on).map((s) => s.pitch);
-    const lo = on.length ? Math.min(...on) : 57;
-    return Math.min(maxLo, Math.max(SEQ_PITCH_MIN, lo));
-  }
-
-  private buildStepGrid(x: number, y: number, w: number): void {
-    const h = Math.max(30, this.h - y - 12);
-    const gridW = w - 16; // room for the pitch-window shift buttons
-    this.stepGridRect = { x, y, w: gridW, h };
-    this.stepGrid = new Graphics();
-    this.addChild(this.stepGrid);
-    this.drawStepGrid();
-
-    const hit = new Graphics().rect(x, y, gridW, h).fill({ color: 0xffffff, alpha: 0.001 });
-    hit.eventMode = 'static';
-    hit.cursor = 'pointer';
-    hit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      this.beginStepEdit(e);
-    });
-    hit.on('pointerover', (e) =>
-      this.tooltip.show(
-        ['Steps', 'Rows are pitches. Click a tile to set it, click again to clear; drag to paint. ▲▼ shift the octave window.'],
-        e.clientX,
-        e.clientY,
-      ),
-    );
-    hit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(hit);
-
-    // Pitch-window shift buttons (right edge).
-    const shift = (glyph: string, by: number, ty: number) => {
-      const t = new Text({ text: glyph, style: { fontSize: 10, fill: theme.textDim } });
-      t.anchor.set(0.5, 0.5);
-      t.position.set(x + w - 7, ty);
-      t.eventMode = 'static';
-      t.cursor = 'pointer';
-      t.hitArea = { contains: (px, py) => Math.abs(px) < 10 && Math.abs(py) < 12 };
-      t.on('pointerdown', (e) => {
-        e.stopPropagation();
-        const maxLo = SEQ_PITCH_MAX - ModuleView.SEQ_GRID_ROWS + 1;
-        const next = Math.min(maxLo, Math.max(SEQ_PITCH_MIN, this.seqGridLo() + by));
-        appState.setModuleData(this.instance.id, 'gridLo', next);
-        this.drawStepGrid(this.lastDrawnStep);
-      });
-      t.on('pointerover', (e) =>
-        this.tooltip.show([`Shift pitch window ${by > 0 ? 'up' : 'down'}`], e.clientX, e.clientY),
-      );
-      t.on('pointerout', () => this.tooltip.hide());
-      this.addChild(t);
-    };
-    shift('▲', 1, y + 8);
-    shift('▼', -1, y + h - 8);
-  }
-
-  private stepIndexAt(localX: number): number {
-    const { x, w } = this.stepGridRect;
-    const steps = this.steps();
-    return Math.min(steps.length - 1, Math.max(0, Math.floor(((localX - x) / w) * steps.length)));
-  }
-
-  /** Pitch of the grid row under a tile-local y (rows top→bottom = high→low). */
-  private stepPitchAt(localY: number): number {
-    const { y, h } = this.stepGridRect;
-    const rows = ModuleView.SEQ_GRID_ROWS;
-    const row = Math.min(rows - 1, Math.max(0, Math.floor(((localY - y) / h) * rows)));
-    return this.seqGridLo() + (rows - 1 - row);
-  }
-
-  private beginStepEdit(e: FederatedPointerEvent): void {
-    appState.beginUndoable();
-    const steps = this.steps();
-    const first = this.toLocal(e.global);
-    const firstIdx = this.stepIndexAt(first.x);
-    const firstPitch = this.stepPitchAt(first.y);
-    const firstStep = steps[firstIdx];
-    if (!firstStep) return;
-    // Clicking a step's lit tile erases; anything else paints (and dragging
-    // continues in the same mode, painting/erasing every tile crossed).
-    const erase = firstStep.on && firstStep.pitch === firstPitch;
-
-    const commit = () => {
-      appState.setModuleData(this.instance.id, 'steps', [...steps]);
-      this.drawStepGrid(this.lastDrawnStep);
-    };
-    const apply = (localX: number, localY: number, clientX: number, clientY: number) => {
-      const idx = this.stepIndexAt(localX);
-      const pitch = this.stepPitchAt(localY);
-      const step = steps[idx];
-      if (!step) return;
-      if (erase) {
-        step.on = false;
-      } else {
-        step.on = true;
-        step.pitch = pitch;
-        this.tooltip.showNow([noteName(pitch)], clientX, clientY);
-      }
-      commit();
-    };
-    apply(first.x, first.y, e.clientX, e.clientY);
-
-    const scale = this.worldTransform.a || 1;
-    const sx = e.clientX;
-    const sy = e.clientY;
-    const onMove = (ev: PointerEvent) => {
-      apply(
-        first.x + (ev.clientX - sx) / scale,
-        first.y + (ev.clientY - sy) / scale,
-        ev.clientX,
-        ev.clientY,
-      );
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      this.tooltip.hide();
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-
-  private drawStepGrid(playhead = -1): void {
-    if (!this.stepGrid) return;
-    const { x, y, w, h } = this.stepGridRect;
-    const steps = this.steps();
-    if (steps.length === 0) return;
-    const rows = ModuleView.SEQ_GRID_ROWS;
-    const lo = this.seqGridLo();
-    const hi = lo + rows - 1;
-    const cellW = w / steps.length;
-    const cellH = h / rows;
-    const g = this.stepGrid;
-    g.clear();
-    for (let i = 0; i < steps.length; i++) {
-      const cx = x + i * cellW;
-      const step = steps[i];
-      for (let r = 0; r < rows; r++) {
-        const pitch = lo + (rows - 1 - r);
-        const cy = y + r * cellH;
-        const isC = pitch % 12 === 0;
-        g.roundRect(cx + 1, cy + 0.5, cellW - 2, cellH - 1, 2)
-          .fill({ color: theme.inset, alpha: isC ? 0.6 : 1 });
-        if (step.on && step.pitch === pitch) {
-          g.roundRect(cx + 1.5, cy + 1, cellW - 3, cellH - 2, 2)
-            .fill(i === playhead ? 0x7fe9ff : 0x3dd9ff);
-        }
-      }
-      // Active step outside the visible window: edge marker.
-      if (step.on && step.pitch > hi) {
-        g.moveTo(cx + cellW / 2 - 3, y + 6).lineTo(cx + cellW / 2 + 3, y + 6)
-          .lineTo(cx + cellW / 2, y + 1).closePath().fill(0x3dd9ff);
-      } else if (step.on && step.pitch < lo) {
-        g.moveTo(cx + cellW / 2 - 3, y + h - 6).lineTo(cx + cellW / 2 + 3, y + h - 6)
-          .lineTo(cx + cellW / 2, y + h - 1).closePath().fill(0x3dd9ff);
-      }
-      if (i === playhead) {
-        g.roundRect(cx + 1, y, cellW - 2, h, 2).fill({ color: 0xffffff, alpha: 0.12 });
-      }
-    }
-  }
-
   // -- modulation matrix face -------------------------------------------------
 
   private matrixG: Graphics | null = null;
@@ -2533,14 +2341,6 @@ export class ModuleView extends Container {
           : '0.0 s';
       // Keep the button in sync if recording was toggled elsewhere.
       this.drawRecButton();
-    }
-    if (this.stepGrid) {
-      const step = appState.seqSteps[this.instance.id] ?? -1;
-      const current = appState.transport.playing ? step : -1;
-      if (current !== this.lastDrawnStep) {
-        this.lastDrawnStep = current;
-        this.drawStepGrid(current);
-      }
     }
     if (this.visG) this.drawVisScene();
     if (this.wtDisplay) {
