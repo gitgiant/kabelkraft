@@ -10,6 +10,8 @@ export interface FaceRenderer {
   build(view: ModuleView): void;
   /** Redraw live visuals (curves, meters) on a param change. */
   refresh?(view: ModuleView): void;
+  /** A sample/wavetable finished loading for this module — redraw waveforms. */
+  refreshSample?(view: ModuleView): void;
   /** Per-frame update from worklet state (playheads, meters, spectra). */
   live?(view: ModuleView): void;
 }
