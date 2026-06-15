@@ -470,6 +470,15 @@ export class GroupView extends Container {
     return (b.value - b.spec.min) / (b.spec.max - b.spec.min || 1);
   }
 
+  /** Formatted live value of a bound param, for hover/drag readout. */
+  private faceVal(moduleId?: string, paramId?: string): string {
+    const b = this.boundParam(moduleId, paramId);
+    if (!b) return '';
+    return b.spec.options
+      ? b.spec.options[Math.round(b.value)] ?? String(b.value)
+      : `${Math.abs(b.value) >= 100 ? b.value.toFixed(0) : b.value.toFixed(2)}${b.spec.unit ? ` ${b.spec.unit}` : ''}`;
+  }
+
   private setNorm(moduleId: string, spec: ParamSpec, paramId: string, norm: number): void {
     const clamped = Math.min(1, Math.max(0, norm));
     let v = spec.min + clamped * (spec.max - spec.min);
@@ -654,10 +663,23 @@ export class GroupView extends Container {
         this.beginFaceDrag(e, (_dx, dy) => {
           this.setNorm(b.moduleId, b.spec, b.paramId, start - dy / 120);
           redraw();
+          this.tooltip.showNow(
+            [`${el.label ?? 'Knob'}: ${this.faceVal(el.moduleId, el.paramId)}`],
+            e.clientX,
+            e.clientY,
+          );
         });
+        window.addEventListener('pointerup', () => this.tooltip.hide(), { once: true });
       });
       hit.on('pointerover', (e) =>
-        this.tooltip.show(this.elementTip(el, [el.label ?? 'Knob', 'Drag up/down.']), e.clientX, e.clientY),
+        this.tooltip.show(
+          this.elementTip(el, [
+            `${el.label ?? 'Knob'}: ${this.faceVal(el.moduleId, el.paramId)}`,
+            'Drag up/down.',
+          ]),
+          e.clientX,
+          e.clientY,
+        ),
       );
       hit.on('pointerout', () => this.tooltip.hide());
       wrap.addChild(hit);

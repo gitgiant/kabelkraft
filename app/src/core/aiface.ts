@@ -8,7 +8,7 @@
 
 import { extractJson, parseFace } from './aiimport';
 import { FACE_ELEMENT_RULES } from './aispec';
-import { meterTargets, type FaceSpec } from './face';
+import { fitFaceToContent, meterTargets, type FaceSpec } from './face';
 import type { Graph } from './graph';
 import { MODULE_DEFS } from './registry';
 
@@ -112,5 +112,5 @@ export function parseKkFace(text: string, graph: Graph, groupId: string): ParseF
       warnings,
     };
   }
-  return { ok: true, errors: [], warnings, face };
+  return { ok: true, errors: [], warnings, face: fitFaceToContent(face) };
 }

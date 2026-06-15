@@ -547,7 +547,7 @@ export class PatchCanvas {
       }, this.tooltip);
       this.moduleLayer.addChild(view);
       this.views.set(inst.id, view);
-      this.resolveCollisions(view); // newly placed modules must not overlap (PRD §5)
+      this.placeInOpenSpace(view); // newly placed modules drop into empty space (PRD §5)
     }
 
     // Group tiles and frames are few — rebuild from scratch each change.
@@ -834,7 +834,53 @@ export class PatchCanvas {
     this.showTrash();
   }
 
-  /** Keep modules from overlapping (PRD §5): push the dropped module out. */
+  /**
+   * Drop a freshly placed module into genuinely empty space (PRD §5). Searches
+   * expanding square rings out from its requested spot for the nearest gap that
+   * clears every other tile — modules *and* collapsed group/container tiles — so
+   * it never spawns buried under or overlapping anything.
+   */
+  private placeInOpenSpace(view: ModuleView): void {
+    const margin = 16;
+    const w = view.w, h = view.h;
+    const obstacles: Array<{ x: number; y: number; w: number; h: number }> = [];
+    for (const other of this.views.values()) {
+      if (other === view || !other.visible) continue;
+      obstacles.push({ x: other.position.x, y: other.position.y, w: other.w, h: other.h });
+    }
+    for (const gv of this.groupViews.values()) {
+      if (!gv.visible) continue;
+      obstacles.push({ x: gv.position.x, y: gv.position.y, w: gv.tileWidth, h: gv.tileHeight });
+    }
+    const free = (px: number, py: number): boolean =>
+      !obstacles.some(
+        (b) =>
+          px - margin < b.x + b.w &&
+          px + w + margin > b.x &&
+          py - margin < b.y + b.h &&
+          py + h + margin > b.y,
+      );
+
+    const x0 = view.position.x, y0 = view.position.y;
+    let found: { x: number; y: number } | null = free(x0, y0) ? { x: x0, y: y0 } : null;
+    const step = 48;
+    for (let ring = 1; ring <= 80 && !found; ring++) {
+      for (let gx = -ring; gx <= ring && !found; gx++) {
+        for (let gy = -ring; gy <= ring && !found; gy++) {
+          if (Math.max(Math.abs(gx), Math.abs(gy)) !== ring) continue; // ring border only
+          const px = x0 + gx * step, py = y0 + gy * step;
+          if (free(px, py)) found = { x: px, y: py };
+        }
+      }
+    }
+
+    const pos = found ?? { x: x0, y: y0 };
+    view.position.set(pos.x, pos.y);
+    view.instance.x = pos.x;
+    view.instance.y = pos.y;
+  }
+
+  /** Gentle de-overlap after a hand-drop: nudge off overlapping modules only. */
   private resolveCollisions(view: ModuleView): void {
     const margin = 10;
     for (let iter = 0; iter < 8; iter++) {

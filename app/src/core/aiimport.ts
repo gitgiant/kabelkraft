@@ -5,7 +5,7 @@
  * (unknown param, out-of-range value) become warnings and are fixed up.
  */
 
-import { ELEMENT_DEFAULTS, type FaceElement, type FaceElementKind, type FaceSpec } from './face';
+import { ELEMENT_DEFAULTS, fitFaceToContent, type FaceElement, type FaceElementKind, type FaceSpec } from './face';
 import type { ModuleDef } from './module';
 
 export interface KkGroupWireEnd {
@@ -283,7 +283,8 @@ export function parseKkGroup(text: string, defs: Map<string, ModuleDef>): ParseR
 
   if (errors.length > 0) return { ok: false, errors, warnings };
 
-  const face = parseFace(doc.face, byId, defs, warnings);
+  const parsed = parseFace(doc.face, byId, defs, warnings);
+  const face = parsed ? fitFaceToContent(parsed) : parsed;
   return {
     ok: true,
     errors,

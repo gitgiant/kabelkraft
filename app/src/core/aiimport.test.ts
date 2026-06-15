@@ -153,7 +153,9 @@ describe('AI face parsing', () => {
     const knob = r.patch!.face!.elements.find((e) => e.kind === 'knob')!;
     expect(knob.moduleId).toBe('a');
     expect(knob.paramId).toBe('level');
-    expect(r.patch!.face!.width).toBe(300);
+    // Face is shrunk to its element bounds, not the declared 300×200.
+    expect(r.patch!.face!.width).toBeLessThan(300);
+    expect(r.patch!.face!.width).toBeGreaterThanOrEqual(106); // widest element: label at x10 + default w96
   });
 
   it('warns and unbinds a knob whose param is unknown, but still imports', () => {

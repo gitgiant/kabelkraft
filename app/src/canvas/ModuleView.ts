@@ -118,12 +118,14 @@ function noteName(pitch: number): string {
 export const PORT_RADIUS = 7;
 const TITLE_H = 24;
 export { TITLE_H as MODULE_TITLE_H };
-/** Minimum knob-grid cell width / nominal fixed-band cell height. */
-const CELL_W = 52;
-const CELL_H = 48;
+/** Nominal column pitch for the auto knob grid. */
+const CELL_W = 46;
 
 /** Display width (seconds) of the sustain plateau in the envelope contour. */
 const SUSTAIN_DISPLAY_S = 0.4;
+
+/** Curve params edited by dragging the contour — kept out of the knob grid. */
+const ENV_CURVE_IDS = new Set(['atkCurve', 'decCurve', 'relCurve']);
 
 /**
  * Per-stage envelope curve: linear phase t∈[0,1] → shaped 0..1. Mirrors
@@ -139,6 +141,21 @@ function envShape(t: number, c: number): number {
 
 const CTRL_HINT =
   'Drag. Double-click: default. Shift-double-click: type. Alt-click: MIDI learn.';
+
+/** Trim a label in place with a trailing ellipsis so it fits maxW px. */
+function fitLabel(t: Text, maxW: number): void {
+  if (maxW <= 0 || t.width <= maxW) return;
+  const full = t.text;
+  let lo = 0;
+  let hi = full.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    t.text = full.slice(0, mid) + '…';
+    if (t.width <= maxW) lo = mid;
+    else hi = mid - 1;
+  }
+  t.text = lo > 0 ? full.slice(0, lo) + '…' : '…';
+}
 
 export interface PortHandlers {
   onPortDown(moduleId: string, portId: string, e: FederatedPointerEvent): void;
@@ -222,12 +239,53 @@ export class ModuleView extends Container {
 
   // -- size ----------------------------------------------------------------
 
-  /** Current tile width: instance override clamped to sane bounds. */
+  /** Types whose face draws its own layout (curves, displays, device rows,
+   * embedded editors) — they keep their hand-tuned def size; everything else
+   * is a pure param grid and auto-fits to its content. */
+  private static readonly CUSTOM_LAYOUT_TYPES = new Set([
+    'peq', 'vcf', 'envelope', 'knob', 'slider', 'xy', 'button', 'mixer',
+    'composer', 'levels', 'recorder', 'modmatrix', 'intelligence', 'audioOut',
+    'audioIn', 'compressor', 'limiter', 'mbcomp', 'wtosc', 'midiIn', 'midiOut',
+    'keyboard', 'transport', 'sequencer', 'smpl', 'visualizer', 'bgvisual',
+    'stt', 'textinput', 'transporttext', 'notenames', 'lyrics', 'pluck',
+    'resonator', 'addosc', 'granular',
+  ]);
+
+  private isCustomLayout(): boolean {
+    return ModuleView.CUSTOM_LAYOUT_TYPES.has(this.instance.type) || !!this.def.customFace;
+  }
+
+  /** Minimal tile size for a pure param grid: title + the densest band that
+   * holds the visible params, widened only enough for the columns and ports. */
+  private fitSize(): { w: number; h: number } {
+    const params = this.visibleParams();
+    const n = params.length;
+    const maxCols = Math.max(1, Math.min(n || 1, Math.floor((this.def.width - 20) / CELL_W)));
+    const rows0 = Math.ceil(Math.max(1, n) / maxCols);
+    const cols = Math.max(1, Math.ceil(Math.max(1, n) / rows0));
+    const gw = cols * CELL_W;
+    const { rows, cellH } = this.gridLayout(n, gw, params.some((p) => !!p.options));
+    const band = rows * cellH;
+    const portN = Math.max(
+      this.def.ports.filter((p) => p.direction === 'in').length,
+      this.def.ports.filter((p) => p.direction === 'out').length,
+    );
+    const portH = portN ? 18 + (portN - 1) * 26 + 14 : 0;
+    return {
+      w: Math.max(20 + gw, 80),
+      h: TITLE_H + 6 + Math.max(band, portH) + 8,
+    };
+  }
+
+  /** Current tile width: instance override, else content-fit (pure param) or
+   * the def's hand-tuned size (custom faces), clamped to sane bounds. */
   get w(): number {
+    if (this.instance.w == null && !this.isCustomLayout()) return this.fitSize().w;
     return this.clampSize(this.instance.w ?? this.def.width, this.def.width);
   }
 
   get h(): number {
+    if (this.instance.h == null && !this.isCustomLayout()) return this.fitSize().h;
     return this.clampSize(this.instance.h ?? this.def.height, this.def.height);
   }
 
@@ -809,8 +867,9 @@ export class ModuleView extends Container {
 
   // -- control widgets -----------------------------------------------------------
 
-  /** Rotary knob for a continuous control. */
-  private buildKnob(c: CtrlSpec, cx: number, cy: number, r: number): void {
+  /** Rotary knob for a continuous control. Value is shown on hover/drag only;
+   * the persistent readout is dropped to keep cells dense. */
+  private buildKnob(c: CtrlSpec, cx: number, cy: number, r: number, maxW?: number): void {
     this.paramAnchors.set(c.key, { x: cx, y: cy });
     const g = new Graphics();
     this.addChild(g);
@@ -818,12 +877,8 @@ export class ModuleView extends Container {
     label.anchor.set(0.5, 1);
     label.position.set(cx, cy - r - 3);
     label.eventMode = 'none';
+    if (maxW) fitLabel(label, maxW);
     this.addChild(label);
-    const value = new Text({ text: '', style: { fontSize: 9, fill: theme.text } });
-    value.anchor.set(0.5, 0);
-    value.position.set(cx, cy + r + 2);
-    value.eventMode = 'none';
-    this.addChild(value);
 
     const redraw = () => {
       const n = Math.min(1, Math.max(0, this.ctrlNorm(c, c.get())));
@@ -841,7 +896,6 @@ export class ModuleView extends Container {
       g.moveTo(cx + Math.cos(av) * r * 0.25, cy + Math.sin(av) * r * 0.25)
         .lineTo(cx + Math.cos(av) * r * 0.66, cy + Math.sin(av) * r * 0.66)
         .stroke({ width: 2, color: this.accent() });
-      value.text = this.formatCtrl(c);
     };
     redraw();
     this.ctrlRedraws.push(redraw);
@@ -877,7 +931,7 @@ export class ModuleView extends Container {
   }
 
   /** Stepped selector knob for an options control (waveform, mode, …). */
-  private buildSelector(c: CtrlSpec, cx: number, cy: number, r: number): void {
+  private buildSelector(c: CtrlSpec, cx: number, cy: number, r: number, maxW?: number): void {
     this.paramAnchors.set(c.key, { x: cx, y: cy });
     const opts = c.options!;
     const g = new Graphics();
@@ -886,6 +940,7 @@ export class ModuleView extends Container {
     label.anchor.set(0.5, 1);
     label.position.set(cx, cy - r - 3);
     label.eventMode = 'none';
+    if (maxW) fitLabel(label, maxW);
     this.addChild(label);
     const value = new Text({ text: '', style: { fontSize: 9, fill: theme.text } });
     value.anchor.set(0.5, 0);
@@ -913,6 +968,7 @@ export class ModuleView extends Container {
         .lineTo(cx + Math.cos(av) * r * 0.66, cy + Math.sin(av) * r * 0.66)
         .stroke({ width: 2.5, color: this.accent() });
       value.text = opts[idx] ?? '';
+      if (maxW) fitLabel(value, maxW + 8);
     };
     redraw();
     this.ctrlRedraws.push(redraw);
@@ -1025,36 +1081,50 @@ export class ModuleView extends Container {
     this.addChild(hit);
   }
 
-  /** Lay controls out in a grid filling the given rect; knobs scale to fit. */
-  private buildCtrlGrid(ctrls: CtrlSpec[], x: number, y: number, w: number, h: number): void {
-    if (!ctrls.length) return;
-    const cols = Math.max(1, Math.min(ctrls.length, Math.floor(w / CELL_W)));
-    const rows = Math.ceil(ctrls.length / cols);
+  /** Grid geometry for n controls across width w. Disc fills the column; row
+   * height is exactly the control stack (label + disc, plus a value line when
+   * a selector is present), so no empty band trails the knobs. */
+  private gridLayout(n: number, w: number, hasSelector: boolean): {
+    cols: number; rows: number; cellW: number; cellH: number; r: number;
+  } {
+    const count = Math.max(1, n);
+    // Balance columns so the last row isn't a lonely stub (7 → 4+3, not 5+2).
+    const maxCols = Math.max(1, Math.min(count, Math.floor(w / CELL_W)));
+    const rows = Math.ceil(count / maxCols);
+    const cols = Math.max(1, Math.ceil(count / rows));
     const cellW = w / cols;
-    const cellH = h / rows;
-    const r = Math.max(9, Math.min(16, (Math.min(cellW, cellH) - 26) / 2));
+    const r = Math.max(9, Math.min(18, (cellW - 12) / 2));
+    const cellH = (hasSelector ? 26 : 13) + 2 * r + 4;
+    return { cols, rows, cellW, cellH, r };
+  }
+
+  /** Lay controls out in a grid anchored at (x,y); rows are content-tight. */
+  private buildCtrlGrid(ctrls: CtrlSpec[], x: number, y: number, w: number): void {
+    if (!ctrls.length) return;
+    const hasSel = ctrls.some((c) => c.options);
+    const { cols, cellW, cellH, r } = this.gridLayout(ctrls.length, w, hasSel);
     ctrls.forEach((c, i) => {
       const cx = x + (i % cols) * cellW + cellW / 2;
-      const cy = y + Math.floor(i / cols) * cellH + cellH / 2 + 2;
-      if (c.options) this.buildSelector(c, cx, cy, r);
-      else this.buildKnob(c, cx, cy, r);
+      const cy = y + Math.floor(i / cols) * cellH + 13 + r;
+      if (c.options) this.buildSelector(c, cx, cy, r, cellW - 4);
+      else this.buildKnob(c, cx, cy, r, cellW - 4);
     });
   }
 
-  /** Height of a fixed knob band for n controls in the given width. */
-  private ctrlBandH(n: number, w: number): number {
-    if (!n) return 0;
-    const cols = Math.max(1, Math.min(n, Math.floor(w / CELL_W)));
-    return Math.ceil(n / cols) * CELL_H;
+  /** Height of the knob band for these controls in the given width. */
+  private ctrlBandH(ctrls: CtrlSpec[], w: number): number {
+    if (!ctrls.length) return 0;
+    const { rows, cellH } = this.gridLayout(ctrls.length, w, ctrls.some((c) => c.options));
+    return rows * cellH;
   }
 
   // -- face dispatch -----------------------------------------------------------
 
   private buildFace(): void {
     const type = this.instance.type;
-    const x = 18;
-    const w = this.w - 36;
-    const top = TITLE_H + 10;
+    const x = 10;
+    const w = this.w - 20;
+    const top = TITLE_H + 6;
 
     // Fully custom faces.
     if (type === 'peq') {
@@ -1114,7 +1184,7 @@ export class ModuleView extends Container {
     const ctrls = this.visibleParams().map((p) => this.paramCtrl(p));
 
     // Vertical meters live in a right-edge column.
-    let right = this.w - 18;
+    let right = this.w - 10;
     if (type === 'audioOut') {
       this.buildVMeter(this.w - 30, top + 12, 14, this.h - top - 26);
       right = this.w - 44;
@@ -1129,7 +1199,7 @@ export class ModuleView extends Container {
     }
 
     // Bottom-anchored utility rows.
-    let bottom = this.h - 12;
+    let bottom = this.h - 8;
     if (type === 'wtosc') {
       this.buildWavetableRow(x, this.h - 40, w);
       bottom -= 42;
@@ -1151,70 +1221,70 @@ export class ModuleView extends Container {
 
     // Modules with a stretching extra face get a fixed knob band on top.
     if (type === 'keyboard') {
-      const band = this.ctrlBandH(ctrls.length, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      const band = this.ctrlBandH(ctrls, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw);
       this.buildKeys(x, top + band + 4, gw);
       return;
     }
     if (type === 'transport') {
-      const band = this.ctrlBandH(ctrls.length, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      const band = this.ctrlBandH(ctrls, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw);
       this.buildTransportButtons(this.w / 2 - 84, top + band + 10);
       return;
     }
     if (type === 'sequencer') {
-      const band = this.ctrlBandH(ctrls.length, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      const band = this.ctrlBandH(ctrls, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw);
       this.buildStepGrid(x, top + band + 6, gw);
       return;
     }
     if (type === 'smpl') {
-      const band = this.ctrlBandH(ctrls.length, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      const band = this.ctrlBandH(ctrls, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw);
       this.buildSamplerFace(x, top + band + 6, gw);
       return;
     }
     if (type === 'visualizer') {
-      const band = this.ctrlBandH(ctrls.length, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      const band = this.ctrlBandH(ctrls, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw);
       this.buildVisFace(x, top + band + 4, gw);
       return;
     }
     if (type === 'stt' || type === 'textinput' || type === 'transporttext' || type === 'notenames' || type === 'lyrics') {
-      const band = this.ctrlBandH(ctrls.length, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      const band = this.ctrlBandH(ctrls, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw);
       this.buildTextFace(x, top + band + 4, gw);
       return;
     }
 
     if (type === 'wtosc') {
-      const band = this.ctrlBandH(ctrls.length, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      const band = this.ctrlBandH(ctrls, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw);
       this.buildWtDisplay(x, top + band + 4, gw, bottom - (top + band + 4));
       return;
     }
     if (type === 'pluck' || type === 'resonator') {
-      const band = this.ctrlBandH(ctrls.length, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      const band = this.ctrlBandH(ctrls, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw);
       this.buildStringDisplay(x, top + band + 4, gw, bottom - (top + band + 4));
       return;
     }
     if (type === 'addosc') {
-      const band = this.ctrlBandH(ctrls.length, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      const band = this.ctrlBandH(ctrls, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw);
       this.buildSpectrumDisplay(x, top + band + 4, gw, bottom - (top + band + 4));
       return;
     }
     if (type === 'granular') {
-      const band = this.ctrlBandH(ctrls.length, gw);
-      this.buildCtrlGrid(ctrls, x, top, gw, band);
+      const band = this.ctrlBandH(ctrls, gw);
+      this.buildCtrlGrid(ctrls, x, top, gw);
       this.buildGrainDisplay(x, top + band + 4, gw, bottom - (top + band + 4) - 22);
       this.buildGranularSample(x, bottom - 16, gw);
       return;
     }
 
     // Pure param modules: the knob grid stretches over the whole face.
-    this.buildCtrlGrid(ctrls, x, top, gw, bottom - top);
+    this.buildCtrlGrid(ctrls, x, top, gw);
   }
 
   // -- filter (vcf) face: knobs + response curve -----------------------------
@@ -1324,20 +1394,96 @@ export class ModuleView extends Container {
   private envDotG: Graphics | null = null;
   private envCurveRect = { x: 0, y: 0, w: 0, h: 0 };
   private lastEnvDot = NaN;
+  private envLastTap = 0;
 
   private buildEnvelopeFace(x: number, y: number, w: number): void {
-    const ctrls = this.visibleParams().map((p) => this.paramCtrl(p));
+    // Per-stage curves are edited by dragging the contour, not knobs.
+    const ctrls = this.visibleParams()
+      .filter((p) => !ENV_CURVE_IDS.has(p.id))
+      .map((p) => this.paramCtrl(p));
     // Knob grid on top; the contour fills the rest of the tile below it.
-    const band = this.ctrlBandH(ctrls.length, w);
-    this.buildCtrlGrid(ctrls, x, y, w, band);
+    const band = this.ctrlBandH(ctrls, w);
+    this.buildCtrlGrid(ctrls, x, y, w);
 
     const cy = y + band + 8;
     this.envCurveRect = { x, y: cy, w, h: this.h - cy - 12 };
     this.envCurveG = new Graphics();
+    this.envCurveG.eventMode = 'static';
+    this.envCurveG.cursor = 'ns-resize';
+    this.envCurveG.on('pointerdown', (e) => this.onEnvCurveDown(e));
     this.addChild(this.envCurveG);
     this.envDotG = new Graphics();
+    this.envDotG.eventMode = 'none';
     this.addChild(this.envDotG);
     this.drawEnvCurve();
+  }
+
+  /**
+   * Hit-test a local x against the contour's stage layout. Returns the curve
+   * param for the slope under x (attack/decay/release), or null over the flat
+   * delay/hold/sustain segments. Mirrors the stage durations in drawEnvCurve.
+   */
+  private envCurveHit(localX: number): { id: string; def: number } | null {
+    const r = this.envCurveRect;
+    const p = this.instance.params;
+    const segs: Array<{ t: number; id?: string; def?: number }> = [
+      { t: p.delay ?? 0 },
+      { t: p.attack ?? 0.05, id: 'atkCurve', def: 0 },
+      { t: p.hold ?? 0 },
+      { t: p.decay ?? 0.2, id: 'decCurve', def: -0.4 },
+      { t: SUSTAIN_DISPLAY_S },
+      { t: p.release ?? 0.3, id: 'relCurve', def: -0.4 },
+    ];
+    const total = segs.reduce((s, st) => s + Math.max(st.t, 0), 0) || 1;
+    let acc = 0;
+    for (const st of segs) {
+      const dur = Math.max(st.t, 0);
+      const x0 = r.x + (acc / total) * r.w;
+      const x1 = r.x + ((acc + dur) / total) * r.w;
+      if (st.id && localX >= x0 && localX < x1) return { id: st.id, def: st.def! };
+      acc += dur;
+    }
+    return null;
+  }
+
+  /** Pointerdown on the contour: double-tap resets the slope, else drags it. */
+  private onEnvCurveDown(e: FederatedPointerEvent): void {
+    const hit = this.envCurveHit(e.getLocalPosition(this).x);
+    if (!hit) return; // flat segment → fall through to body drag (move module)
+    e.stopPropagation();
+    const now = performance.now();
+    if (now - this.envLastTap < 350) {
+      this.envLastTap = 0;
+      appState.beginUndoable();
+      appState.setParam(this.instance.id, hit.id, hit.def);
+      return;
+    }
+    this.envLastTap = now;
+    this.beginEnvCurveDrag(e, hit);
+  }
+
+  /** Vertical drag on a slope: up increases the stage curve (-1..1). */
+  private beginEnvCurveDrag(e: FederatedPointerEvent, hit: { id: string; def: number }): void {
+    appState.beginUndoable();
+    const startY = e.clientY;
+    const startCurve = this.instance.params[hit.id] ?? hit.def;
+    const label = hit.id === 'atkCurve' ? 'Atk Crv' : hit.id === 'decCurve' ? 'Dec Crv' : 'Rel Crv';
+    let moved = false;
+    const onMove = (ev: PointerEvent) => {
+      const dy = ev.clientY - startY;
+      if (Math.abs(dy) > 2) moved = true;
+      if (!moved) return;
+      const c = Math.min(1, Math.max(-1, startCurve - (dy / this.envCurveRect.h) * 2));
+      appState.setParam(this.instance.id, hit.id, c);
+      this.tooltip.showNow([`${label} ${c.toFixed(2)}`], ev.clientX, ev.clientY);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      this.tooltip.hide();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
   }
 
   /** Output value of the envelope at raw progress `env` (0..1), vel assumed 1. */

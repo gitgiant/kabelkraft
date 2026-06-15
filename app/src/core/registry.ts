@@ -373,7 +373,7 @@ const envelope: ModuleDef = {
     { id: 'invert', label: 'Invert', min: 0, max: 1, default: 0, options: ['off', 'on'], randomizable: false },
   ],
   width: 320,
-  height: 372,
+  height: 300,
   customFace: true,
 };
 

@@ -89,7 +89,7 @@ export const FACE_ELEMENT_RULES = `
   "elements": [
     { "kind": "label", "x": 16, "y": 4, "text": "FILTER" },
     { "kind": "knob", "x": 16, "y": 28, "label": "Cutoff", "module": "bass", "param": "cutoff" },
-    { "kind": "knob", "x": 96, "y": 28, "label": "Res", "module": "bass", "param": "res" },
+    { "kind": "knob", "x": 76, "y": 28, "label": "Res", "module": "bass", "param": "res" },
     { "kind": "meter", "x": 16, "y": 150, "label": "Out", "module": "out" }
   ]
 }
@@ -102,7 +102,7 @@ Rules:
 - \`module\` is an \`id\` from this patch's \`modules\`; \`param\` is one of that module's param ids.
 - \`x\`/\`y\` are pixels from the panel's top-left; \`w\`/\`h\` are optional (sensible defaults per
   kind). Lay controls out on a grid that fits inside \`width\`/\`height\` without overlapping
-  (knobs ~70×86, sliders ~36×120, meters ~90×16). Group related controls and add \`label\`
+  (knobs ~52×64, sliders ~28×92, meters ~72×14). Group related controls and add \`label\`
   captions for sections.
 - Bindings that don't resolve are dropped with a warning; the rest of the face still loads.
 `;

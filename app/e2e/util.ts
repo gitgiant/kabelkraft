@@ -20,7 +20,7 @@ export function captureErrors(page: Page): string[] {
 /** Load the app and wait until state + canvas are actually live (no blind sleeps). */
 export async function boot(page: Page): Promise<void> {
   await page.goto('/');
-  await expect(page.locator('.canvas-container canvas')).toBeVisible();
+  await expect(page.locator('.canvas-container canvas:not(.bg-vis)')).toBeVisible();
   // Starter patch seeds modules; "ready" = state mounted and canvas views built.
   await expect
     .poll(() =>

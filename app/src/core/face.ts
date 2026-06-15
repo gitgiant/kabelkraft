@@ -101,6 +101,19 @@ export function snapTo(v: number, grid: number, snap: boolean): number {
   return snap && grid > 0 ? Math.round(v / grid) * grid : Math.round(v);
 }
 
+/** Shrink a face's width/height to its element bounds + a small margin, so no
+ * empty background trails past the controls. No-op for an empty face. */
+export function fitFaceToContent(face: FaceSpec, margin = 10): FaceSpec {
+  if (!face.elements.length) return face;
+  let maxX = 0;
+  let maxY = 0;
+  for (const e of face.elements) {
+    maxX = Math.max(maxX, e.x + e.w);
+    maxY = Math.max(maxY, e.y + e.h);
+  }
+  return { ...face, width: Math.round(maxX + margin), height: Math.round(maxY + margin) };
+}
+
 export interface BindTarget {
   moduleId: string;
   paramId: string;

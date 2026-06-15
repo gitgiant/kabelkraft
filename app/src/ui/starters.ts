@@ -2,7 +2,7 @@ import { patchCanvas } from '../canvas/PatchCanvas';
 import { appState } from '../state';
 import { DRUM_BASE_NOTE, renderDefaultKit } from '../core/drumkit';
 import { OSC_WAVES, VCF_MODES, REVERB_ALGOS } from '../core/registry';
-import type { FaceSpec } from '../core/face';
+import { fitFaceToContent, type FaceSpec } from '../core/face';
 
 /** Uniform shrink applied to every built-in face: smaller knobs + tighter spacing. */
 const FACE_SCALE = 0.75;
@@ -24,7 +24,7 @@ function scaleFace(f: FaceSpec, k = FACE_SCALE): FaceSpec {
 }
 /** setGroupFace, pre-scaled — every starter face routes through here. */
 function setFace(groupId: string, face: FaceSpec): void {
-  appState.setGroupFace(groupId, scaleFace(face));
+  appState.setGroupFace(groupId, fitFaceToContent(scaleFace(face)));
 }
 
 type FaceKnob = { id: string; kind: 'knob'; x: number; y: number; w: number; h: number; label: string; moduleId: string; paramId: string };
