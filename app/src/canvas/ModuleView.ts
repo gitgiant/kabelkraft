@@ -6,7 +6,7 @@
  * transport buttons, meter bars, step grids…). Faces stretch with the tile.
  */
 
-import { Container, FederatedPointerEvent, Graphics, Rectangle, Sprite, Text, Texture } from 'pixi.js';
+import { Container, FederatedPointerEvent, Graphics, Text } from 'pixi.js';
 import type { ModuleDef, ParamSpec, PortSpec } from '../core/module';
 import type { ModuleInstance } from '../core/module';
 import type { ControlCurve } from '../core/types';
@@ -20,9 +20,6 @@ import { appSettings, updateSettings } from '../core/settings';
 import { openSelectMenu } from './SelectMenu';
 import { PresetBar, fitText } from './PresetBar';
 import { theme } from '../theme';
-import { binFrac } from '../visual/features';
-import { approximateScene, visGraphOf } from '../visual/migrate';
-import { ContainerRenderer, graphSupported, webgpuAvailable } from '../visual/runtime';
 import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import type { Tooltip } from './Tooltip';
 import type { FaceDef, FaceRenderer } from './faces/types';
@@ -37,66 +34,9 @@ import { StepGridFace } from './faces/sequencer';
 import { TextFace } from './faces/text';
 import { SamplerFace } from './faces/sampler';
 import { WtoscFace } from './faces/wtosc';
+import { VisualizerFace } from './faces/visualizer';
+export { tickHiddenTintSource } from './faces/visThumb';
 
-
-/**
- * Shared GPU tile thumbnails: one offscreen renderer per visualizer module,
- * reused across tile rebuilds, updated at ¼ ticker rate. Pruned on delete.
- */
-interface VisThumb {
-  canvas: OffscreenCanvas;
-  renderer: ContainerRenderer | null;
-  texture: Texture;
-  failed: boolean;
-}
-
-const visThumbs = new Map<string, VisThumb>();
-let visThumbPruner = false;
-
-function visThumb(moduleId: string, aspect: number): VisThumb {
-  if (!visThumbPruner) {
-    visThumbPruner = true;
-    appState.on('graphChanged', () => {
-      for (const [id, t] of visThumbs) {
-        if (!appState.graph.modules.has(id)) {
-          t.renderer?.destroy();
-          t.texture.destroy(true);
-          visThumbs.delete(id);
-        }
-      }
-    });
-  }
-  let t = visThumbs.get(moduleId);
-  if (!t) {
-    const canvas = new OffscreenCanvas(256, Math.max(64, Math.min(512, Math.round(256 * aspect))));
-    t = { canvas, renderer: null, texture: Texture.from(canvas), failed: false };
-    visThumbs.set(moduleId, t);
-    void ContainerRenderer.create(canvas).then((r) => {
-      const entry = visThumbs.get(moduleId);
-      if (entry === t) {
-        t!.renderer = r;
-        t!.failed = r === null;
-      } else r?.destroy();
-    });
-  }
-  return t;
-}
-
-/** Keep a tint source rendering while its tile is hidden (collapsed group) —
- * otherwise the derived tint would freeze at its last sampled color. */
-const hiddenTintTick = new Map<string, number>();
-
-export function tickHiddenTintSource(moduleId: string): void {
-  const now = performance.now();
-  if (now - (hiddenTintTick.get(moduleId) ?? 0) < 66) return;
-  hiddenTintTick.set(moduleId, now);
-  const thumb = visThumb(moduleId, 0.66);
-  if (!thumb.renderer) return;
-  const frame = appState.visFrame(moduleId);
-  if (frame && graphSupported(frame.graph)) {
-    thumb.renderer.render(frame);
-  }
-}
 
 /** Minimal HSL→hex for particle colors. */
 export function hslToHex(h: number, s: number, l: number): number {
@@ -228,7 +168,7 @@ export class ModuleView extends Container {
     transport: { build: (v) => v.buildParamFace({ display: (c) => v.buildTransportButtons(v.w / 2 - 84, c.top + c.band + 10) }), customLayout: true, fixedMin: true },
     sequencer: { make: () => new StepGridFace(), customLayout: true },
     smpl: { make: () => new SamplerFace(), customLayout: true },
-    visualizer: { build: (v) => v.buildParamFace({ display: (c) => v.buildVisFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true, unbounded: true },
+    visualizer: { make: () => new VisualizerFace(), customLayout: true, unbounded: true },
     wtosc: { make: () => new WtoscFace(), customLayout: true },
     pluck: { make: () => new StringFace(), customLayout: true },
     resonator: { make: () => new StringFace(), customLayout: true },
@@ -366,7 +306,6 @@ export class ModuleView extends Container {
     this.compG = null;
     this.lastCompPos = -1;
     this.lastCompData = null;
-    this.visG = null;
     this.midiDeviceText = null;
     // (peq/vcf curve + wtosc table state now lives on their FaceRenderer objects)
     this.recButton = null;
@@ -1350,90 +1289,6 @@ export class ModuleView extends Container {
     }
   }
 
-  // -- visualizer face (PRD §8.5) ----------------------------------------------
-
-  private visG: Graphics | null = null;
-  private visSprite: Sprite | null = null;
-  private visTick = 0;
-  private visRect = { x: 0, y: 0, w: 0, h: 0 };
-  private visParticles: Array<{ x: number; y: number; vx: number; vy: number; life: number; hue: number }> = [];
-
-  private buildVisFace(x: number, y: number, w: number): void {
-    const h = this.h - y - 12;
-    this.visRect = { x, y, w, h };
-    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(theme.graphBg);
-    // Double-click anywhere on the scene opens the graph editor.
-    bg.eventMode = 'static';
-    bg.cursor = 'pointer';
-    bg.on('pointertap', (e) => {
-      if (e.detail === 2) {
-        e.stopPropagation();
-        appState.openVisEditor(this.instance.id);
-      }
-    });
-    bg.on('pointerover', (e) =>
-      this.tooltip.show(['Visualizer scene', 'Double-click to edit the visual graph.'], e.clientX, e.clientY),
-    );
-    bg.on('pointerout', () => this.tooltip.hide());
-    this.addChild(bg);
-    if (webgpuAvailable()) {
-      // Live GPU thumbnail of the real graph (¼ rate); Graphics stays as a
-      // fallback layer while the renderer spins up or when it fails.
-      this.visSprite = new Sprite(visThumb(this.instance.id, h / w).texture);
-      this.visSprite.position.set(x, y);
-      this.visSprite.setSize(w, h);
-      this.visSprite.eventMode = 'none';
-      this.addChild(this.visSprite);
-    }
-    this.visG = new Graphics();
-    this.visG.eventMode = 'none';
-    this.addChild(this.visG);
-
-    const big = new Text({ text: '⛶', style: { fontSize: 14, fill: theme.textDim } });
-    big.anchor.set(1, 0);
-    big.position.set(x + w - 4, y + 4);
-    big.eventMode = 'static';
-    big.cursor = 'pointer';
-    big.hitArea = new Rectangle(-20, -4, 26, 26);
-    big.on('pointerdown', (e) => {
-      e.stopPropagation();
-      appState.openVisualizer(this.instance.id);
-    });
-    big.on('pointerover', (e) =>
-      this.tooltip.show(['Big view', 'Opens the resizable visualizer window (fullscreen button inside).'], e.clientX, e.clientY),
-    );
-    big.on('pointerout', () => this.tooltip.hide());
-    this.addChild(big);
-
-    const edit = new Text({ text: '✎', style: { fontSize: 14, fill: theme.textDim } });
-    edit.anchor.set(1, 0);
-    edit.position.set(x + w - 28, y + 4);
-    edit.eventMode = 'static';
-    edit.cursor = 'pointer';
-    edit.hitArea = new Rectangle(-20, -4, 26, 26);
-    edit.on('pointerdown', (e) => {
-      e.stopPropagation();
-      appState.openVisEditor(this.instance.id);
-    });
-    edit.on('pointerover', (e) =>
-      this.tooltip.show(['Edit visuals', 'Opens the visual graph editor (sources, effects, wiring).'], e.clientX, e.clientY),
-    );
-    edit.on('pointerout', () => this.tooltip.hide());
-    this.addChild(edit);
-  }
-
-  /** Cheap screen-bounds test for thumbnail culling (stage is in screen px). */
-  private tileOnScreen(): boolean {
-    const gp = this.getGlobalPosition();
-    const s = this.worldTransform.a;
-    return (
-      gp.x + this.w * s > 0 &&
-      gp.x < window.innerWidth &&
-      gp.y + this.h * s > 0 &&
-      gp.y < window.innerHeight
-    );
-  }
-
   /**
    * TODO(intelligence): placeholder face only. One mock "AI prompt window"
    * row appears per wired input type; nothing generates yet. Planned: each
@@ -1486,95 +1341,6 @@ export class ModuleView extends Container {
     }
   }
 
-  /**
-   * Tile thumbnail — Canvas2D-equivalent approximation of the container's
-   * visual graph (first source node wins), driven by the UI-side feature hub.
-   * The overlay's no-WebGPU tier draws the same scenes on a 2D canvas.
-   */
-  private drawVisScene(): void {
-    if (!this.visG) return;
-    if (this.visSprite) {
-      const thumb = visThumb(this.instance.id, this.visRect.h / Math.max(1, this.visRect.w));
-      if (thumb.renderer) {
-        this.visG.clear();
-        this.visSprite.visible = true;
-        // ¼ rate, and culled entirely while the tile is off screen.
-        if ((this.visTick++ & 3) === 0 && this.tileOnScreen()) {
-          const frame = appState.visFrame(this.instance.id);
-          if (frame && graphSupported(frame.graph)) {
-            thumb.renderer.render(frame);
-            thumb.texture.source.update();
-          }
-        }
-        return;
-      }
-      this.visSprite.visible = false;
-      if (!thumb.failed) {
-        // Renderer still initializing — draw the approximation meanwhile.
-      }
-    }
-    const f = appState.visFeatures(this.instance.id);
-    const { x, y, w, h } = this.visRect;
-    const g = this.visG;
-    const { scene, gain: baseGain } = approximateScene(visGraphOf(this.instance.data));
-    const ctrl = f && f.ctrl >= 0 ? f.ctrl : 1;
-    const gain = baseGain * (0.3 + 0.7 * ctrl);
-    g.clear();
-    if (!f) return;
-
-    if (scene === 'scope') {
-      // Oscilloscope — 256 points sampled from the 1024-sample window.
-      const mid = y + h / 2;
-      const step = f.wave.length / 256;
-      for (let i = 0; i < 256; i++) {
-        const v = f.wave[Math.floor(i * step)];
-        const px = x + (i / 255) * w;
-        const py = mid - Math.max(-1, Math.min(1, v * gain)) * (h / 2 - 4);
-        if (i === 0) g.moveTo(px, py);
-        else g.lineTo(px, py);
-      }
-      g.stroke({ width: 1.5, color: 0x3dd9ff, alpha: 0.95 });
-    } else if (scene === 'spectrum') {
-      // Spectrum bars.
-      const n = f.spectrum.length;
-      const bw = w / n;
-      for (let b = 0; b < n; b++) {
-        const frac = binFrac(f.spectrum[b]) * Math.min(1, gain);
-        if (frac <= 0.01) continue;
-        g.roundRect(x + b * bw + 1, y + h - frac * (h - 6), bw - 2, frac * (h - 6), 1)
-          .fill({ color: 0xffb13d, alpha: 0.9 });
-      }
-    } else {
-      // Particles: notes spawn bursts, audio energy feeds drift speed.
-      let energy = 0;
-      for (const db of f.spectrum) energy = Math.max(energy, binFrac(db));
-      for (const pitch of f.notes) {
-        const hue = ((pitch % 12) / 12) * 360;
-        for (let i = 0; i < 6; i++) {
-          this.visParticles.push({
-            x: x + w * ((pitch % 36) / 36),
-            y: y + h * 0.7,
-            vx: (Math.random() - 0.5) * 3,
-            vy: -1 - Math.random() * 2.5,
-            life: 1,
-            hue,
-          });
-        }
-      }
-      if (this.visParticles.length > 200) this.visParticles.splice(0, this.visParticles.length - 200);
-      const speed = 0.5 + energy * 2 * gain;
-      this.visParticles = this.visParticles.filter((p) => {
-        p.x += p.vx * speed;
-        p.y += p.vy * speed;
-        p.vy += 0.04;
-        p.life -= 0.02;
-        if (p.life <= 0 || p.x < x || p.x > x + w || p.y > y + h) return false;
-        const c = hslToHex(p.hue, 0.8, 0.6);
-        g.circle(p.x, p.y, 1.5 + p.life * 2.5).fill({ color: c, alpha: p.life });
-        return true;
-      });
-    }
-  }
 
   // -- MIDI device row (midiIn/midiOut) ----------------------------------------
 
@@ -2019,7 +1785,6 @@ export class ModuleView extends Container {
       // Keep the button in sync if recording was toggled elsewhere.
       this.drawRecButton();
     }
-    if (this.visG) this.drawVisScene();
     if (this.compG) {
       let pos = -1;
       if (appState.transport.playing) {
