@@ -17,14 +17,11 @@ export interface FaceRenderer {
 }
 
 /**
- * Per-type face entry. A migrated face supplies `make()` (its own renderer
- * object); faces still living on ModuleView supply `build`/`refresh` arrows
- * that delegate to its methods. The flags replace the old sizing Sets.
+ * Per-type face entry: a factory for the type's renderer object (per-view, so
+ * it may hold redraw state) plus sizing flags that replace the old sizing Sets.
  */
 export interface FaceDef {
-  make?: () => FaceRenderer;
-  build?: (view: ModuleView) => void;
-  refresh?: (view: ModuleView) => void;
+  make: () => FaceRenderer;
   /** Hand-tuned layout that should not auto-fit to a param grid. */
   customLayout?: boolean;
   /** No upper size cap (hosts nested editors/canvases). */

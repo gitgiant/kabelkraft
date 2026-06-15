@@ -40,6 +40,7 @@ import { RecorderFace } from './faces/recorder';
 import { ModmatrixFace } from './faces/modmatrix';
 import { MixerFace } from './faces/mixer';
 import { ComposerFace } from './faces/composer';
+import { ParamFace, KeyboardFace, TransportFace } from './faces/param';
 export { tickHiddenTintSource } from './faces/visThumb';
 
 
@@ -121,6 +122,24 @@ const KEYS: KeySpec[] = [
   { semitone: 10, black: true }, { semitone: 11, black: false },
 ];
 
+/** Layout context handed to a param face's `display` callback: the grid's
+ * origin, its band height, and the free space below it. */
+export interface ParamFaceCtx {
+  x: number;
+  top: number;
+  gw: number;
+  band: number;
+  bottom: number;
+}
+
+/** Options for the shared param-grid face: an optional edge meter rail, a
+ * bottom-anchored device row, and a type-specific display below the knobs. */
+export interface ParamFaceOpts {
+  rail?: 'vmeterOut' | 'vmeterIn' | 'grmeter';
+  bottomRow?: 'midi' | 'audioIn' | 'audioOut';
+  display?: (ctx: ParamFaceCtx) => void;
+}
+
 export class ModuleView extends Container {
   readonly portCenters = new Map<string, { x: number; y: number }>();
   private body = new Graphics();
@@ -163,8 +182,8 @@ export class ModuleView extends Container {
     intelligence: { make: () => new IntelligenceFace(), customLayout: true },
 
     // -- compositional: param band + optional edge rails / display below ----
-    keyboard: { build: (v) => v.buildParamFace({ display: (c) => v.buildKeys(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
-    transport: { build: (v) => v.buildParamFace({ display: (c) => v.buildTransportButtons(v.w / 2 - 84, c.top + c.band + 10) }), customLayout: true, fixedMin: true },
+    keyboard: { make: () => new KeyboardFace(), customLayout: true },
+    transport: { make: () => new TransportFace(), customLayout: true, fixedMin: true },
     sequencer: { make: () => new StepGridFace(), customLayout: true },
     smpl: { make: () => new SamplerFace(), customLayout: true },
     visualizer: { make: () => new VisualizerFace(), customLayout: true, unbounded: true },
@@ -178,32 +197,31 @@ export class ModuleView extends Container {
     transporttext: { make: () => new TextFace(), customLayout: true },
     notenames: { make: () => new TextFace(), customLayout: true },
     lyrics: { make: () => new TextFace(), customLayout: true },
-    audioIn: { build: (v) => v.buildParamFace({ rail: 'vmeterIn', bottomRow: 'audioIn' }), customLayout: true },
-    audioOut: { build: (v) => v.buildParamFace({ rail: 'vmeterOut', bottomRow: 'audioOut' }), customLayout: true },
-    compressor: { build: (v) => v.buildParamFace({ rail: 'grmeter' }), customLayout: true },
-    limiter: { build: (v) => v.buildParamFace({ rail: 'grmeter' }), customLayout: true },
-    mbcomp: { build: (v) => v.buildParamFace({ rail: 'grmeter' }), customLayout: true },
-    midiIn: { build: (v) => v.buildParamFace({ bottomRow: 'midi' }), customLayout: true },
-    midiOut: { build: (v) => v.buildParamFace({ bottomRow: 'midi' }), customLayout: true },
-    bgvisual: { build: (v) => v.buildParamFace(), customLayout: true },
+    audioIn: { make: () => new ParamFace({ rail: 'vmeterIn', bottomRow: 'audioIn' }), customLayout: true },
+    audioOut: { make: () => new ParamFace({ rail: 'vmeterOut', bottomRow: 'audioOut' }), customLayout: true },
+    compressor: { make: () => new ParamFace({ rail: 'grmeter' }), customLayout: true },
+    limiter: { make: () => new ParamFace({ rail: 'grmeter' }), customLayout: true },
+    mbcomp: { make: () => new ParamFace({ rail: 'grmeter' }), customLayout: true },
+    midiIn: { make: () => new ParamFace({ bottomRow: 'midi' }), customLayout: true },
+    midiOut: { make: () => new ParamFace({ bottomRow: 'midi' }), customLayout: true },
+    bgvisual: { make: () => new ParamFace(), customLayout: true },
   };
 
   /** Pure param-grid modules (delay, reverb, lfo…) with no special layout. */
-  private static readonly DEFAULT_FACE: FaceDef = { build: (v) => v.buildParamFace() };
+  private static readonly DEFAULT_FACE: FaceDef = { make: () => new ParamFace() };
 
   private faceEntry(): FaceDef {
     return ModuleView.FACES[this.instance.type] ?? ModuleView.DEFAULT_FACE;
   }
 
-  /** This view's renderer — a migrated face's own object, or an adapter that
-   * delegates to the buildXxx/drawXxx methods still living on ModuleView.
-   * Assigned in the constructor (after `instance` is set), not as a field
-   * initializer (those run before parameter-property assignment). */
+  /** This view's renderer — the face object for its type (per-instance, so it
+   * may hold redraw state). Assigned in the constructor (after `instance` is
+   * set), not as a field initializer (those run before parameter-property
+   * assignment). */
   private face!: FaceRenderer;
 
   private makeFace(): FaceRenderer {
-    const def = this.faceEntry();
-    return def.make ? def.make() : { build: def.build!, refresh: def.refresh };
+    return this.faceEntry().make();
   }
 
   constructor(
@@ -1088,11 +1106,7 @@ export class ModuleView extends Container {
    * rail and a type-specific display below. The rail and band arithmetic lives
    * here so every compositional face shares it (see the FACES table).
    */
-  buildParamFace(opts: {
-    rail?: 'vmeterOut' | 'vmeterIn' | 'grmeter';
-    bottomRow?: 'midi' | 'audioIn' | 'audioOut';
-    display?: (ctx: { x: number; top: number; gw: number; band: number; bottom: number }) => void;
-  } = {}): void {
+  buildParamFace(opts: ParamFaceOpts = {}): void {
     const x = 10;
     const w = this.w - 20;
     const top = TITLE_H + 6;
@@ -1323,54 +1337,6 @@ export class ModuleView extends Container {
   refreshParams(): void {
     this.runCtrlRedraws();
     this.face.refresh?.(this);
-  }
-
-  // -- type-specific faces --------------------------------------------------
-
-  private buildKeys(x: number, y: number, w: number): void {
-    const keyW = w / KEYS.length;
-    const keyH = Math.max(30, this.h - y - 12);
-    KEYS.forEach((key, i) => {
-      const g = new Graphics()
-        .roundRect(0, 0, keyW - 2, key.black ? keyH * 0.6 : keyH, 3)
-        .fill(key.black ? 0x1a1a20 : 0xe8e8ee);
-      g.position.set(x + i * keyW, y);
-      g.eventMode = 'static';
-      g.cursor = 'pointer';
-      const id = `kbd:${key.semitone}`;
-      const pitch = () => 60 + key.semitone + Math.round(this.instance.params.octave ?? 0) * 12;
-      g.on('pointerdown', (e) => {
-        e.stopPropagation();
-        appState.noteOn(this.instance.id, id, pitch());
-      });
-      const off = () => appState.noteOff(this.instance.id, id);
-      g.on('pointerup', off);
-      g.on('pointerupoutside', off);
-      g.on('pointerout', off);
-      this.addChild(g);
-    });
-  }
-
-  private buildTransportButtons(x: number, y: number): void {
-    const buttons: Array<['⏮', 'rewind'] | ['▶', 'play'] | ['⏸', 'pause'] | ['⏹', 'stop']> = [
-      ['⏮', 'rewind'], ['▶', 'play'], ['⏸', 'pause'], ['⏹', 'stop'],
-    ];
-    buttons.forEach(([icon, cmd], i) => {
-      const g = new Graphics().roundRect(0, 0, 36, 26, 5).fill(theme.button);
-      g.position.set(x + i * 42, y);
-      g.eventMode = 'static';
-      g.cursor = 'pointer';
-      g.on('pointerdown', (e) => {
-        e.stopPropagation();
-        appState.transportCommand(cmd);
-      });
-      this.addChild(g);
-      const t = new Text({ text: icon, style: { fontSize: 13, fill: theme.text } });
-      t.anchor.set(0.5);
-      t.position.set(x + i * 42 + 18, y + 13);
-      t.eventMode = 'none';
-      this.addChild(t);
-    });
   }
 
   // -- vertical peak meter (levels / audioOut / recorder) ------------------------
