@@ -41,6 +41,7 @@ import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } f
 import type { Tooltip } from './Tooltip';
 import type { FaceDef, FaceRenderer } from './faces/types';
 import { VcfFace } from './faces/vcf';
+import { EnvelopeFace } from './faces/envelope';
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
@@ -122,24 +123,6 @@ const TITLE_H = 24;
 export { TITLE_H as MODULE_TITLE_H };
 /** Nominal column pitch for the auto knob grid. */
 const CELL_W = 46;
-
-/** Display width (seconds) of the sustain plateau in the envelope contour. */
-const SUSTAIN_DISPLAY_S = 0.4;
-
-/** Curve params edited by dragging the contour — kept out of the knob grid. */
-const ENV_CURVE_IDS = new Set(['atkCurve', 'decCurve', 'relCurve']);
-
-/**
- * Per-stage envelope curve: linear phase t∈[0,1] → shaped 0..1. Mirrors
- * envShape() in engine-worklet.js. c=0 linear; c>0 convex; c<0 concave.
- */
-function envShape(t: number, c: number): number {
-  if (t <= 0) return 0;
-  if (t >= 1) return 1;
-  if (c > -1e-4 && c < 1e-4) return t;
-  const k = 5 * c;
-  return (Math.exp(k * t) - 1) / (Math.exp(k) - 1);
-}
 
 const CTRL_HINT =
   'Drag. Double-click: default. Shift-double-click: type. Alt-click: MIDI learn.';
@@ -231,7 +214,7 @@ export class ModuleView extends Container {
     // -- fully custom faces (own their whole body) --------------------------
     peq: { build: (v) => v.buildPeqFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawPeqCurve(), customLayout: true },
     vcf: { make: () => new VcfFace(), customLayout: true },
-    envelope: { build: (v) => v.buildEnvelopeFace(10, TITLE_H + 6, v.w - 20), refresh: (v) => v.drawEnvCurve(), customLayout: true },
+    envelope: { make: () => new EnvelopeFace(), customLayout: true },
     knob: { build: (v) => v.buildKnobFace(), refresh: (v) => v.drawKnob(), customLayout: true },
     slider: { build: (v) => v.buildSliderFace(), refresh: (v) => v.drawSlider(), customLayout: true },
     xy: { build: (v) => v.buildXyFace(), refresh: (v) => v.drawXy(), customLayout: true },
@@ -828,7 +811,7 @@ export class ModuleView extends Container {
   // -- control specs -----------------------------------------------------------
 
   /** Visible params for the face (no mode-scoping now the monolith synth is gone). */
-  private visibleParams(): ParamSpec[] {
+  visibleParams(): ParamSpec[] {
     return this.def.params;
   }
 
@@ -1166,7 +1149,7 @@ export class ModuleView extends Container {
   }
 
   /** Lay controls out in a grid anchored at (x,y); rows are content-tight. */
-  private buildCtrlGrid(ctrls: CtrlSpec[], x: number, y: number, w: number): void {
+  buildCtrlGrid(ctrls: CtrlSpec[], x: number, y: number, w: number): void {
     if (!ctrls.length) return;
     const hasSel = ctrls.some((c) => c.options);
     const { cols, cellW, cellH, r } = this.gridLayout(ctrls.length, w, hasSel);
@@ -1179,7 +1162,7 @@ export class ModuleView extends Container {
   }
 
   /** Height of the knob band for these controls in the given width. */
-  private ctrlBandH(ctrls: CtrlSpec[], w: number): number {
+  ctrlBandH(ctrls: CtrlSpec[], w: number): number {
     if (!ctrls.length) return 0;
     const { rows, cellH } = this.gridLayout(ctrls.length, w, ctrls.some((c) => c.options));
     return rows * cellH;
@@ -1239,182 +1222,6 @@ export class ModuleView extends Container {
     const band = this.ctrlBandH(ctrls, gw);
     this.buildCtrlGrid(ctrls, x, top, gw);
     opts.display?.({ x, top, gw, band, bottom });
-  }
-
-  // -- envelope face: knob grid + DAHDSR contour with a live playhead --------
-
-  private envCurveG: Graphics | null = null;
-  private envDotG: Graphics | null = null;
-  private envCurveRect = { x: 0, y: 0, w: 0, h: 0 };
-  private lastEnvDot = NaN;
-  private envLastTap = 0;
-
-  private buildEnvelopeFace(x: number, y: number, w: number): void {
-    // Per-stage curves are edited by dragging the contour, not knobs.
-    const ctrls = this.visibleParams()
-      .filter((p) => !ENV_CURVE_IDS.has(p.id))
-      .map((p) => this.paramCtrl(p));
-    // Knob grid on top; the contour fills the rest of the tile below it.
-    const band = this.ctrlBandH(ctrls, w);
-    this.buildCtrlGrid(ctrls, x, y, w);
-
-    const cy = y + band + 8;
-    this.envCurveRect = { x, y: cy, w, h: this.h - cy - 12 };
-    this.envCurveG = new Graphics();
-    this.envCurveG.eventMode = 'static';
-    this.envCurveG.cursor = 'ns-resize';
-    this.envCurveG.on('pointerdown', (e) => this.onEnvCurveDown(e));
-    this.addChild(this.envCurveG);
-    this.envDotG = new Graphics();
-    this.envDotG.eventMode = 'none';
-    this.addChild(this.envDotG);
-    this.drawEnvCurve();
-  }
-
-  /**
-   * Hit-test a local x against the contour's stage layout. Returns the curve
-   * param for the slope under x (attack/decay/release), or null over the flat
-   * delay/hold/sustain segments. Mirrors the stage durations in drawEnvCurve.
-   */
-  private envCurveHit(localX: number): { id: string; def: number } | null {
-    const r = this.envCurveRect;
-    const p = this.instance.params;
-    const segs: Array<{ t: number; id?: string; def?: number }> = [
-      { t: p.delay ?? 0 },
-      { t: p.attack ?? 0.05, id: 'atkCurve', def: 0 },
-      { t: p.hold ?? 0 },
-      { t: p.decay ?? 0.2, id: 'decCurve', def: -0.4 },
-      { t: SUSTAIN_DISPLAY_S },
-      { t: p.release ?? 0.3, id: 'relCurve', def: -0.4 },
-    ];
-    const total = segs.reduce((s, st) => s + Math.max(st.t, 0), 0) || 1;
-    let acc = 0;
-    for (const st of segs) {
-      const dur = Math.max(st.t, 0);
-      const x0 = r.x + (acc / total) * r.w;
-      const x1 = r.x + ((acc + dur) / total) * r.w;
-      if (st.id && localX >= x0 && localX < x1) return { id: st.id, def: st.def! };
-      acc += dur;
-    }
-    return null;
-  }
-
-  /** Pointerdown on the contour: double-tap resets the slope, else drags it. */
-  private onEnvCurveDown(e: FederatedPointerEvent): void {
-    const hit = this.envCurveHit(e.getLocalPosition(this).x);
-    if (!hit) return; // flat segment → fall through to body drag (move module)
-    e.stopPropagation();
-    const now = performance.now();
-    if (now - this.envLastTap < 350) {
-      this.envLastTap = 0;
-      appState.beginUndoable();
-      appState.setParam(this.instance.id, hit.id, hit.def);
-      return;
-    }
-    this.envLastTap = now;
-    this.beginEnvCurveDrag(e, hit);
-  }
-
-  /** Vertical drag on a slope: up increases the stage curve (-1..1). */
-  private beginEnvCurveDrag(e: FederatedPointerEvent, hit: { id: string; def: number }): void {
-    appState.beginUndoable();
-    const startY = e.clientY;
-    const startCurve = this.instance.params[hit.id] ?? hit.def;
-    const label = hit.id === 'atkCurve' ? 'Atk Crv' : hit.id === 'decCurve' ? 'Dec Crv' : 'Rel Crv';
-    let moved = false;
-    const onMove = (ev: PointerEvent) => {
-      const dy = ev.clientY - startY;
-      if (Math.abs(dy) > 2) moved = true;
-      if (!moved) return;
-      const c = Math.min(1, Math.max(-1, startCurve - (dy / this.envCurveRect.h) * 2));
-      appState.setParam(this.instance.id, hit.id, c);
-      this.tooltip.showNow([`${label} ${c.toFixed(2)}`], ev.clientX, ev.clientY);
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      this.tooltip.hide();
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
-
-  /** Output value of the envelope at raw progress `env` (0..1), vel assumed 1. */
-  private envOut(env: number): number {
-    const p = this.instance.params;
-    const v = (p.invert ? 1 - env : env) * (p.depth ?? 1);
-    return p.bipolar ? v * 2 - (p.depth ?? 1) : v;
-  }
-
-  /** Map an output value to a y within the contour box (handles bipolar). */
-  private envY(out: number): number {
-    const r = this.envCurveRect;
-    const bip = (this.instance.params.bipolar ?? 0) > 0.5;
-    const norm = bip ? (out + 1) / 2 : out; // -1..1 → 0..1, else already 0..1
-    return r.y + r.h - Math.max(0, Math.min(1, norm)) * r.h;
-  }
-
-  /** Static DAHDSR contour, x ∝ stage time, y = output (depth/invert/bipolar). */
-  private drawEnvCurve(): void {
-    if (!this.envCurveG) return;
-    const g = this.envCurveG;
-    const r = this.envCurveRect;
-    const p = this.instance.params;
-
-    g.clear();
-    g.roundRect(r.x, r.y, r.w, r.h, 4).fill(theme.inset);
-    if ((p.bipolar ?? 0) > 0.5) {
-      const zy = this.envY(0);
-      g.moveTo(r.x, zy).lineTo(r.x + r.w, zy).stroke({ width: 1, color: theme.moduleStroke, alpha: 0.6 });
-    }
-
-    // Stage durations laid along x; sustain gets a fixed display segment.
-    const sustain = p.sustain ?? 0.6;
-    const stages: Array<{ t: number; shape: (f: number) => number }> = [
-      { t: p.delay ?? 0, shape: () => 0 },
-      { t: p.attack ?? 0.05, shape: (f) => envShape(f, p.atkCurve ?? 0) },
-      { t: p.hold ?? 0, shape: () => 1 },
-      { t: p.decay ?? 0.2, shape: (f) => 1 + (sustain - 1) * envShape(f, p.decCurve ?? 0) },
-      { t: SUSTAIN_DISPLAY_S, shape: () => sustain },
-      { t: p.release ?? 0.3, shape: (f) => sustain * (1 - envShape(f, p.relCurve ?? 0)) },
-    ];
-    const total = stages.reduce((s, st) => s + Math.max(st.t, 0), 0) || 1;
-
-    const pts: Array<{ x: number; y: number }> = [];
-    let acc = 0;
-    const SEG = 12;
-    for (const st of stages) {
-      const dur = Math.max(st.t, 0);
-      const x0 = r.x + (acc / total) * r.w;
-      const x1 = r.x + ((acc + dur) / total) * r.w;
-      for (let i = 0; i <= SEG; i++) {
-        const f = i / SEG;
-        pts.push({ x: x0 + (x1 - x0) * f, y: this.envY(this.envOut(st.shape(f))) });
-      }
-      acc += dur;
-    }
-
-    // Filled area under the contour, then the line.
-    const base = this.envY((p.bipolar ?? 0) > 0.5 ? -1 : 0);
-    g.moveTo(pts[0].x, base);
-    for (const pt of pts) g.lineTo(pt.x, pt.y);
-    g.lineTo(pts[pts.length - 1].x, base);
-    g.closePath();
-    g.fill({ color: PORT_TYPE_COLORS.control, alpha: 0.16 });
-    g.moveTo(pts[0].x, pts[0].y);
-    for (const pt of pts) g.lineTo(pt.x, pt.y);
-    g.stroke({ width: 2, color: PORT_TYPE_COLORS.control });
-  }
-
-  /** Live playhead dot riding the contour at the current output level. */
-  private drawEnvDot(out: number): void {
-    if (!this.envDotG) return;
-    const r = this.envCurveRect;
-    const g = this.envDotG;
-    g.clear();
-    g.circle(r.x + r.w - 6, this.envY(out), 4)
-      .fill(PORT_TYPE_COLORS.control)
-      .stroke({ width: 1.5, color: theme.text });
   }
 
   // -- controller faces (PRD §8.6) -------------------------------------------
@@ -3442,13 +3249,7 @@ export class ModuleView extends Container {
         this.drawPeqSpectrum(spectrum);
       }
     }
-    if (this.envDotG) {
-      const out = appState.controlValues[this.instance.id] ?? 0;
-      if (out !== this.lastEnvDot) {
-        this.lastEnvDot = out;
-        this.drawEnvDot(out);
-      }
-    }
+    this.face.live?.(this);
     if (this.grBar) {
       // Gain reduction grows downward, red, scaled to 24 dB full height.
       const gr = appState.gainReduction[this.instance.id] ?? 0;
