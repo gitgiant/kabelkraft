@@ -12,7 +12,6 @@ import type { ModuleInstance } from '../core/module';
 import type { ControlCurve } from '../core/types';
 import { PORT_TYPE_COLORS } from '../core/types';
 import { WAVEFORMS } from '../core/registry';
-import { clipFromData } from '../core/composer';
 import { isTouchMode } from '../core/mobile';
 import { appState } from '../state';
 import { ensureAudioPermission, listAudioDevices } from '../engine/devices';
@@ -40,6 +39,7 @@ import { LevelsFace } from './faces/levels';
 import { RecorderFace } from './faces/recorder';
 import { ModmatrixFace } from './faces/modmatrix';
 import { MixerFace } from './faces/mixer';
+import { ComposerFace } from './faces/composer';
 export { tickHiddenTintSource } from './faces/visThumb';
 
 
@@ -156,7 +156,7 @@ export class ModuleView extends Container {
     xy: { make: () => new XyFace(), customLayout: true },
     button: { make: () => new ButtonFace(), customLayout: true },
     mixer: { make: () => new MixerFace(), customLayout: true },
-    composer: { build: (v) => v.buildComposerFace(10, TITLE_H + 6, v.w - 20), customLayout: true, unbounded: true },
+    composer: { make: () => new ComposerFace(), customLayout: true, unbounded: true },
     levels: { make: () => new LevelsFace(), customLayout: true },
     recorder: { make: () => new RecorderFace(), customLayout: true },
     modmatrix: { make: () => new ModmatrixFace(), customLayout: true },
@@ -301,9 +301,6 @@ export class ModuleView extends Container {
     this.clipDot = null;
     this.clipped = false;
     this.grBar = null;
-    this.compG = null;
-    this.lastCompPos = -1;
-    this.lastCompData = null;
     this.midiDeviceText = null;
     // (peq/vcf curve + wtosc table + recorder/mixer state now lives on their
     // FaceRenderer objects)
@@ -1135,81 +1132,6 @@ export class ModuleView extends Container {
 
   // -- mixer face: 5 console strips (4 channels + master bus) --------------------
 
-  // -- composer face (PRD §8.3, piano roll) --------------------------------------
-
-  private compG: Graphics | null = null;
-  private compRect = { x: 0, y: 0, w: 0, h: 0 };
-  private lastCompPos = -1;
-  private lastCompData: unknown = null;
-
-  private buildComposerFace(x: number, y: number, w: number): void {
-    const h = this.h - y - 12;
-    this.compRect = { x, y, w, h };
-    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(theme.graphBg);
-    bg.eventMode = 'static';
-    bg.cursor = 'pointer';
-    bg.on('pointertap', (e) => {
-      e.stopPropagation();
-      appState.openComposer(this.instance.id);
-    });
-    bg.on('pointerover', (e) =>
-      this.tooltip.show(
-        ['Composer clip', 'Click to open the piano-roll editor: notes, tools, MIDI import/export.'],
-        e.clientX,
-        e.clientY,
-      ),
-    );
-    bg.on('pointerout', () => this.tooltip.hide());
-    this.addChild(bg);
-    this.compG = new Graphics();
-    this.compG.eventMode = 'none';
-    this.addChild(this.compG);
-
-    this.drawCompPreview(-1);
-  }
-
-  private drawCompPreview(pos: number): void {
-    if (!this.compG) return;
-    const { x, y, w, h } = this.compRect;
-    const clip = clipFromData(this.instance.data);
-    const g = this.compG;
-    g.clear();
-
-    // Beat grid, light on bar lines.
-    for (let b = 0; b <= clip.length; b++) {
-      const gx = x + (b / clip.length) * w;
-      g.moveTo(gx, y).lineTo(gx, y + h).stroke({
-        width: 1,
-        color: theme.moduleStroke,
-        alpha: b % 4 === 0 ? 0.5 : 0.15,
-      });
-    }
-
-    if (clip.notes.length) {
-      let lo = 127;
-      let hi = 0;
-      for (const n of clip.notes) {
-        lo = Math.min(lo, n.pitch);
-        hi = Math.max(hi, n.pitch);
-      }
-      lo = Math.max(0, lo - 2);
-      hi = Math.min(127, hi + 2);
-      const rowH = h / (hi - lo + 1);
-      for (const n of clip.notes) {
-        const nx = x + (Math.min(n.start, clip.length) / clip.length) * w;
-        const nw = Math.max(2, (Math.min(n.length, clip.length - n.start) / clip.length) * w);
-        const ny = y + (hi - n.pitch) * rowH;
-        g.roundRect(nx, ny + 1, nw, Math.max(2, rowH - 2), 1)
-          .fill({ color: 0x3dd9ff, alpha: 0.35 + 0.65 * n.vel });
-      }
-    }
-
-    if (pos >= 0) {
-      const px = x + (pos / clip.length) * w;
-      g.moveTo(px, y).lineTo(px, y + h).stroke({ width: 1.5, color: 0xffffff, alpha: 0.7 });
-    }
-  }
-
   // -- MIDI device row (midiIn/midiOut) ----------------------------------------
 
   private midiDeviceText: Text | null = null;
@@ -1473,20 +1395,6 @@ export class ModuleView extends Container {
 
   /** Called from the canvas ticker: live meters + sequencer playhead. */
   updateLive(): void {
-    if (this.compG) {
-      let pos = -1;
-      if (appState.transport.playing) {
-        const len = Math.max(1, Number(this.instance.data?.length) || 16);
-        // Quantize the playhead to ~half-pixel steps so we redraw sparingly.
-        const step = len / (this.compRect.w * 2);
-        pos = Math.floor(((appState.transport.songPosition % len) + len) % len / step) * step;
-      }
-      if (pos !== this.lastCompPos || this.instance.data !== this.lastCompData) {
-        this.lastCompPos = pos;
-        this.lastCompData = this.instance.data;
-        this.drawCompPreview(pos);
-      }
-    }
     this.face.live?.(this);
     if (this.grBar) {
       // Gain reduction grows downward, red, scaled to 24 dB full height.
