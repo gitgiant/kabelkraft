@@ -41,6 +41,7 @@ import { StringFace } from './faces/string';
 import { SpectrumFace } from './faces/spectrum';
 import { GranularFace } from './faces/granular';
 import { StepGridFace } from './faces/sequencer';
+import { TextFace } from './faces/text';
 
 
 /**
@@ -238,11 +239,11 @@ export class ModuleView extends Container {
     resonator: { make: () => new StringFace(), customLayout: true },
     addosc: { make: () => new SpectrumFace(), customLayout: true },
     granular: { make: () => new GranularFace(), customLayout: true },
-    stt: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
-    textinput: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
-    transporttext: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
-    notenames: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
-    lyrics: { build: (v) => v.buildParamFace({ display: (c) => v.buildTextFace(c.x, c.top + c.band + 4, c.gw) }), customLayout: true },
+    stt: { make: () => new TextFace(), customLayout: true },
+    textinput: { make: () => new TextFace(), customLayout: true },
+    transporttext: { make: () => new TextFace(), customLayout: true },
+    notenames: { make: () => new TextFace(), customLayout: true },
+    lyrics: { make: () => new TextFace(), customLayout: true },
     audioIn: { build: (v) => v.buildParamFace({ rail: 'vmeterIn', bottomRow: 'audioIn' }), customLayout: true },
     audioOut: { build: (v) => v.buildParamFace({ rail: 'vmeterOut', bottomRow: 'audioOut' }), customLayout: true },
     compressor: { build: (v) => v.buildParamFace({ rail: 'grmeter' }), customLayout: true },
@@ -1590,88 +1591,6 @@ export class ModuleView extends Container {
     }
   }
 
-  // -- text producer faces (stt/textinput/transporttext/notenames) --------------
-
-  private textFaceLine: Text | null = null;
-  private textFaceStatus: Text | null = null;
-
-  private buildTextFace(x: number, y: number, w: number): void {
-    const h = this.h - y - 12;
-    const bg = new Graphics().roundRect(x, y, w, h, 4).fill(theme.graphBg);
-    this.addChild(bg);
-
-    this.textFaceStatus = new Text({ text: '', style: { fontSize: 10, fill: theme.textDim } });
-    this.textFaceStatus.position.set(x + 8, y + 6);
-    this.addChild(this.textFaceStatus);
-
-    this.textFaceLine = new Text({
-      text: '',
-      style: { fontSize: 13, fill: 0xe8e8ee, wordWrap: true, wordWrapWidth: w - 16 },
-    });
-    this.textFaceLine.position.set(x + 8, y + 24);
-    this.addChild(this.textFaceLine);
-    this.updateTextFace();
-
-    const type = this.instance.type;
-    if (type === 'stt' || type === 'textinput' || type === 'lyrics') {
-      bg.eventMode = 'static';
-      bg.cursor = 'pointer';
-      bg.on('pointerdown', (e) => {
-        e.stopPropagation();
-        if (type === 'stt') {
-          const on = appState.toggleStt(this.instance.id);
-          if (!on && !appState.stt.supported()) {
-            this.tooltip.show(['Speech to Text', 'Speech recognition is not available in this browser.'], e.clientX, e.clientY);
-          }
-        } else if (type === 'lyrics') {
-          appState.openLyrics(this.instance.id);
-        } else {
-          const last = (this.instance.data?.lastText as string) ?? '';
-          const text = window.prompt('Text to send', last);
-          if (text !== null && text !== '') appState.sendTextInput(this.instance.id, text);
-        }
-        this.updateTextFace();
-      });
-      bg.on('pointerover', (e) =>
-        this.tooltip.show(
-          type === 'stt'
-            ? ['Speech to Text', 'Click to start/stop listening (mic permission).']
-            : type === 'lyrics'
-              ? ['Lyrics', 'Click to open the timed-lyrics editor (AI or hand-write).']
-              : ['Text Input', 'Click to type a line; it is sent on OK.'],
-          e.clientX,
-          e.clientY,
-        ),
-      );
-      bg.on('pointerout', () => this.tooltip.hide());
-    }
-  }
-
-  /** Per-frame: mirror the module's live text output onto the face. */
-  private updateTextFace(): void {
-    if (!this.textFaceLine || !this.textFaceStatus) return;
-    const type = this.instance.type;
-    const ev = appState.textValues[this.instance.id];
-    let line = ev?.text ?? '';
-    if (!line && type === 'textinput') line = (this.instance.data?.lastText as string) ?? '';
-    this.textFaceLine.text = line || '—';
-    this.textFaceLine.alpha = ev && !ev.final ? 0.6 : 1;
-    this.textFaceStatus.text =
-      type === 'stt'
-        ? appState.stt.active(this.instance.id)
-          ? '🎤 listening — click to stop'
-          : appState.stt.supported()
-            ? '🎤 click to listen'
-            : 'speech recognition unavailable'
-        : type === 'textinput'
-          ? 'click to type'
-          : type === 'lyrics'
-            ? `${((this.instance.data?.lines as unknown[])?.length ?? 0)} lines · click to edit`
-            : type === 'transporttext'
-              ? 'transport readout'
-              : 'last notes';
-  }
-
   // -- MIDI device row (midiIn/midiOut) ----------------------------------------
 
   private midiDeviceText: Text | null = null;
@@ -2353,7 +2272,6 @@ export class ModuleView extends Container {
         this.drawWtDisplay(pos, morph);
       }
     }
-    if (this.textFaceLine) this.updateTextFace();
     if (this.compG) {
       let pos = -1;
       if (appState.transport.playing) {
