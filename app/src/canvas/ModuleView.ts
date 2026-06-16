@@ -21,6 +21,7 @@ import { PresetBar, fitText } from './PresetBar';
 import { theme } from '../theme';
 import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import type { Tooltip } from './Tooltip';
+import { addTitleButton, attachHeadlessBody, attachToggleTap } from './tile/chrome';
 import type { FaceDef, FaceRenderer } from './faces/types';
 import { VcfFace } from './faces/vcf';
 import { EnvelopeFace } from './faces/envelope';
@@ -339,29 +340,13 @@ export class ModuleView extends Container {
   /** Headless body: swallows drags (the group tile underneath must not move
    * from inside the view) and double-taps into the target's editor. */
   private buildHeadlessBody(): void {
-    this.body.eventMode = 'static';
-    this.body.cursor = this.opts.onOpen ? 'pointer' : 'default';
-    let lastTap = 0;
-    this.body.on('pointertap', () => {
-      const now = performance.now();
-      if (now - lastTap < 350) {
-        lastTap = 0;
-        this.opts.onOpen?.();
-      } else {
-        lastTap = now;
-      }
+    attachHeadlessBody(this.body, this.tooltip, {
+      onOpen: this.opts.onOpen,
+      tooltipLines: [
+        this.instance.label ?? this.def.name,
+        this.opts.onOpen ? 'Live view — double-click to open.' : 'Live view.',
+      ],
     });
-    this.body.on('pointerover', (e) =>
-      this.tooltip.show(
-        [
-          this.instance.label ?? this.def.name,
-          this.opts.onOpen ? 'Live view — double-click to open.' : 'Live view.',
-        ],
-        e.clientX,
-        e.clientY,
-      ),
-    );
-    this.body.on('pointerout', () => this.tooltip.hide());
   }
 
   private drawBody(selected: boolean): void {
@@ -421,23 +406,8 @@ export class ModuleView extends Container {
 
     // Container title-bar buttons (GroupView pattern: fixed hit rects, since
     // glyph bounds are font-dependent).
-    const titleButton = (glyph: string, x: number, tip: string[], onTap: () => void): void => {
-      const t = new Text({ text: glyph, style: { fontSize: 11, fill: theme.textDim } });
-      t.anchor.set(1, 0);
-      t.position.set(x, 6);
-      t.eventMode = 'none';
-      this.addChild(t);
-      const hit = new Graphics().rect(x - 14, 2, 18, 20).fill({ color: 0xffffff, alpha: 0.001 });
-      hit.eventMode = 'static';
-      hit.cursor = 'pointer';
-      hit.on('pointerdown', (e) => {
-        e.stopPropagation();
-        onTap();
-      });
-      hit.on('pointerover', (e) => this.tooltip.show(tip, e.clientX, e.clientY));
-      hit.on('pointerout', () => this.tooltip.hide());
-      this.addChild(hit);
-    };
+    const titleButton = (glyph: string, x: number, tip: string[], onTap: () => void): void =>
+      addTitleButton(this, this.tooltip, glyph, x, tip, onTap);
 
     // Composer: group-tile-style title-bar toggle — ⛶ opens the roll in
     // place, ⤡ shrinks back to the compact preview tile — plus AI clip writing.
@@ -492,19 +462,7 @@ export class ModuleView extends Container {
     // editor ↔ compact tile — the same gesture as group tiles (PRD §6).
     const toggle = this.containerToggle();
     if (toggle) {
-      // Manual double-tap timer (GroupView pattern): native e.detail keeps
-      // counting past 2 across rapid successive double-clicks.
-      let lastTap = 0;
-      this.body.on('pointertap', (e) => {
-        if (this.toLocal(e.global).y > TITLE_H) return;
-        const now = performance.now();
-        if (now - lastTap < 350) {
-          lastTap = 0;
-          toggle();
-        } else {
-          lastTap = now;
-        }
-      });
+      attachToggleTap(this.body, toggle, { titleBarOnly: true, titleH: TITLE_H, resetOnFire: true });
     }
     this.body.on('pointerover', (e) =>
       this.tooltip.show(

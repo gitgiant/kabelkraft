@@ -15,6 +15,7 @@ import { nextGroupColor, theme } from '../theme';
 import { MODULE_TITLE_H, ModuleView, PORT_RADIUS, type PortHandlers } from './ModuleView';
 import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import { PresetBar, fitText } from './PresetBar';
+import { addTitleButton, attachHeadlessBody, attachToggleTap } from './tile/chrome';
 import type { Tooltip } from './Tooltip';
 
 const TITLE_H = 24;
@@ -136,35 +137,21 @@ export class GroupView extends Container {
     if (this.opts.headless) {
       // Sub-panel embed: swallow drags (the host tile must not move from
       // inside the panel); double-tap drills into the child group.
-      body.cursor = this.opts.onOpen ? 'pointer' : 'default';
-      let lastTap = 0;
-      body.on('pointertap', () => {
-        const now = performance.now();
-        if (now - lastTap < 350) {
-          lastTap = 0;
-          this.opts.onOpen?.();
-        } else {
-          lastTap = now;
-        }
+      attachHeadlessBody(body, this.tooltip, {
+        onOpen: this.opts.onOpen,
+        tooltipLines: [
+          this.group.name,
+          this.opts.onOpen ? 'Sub-panel — double-click to open the group.' : 'Sub-panel.',
+        ],
       });
-      body.on('pointerover', (e) =>
-        this.tooltip.show(
-          [this.group.name, this.opts.onOpen ? 'Sub-panel — double-click to open the group.' : 'Sub-panel.'],
-          e.clientX,
-          e.clientY,
-        ),
-      );
-      body.on('pointerout', () => this.tooltip.hide());
     } else {
       body.cursor = 'grab';
       body.on('pointerdown', (e) => this.handlers.onBodyDown(this, e));
       // Double-click (tile anywhere; faced tiles: title bar only) expands — PRD §6.
-      let lastTap = 0;
-      body.on('pointertap', (e) => {
-        if (face && this.toLocal(e.global).y > TITLE_H) return;
-        const now = performance.now();
-        if (now - lastTap < 350) this.handlers.onToggleCollapse(this.group.id);
-        lastTap = now;
+      attachToggleTap(body, () => this.handlers.onToggleCollapse(this.group.id), {
+        titleBarOnly: !!face,
+        titleH: TITLE_H,
+        resetOnFire: false,
       });
       body.on('pointerover', (e) =>
         this.tooltip.show(
@@ -249,29 +236,8 @@ export class GroupView extends Container {
     this.addChild(title);
 
     // Title-bar buttons: AI edit (🤖), expand (⛶), edit face (🎛), rename (✎), recolor (⬤).
-    const titleButton = (
-      glyph: string,
-      x: number,
-      tip: string[],
-      onTap: () => void,
-    ): void => {
-      const t = new Text({ text: glyph, style: { fontSize: 11, fill: theme.textDim } });
-      t.anchor.set(1, 0);
-      t.position.set(x, 6);
-      t.eventMode = 'none';
-      this.addChild(t);
-      // Glyph bounds are font-dependent — a fixed hit rect keeps it clickable.
-      const hit = new Graphics().rect(x - 14, 2, 18, 20).fill({ color: 0xffffff, alpha: 0.001 });
-      hit.eventMode = 'static';
-      hit.cursor = 'pointer';
-      hit.on('pointerdown', (e) => {
-        e.stopPropagation();
-        onTap();
-      });
-      hit.on('pointerover', (e) => this.tooltip.show(tip, e.clientX, e.clientY));
-      hit.on('pointerout', () => this.tooltip.hide());
-      this.addChild(hit);
-    };
+    const titleButton = (glyph: string, x: number, tip: string[], onTap: () => void): void =>
+      addTitleButton(this, this.tooltip, glyph, x, tip, onTap);
 
     titleButton('🤖', w - 84, ['AI edit', 'Describe a change — the AI rebuilds this group in place.'], () =>
       window.dispatchEvent(new CustomEvent('kk-ai-group', { detail: { groupId: this.group.id } })),
