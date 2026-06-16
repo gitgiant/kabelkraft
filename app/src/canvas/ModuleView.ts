@@ -7,7 +7,7 @@
  */
 
 import { Container, FederatedPointerEvent, Graphics, Text } from 'pixi.js';
-import type { ModuleDef, ParamSpec, PortSpec } from '../core/module';
+import type { ModuleDef, ParamSpec } from '../core/module';
 import type { ModuleInstance } from '../core/module';
 import type { ControlCurve } from '../core/types';
 import { PORT_TYPE_COLORS } from '../core/types';
@@ -22,6 +22,7 @@ import { theme } from '../theme';
 import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import type { Tooltip } from './Tooltip';
 import { addTitleButton, attachHeadlessBody, attachToggleTap } from './tile/chrome';
+import { PoleRail, PORT_RADIUS, type Pole } from './tile/PoleRail';
 import type { FaceDef, FaceRenderer } from './faces/types';
 import { VcfFace } from './faces/vcf';
 import { EnvelopeFace } from './faces/envelope';
@@ -57,7 +58,7 @@ export function hslToHex(h: number, s: number, l: number): number {
 }
 
 
-export const PORT_RADIUS = 7;
+export { PORT_RADIUS } from './tile/PoleRail';
 const TITLE_H = 24;
 export { TITLE_H as MODULE_TITLE_H };
 /** Nominal column pitch for the auto knob grid. */
@@ -143,9 +144,8 @@ export interface ParamFaceOpts {
 }
 
 export class ModuleView extends Container {
-  readonly portCenters = new Map<string, { x: number; y: number }>();
+  private poles!: PoleRail;
   private body = new Graphics();
-  private portDots = new Map<string, Graphics>();
   /** Eight persistent resize hit-zones — created once, never destroyed mid-
    * gesture (re-added on every rebuild) so PixiJS hover/cursor never wedges. */
   private resizeHandles: Graphics[] = [];
@@ -237,6 +237,7 @@ export class ModuleView extends Container {
   ) {
     super();
     this.position.set(instance.x, instance.y);
+    this.poles = new PoleRail(this, this.tooltip, () => (isTouchMode() ? 28 : 20));
     this.face = this.makeFace();
     this.rebuild();
   }
@@ -313,8 +314,7 @@ export class ModuleView extends Container {
       k.destroy({ children: true });
     }
 
-    this.portCenters.clear();
-    this.portDots.clear();
+    this.poles.clear();
     this.ctrlRedraws = [];
     this.paramAnchors.clear();
     this.midiDeviceText = null;
@@ -494,70 +494,31 @@ export class ModuleView extends Container {
   }
 
   private buildPorts(): void {
-    const inputs = this.def.ports.filter((p) => p.direction === 'in');
-    const outputs = this.def.ports.filter((p) => p.direction === 'out');
-    const place = (ports: PortSpec[], x: number) => {
-      ports.forEach((port, i) => {
-        const y = TITLE_H + 18 + i * 26;
-        this.portCenters.set(port.id, { x, y });
-        const dot = new Graphics();
-        this.drawPortDot(dot, port, false);
-        dot.position.set(x, y);
-        dot.eventMode = 'static';
-        dot.cursor = 'crosshair';
-        // Generous hit area — PRD §13 touch targets; fatter in touch mode.
-        dot.hitArea = {
-          contains: (px: number, py: number) => {
-            const r = isTouchMode() ? 28 : 20;
-            return px * px + py * py < r * r;
-          },
-        };
-        dot.on('pointerdown', (e) => {
-          e.stopPropagation();
-          this.handlers.onPortDown(this.instance.id, port.id, e);
-        });
-        dot.on('pointerup', (e) => {
-          e.stopPropagation();
-          this.handlers.onPortUp(this.instance.id, port.id, e);
-        });
-        dot.on('pointerover', (e) => {
-          this.tooltip.show(
-            [`${port.label} — ${port.type} ${port.direction}`, port.description],
-            e.clientX,
-            e.clientY,
-          );
-        });
-        dot.on('pointerout', () => this.tooltip.hide());
-        this.addChild(dot);
-        this.portDots.set(port.id, dot);
-      });
-    };
-    place(inputs, 0);
-    place(outputs, this.w);
-  }
-
-  private drawPortDot(dot: Graphics, port: PortSpec, highlight: boolean): void {
-    dot.clear();
-    dot
-      .circle(0, 0, highlight ? PORT_RADIUS + 3 : PORT_RADIUS)
-      .fill(PORT_TYPE_COLORS[port.type])
-      .stroke({ width: 2, color: highlight ? 0xffffff : 0x16161c });
+    // Generous hit area — PRD §13 touch targets; fatter in touch mode (the
+    // rail reads this via its hitRadius callback, set in the constructor).
+    const poles: Pole[] = this.def.ports.map((port) => ({
+      key: port.id,
+      type: port.type,
+      direction: port.direction,
+      tooltip: () => [`${port.label} — ${port.type} ${port.direction}`, port.description],
+      onDown: (e) => this.handlers.onPortDown(this.instance.id, port.id, e),
+      onUp: (e) => this.handlers.onPortUp(this.instance.id, port.id, e),
+    }));
+    this.poles.build(poles, this.w);
   }
 
   setPortHighlight(portId: string, on: boolean): void {
-    const dot = this.portDots.get(portId);
-    const port = this.def.ports.find((p) => p.id === portId);
-    if (dot && port) this.drawPortDot(dot, port, on);
+    this.poles.setHighlight(portId, on);
   }
 
   /** A port's dot Graphics — faces toggle visibility (e.g. mixer send poles). */
   portDot(portId: string): Graphics | undefined {
-    return this.portDots.get(portId);
+    return this.poles.dot(portId);
   }
 
   /** Brief red flash on a port that rejected a wire (PRD §4.3). */
   flashPortRejection(portId: string): void {
-    const dot = this.portDots.get(portId);
+    const dot = this.poles.dot(portId);
     if (!dot) return;
     const prev = this.flashTimers.get(portId);
     if (prev !== undefined) clearTimeout(prev);
@@ -1301,7 +1262,7 @@ export class ModuleView extends Container {
 
   /** World-space center of a port. */
   portWorldPosition(portId: string): { x: number; y: number } {
-    const local = this.portCenters.get(portId)!;
+    const local = this.poles.center(portId)!;
     return { x: this.position.x + local.x, y: this.position.y + local.y };
   }
 }

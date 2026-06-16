@@ -12,10 +12,11 @@ import type { ParamSpec } from '../core/module';
 import { PORT_TYPE_COLORS, type PortType } from '../core/types';
 import { appState } from '../state';
 import { nextGroupColor, theme } from '../theme';
-import { MODULE_TITLE_H, ModuleView, PORT_RADIUS, type PortHandlers } from './ModuleView';
+import { MODULE_TITLE_H, ModuleView, type PortHandlers } from './ModuleView';
 import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import { PresetBar, fitText } from './PresetBar';
 import { addTitleButton, attachHeadlessBody, attachToggleTap } from './tile/chrome';
+import { PoleRail, type Pole } from './tile/PoleRail';
 import type { Tooltip } from './Tooltip';
 
 const TITLE_H = 24;
@@ -70,9 +71,8 @@ export interface GroupHandlers {
 }
 
 export class GroupView extends Container {
-  /** World positions of proxy ports keyed by `${moduleId}:${portId}`. */
-  private portCenters = new Map<string, { x: number; y: number }>();
-  private portDots = new Map<string, Graphics>();
+  /** Proxy-port rail (typed dots keyed by `${moduleId}:${portId}`). */
+  private poles!: PoleRail;
   tileWidth = 170;
   tileHeight = 80;
   /** Persistent resize hit-zones — survive in-place re-renders during a drag. */
@@ -91,6 +91,7 @@ export class GroupView extends Container {
     private opts: { headless?: boolean; onOpen?: () => void } = {},
   ) {
     super();
+    this.poles = new PoleRail(this, this.tooltip);
     // Headless embeds always render the faced tile, whatever the child's
     // collapsed state on the (hidden) canvas.
     if (group.collapsed || opts.headless) this.buildCollapsedTile();
@@ -107,8 +108,7 @@ export class GroupView extends Container {
       if (this.resizeHandles.includes(k as Graphics)) continue;
       k.destroy({ children: true });
     }
-    this.portCenters.clear();
-    this.portDots.clear();
+    this.poles.clear();
     this.liveDraws = [];
     this.embedded = []; // instances are destroyed with the tile's children
 
@@ -186,39 +186,21 @@ export class GroupView extends Container {
     }
     if (this.opts.headless) return; // no ports/resize on embeds
 
-    const place = (ports: BoundaryPort[], x: number) => {
-      ports.forEach((port, i) => {
-        const y = TITLE_H + 18 + i * 26;
-        this.portCenters.set(port.key, { x, y });
-        const dot = new Graphics();
-        this.drawDot(dot, port.type, false);
-        dot.position.set(x, y);
-        dot.eventMode = 'static';
-        dot.cursor = 'crosshair';
-        dot.hitArea = { contains: (px: number, py: number) => px * px + py * py < 20 * 20 };
-        dot.on('pointerdown', (e) => {
-          e.stopPropagation();
-          this.handlers.onPortDown(port.moduleId, port.portId, e);
-        });
-        dot.on('pointerup', (e) => {
-          e.stopPropagation();
-          this.handlers.onPortUp(port.moduleId, port.portId, e);
-        });
-        dot.on('pointerover', (e) => {
-          const mod = appState.graph.modules.get(port.moduleId);
-          this.tooltip.show(
-            [`${port.label} — ${port.type} ${port.direction}`, `Inside: ${mod?.label ?? mod?.type ?? port.moduleId}`],
-            e.clientX,
-            e.clientY,
-          );
-        });
-        dot.on('pointerout', () => this.tooltip.hide());
-        this.addChild(dot);
-        this.portDots.set(port.key, dot);
-      });
-    };
-    place(inputs, 0);
-    place(outputs, w);
+    const poles: Pole[] = this.boundaryPorts.map((port) => ({
+      key: port.key,
+      type: port.type,
+      direction: port.direction,
+      tooltip: () => {
+        const mod = appState.graph.modules.get(port.moduleId);
+        return [
+          `${port.label} — ${port.type} ${port.direction}`,
+          `Inside: ${mod?.label ?? mod?.type ?? port.moduleId}`,
+        ];
+      },
+      onDown: (e) => this.handlers.onPortDown(port.moduleId, port.portId, e),
+      onUp: (e) => this.handlers.onPortUp(port.moduleId, port.portId, e),
+    }));
+    this.poles.build(poles, w);
 
     this.mountResizeHandles();
   }
@@ -292,7 +274,7 @@ export class GroupView extends Container {
         g.cursor = resizeCursor(dir);
         g.hitArea = {
           contains: (px, py) =>
-            inResizeBand(dir, px, py, this.tileWidth, this.tileHeight) && !this.overPole(px, py),
+            inResizeBand(dir, px, py, this.tileWidth, this.tileHeight) && !this.poles.overPole(px, py),
         };
         g.on('pointerdown', (e) => {
           e.stopPropagation();
@@ -306,17 +288,6 @@ export class GroupView extends Container {
       }
     }
     for (const g of this.resizeHandles) this.addChild(g);
-  }
-
-  /** True if a tile-local point sits on a pole dot — resize yields to the pole
-   * there so edge poles stay grabbable (wire + hover tooltip), not resized. */
-  private overPole(px: number, py: number): boolean {
-    for (const c of this.portCenters.values()) {
-      const dx = px - c.x;
-      const dy = py - c.y;
-      if (dx * dx + dy * dy < 20 * 20) return true;
-    }
-    return false;
   }
 
   private beginResize(dir: ResizeDir, e: FederatedPointerEvent): void {
@@ -1007,17 +978,8 @@ export class GroupView extends Container {
     }
   }
 
-  private drawDot(dot: Graphics, type: PortType, highlight: boolean): void {
-    dot.clear();
-    dot
-      .circle(0, 0, highlight ? PORT_RADIUS + 3 : PORT_RADIUS)
-      .fill(PORT_TYPE_COLORS[type])
-      .stroke({ width: 2, color: highlight ? 0xffffff : 0x16161c });
-  }
-
-  setPortHighlight(key: string, type: PortType, on: boolean): void {
-    const dot = this.portDots.get(key);
-    if (dot) this.drawDot(dot, type, on);
+  setPortHighlight(key: string, _type: PortType, on: boolean): void {
+    this.poles.setHighlight(key, on);
   }
 
   get boundary(): BoundaryPort[] {
@@ -1025,11 +987,11 @@ export class GroupView extends Container {
   }
 
   hasPort(key: string): boolean {
-    return this.portCenters.has(key);
+    return this.poles.has(key);
   }
 
   portWorldPosition(key: string): { x: number; y: number } | null {
-    const local = this.portCenters.get(key);
+    const local = this.poles.center(key);
     if (!local) return null;
     return { x: this.position.x + local.x, y: this.position.y + local.y };
   }
