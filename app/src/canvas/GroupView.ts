@@ -15,7 +15,7 @@ import { nextGroupColor, theme } from '../theme';
 import { MODULE_TITLE_H, ModuleView, type PortHandlers } from './ModuleView';
 import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import { PresetBar, fitText } from './PresetBar';
-import { addTitleButton, attachHeadlessBody, attachToggleTap } from './tile/chrome';
+import { addTitleButton, attachHeadlessBody, attachToggleTap, drawTileBody } from './tile/chrome';
 import { PoleRail, type Pole } from './tile/PoleRail';
 import type { Tooltip } from './Tooltip';
 
@@ -127,12 +127,16 @@ export class GroupView extends Container {
     const h = this.tileHeight;
     this.position.set(this.group.x, this.group.y);
 
-    const body = new Graphics()
-      .roundRect(0, 0, w, h, 10)
-      .fill(face?.bgColor ?? theme.groupBody)
-      .stroke({ width: 2, color: this.group.color ?? theme.groupStroke });
-    body.roundRect(0, 0, w, TITLE_H, 10).fill(theme.groupTitle);
-    body.rect(0, TITLE_H - 8, w, 8).fill(theme.groupTitle);
+    const body = new Graphics();
+    drawTileBody(body, {
+      w,
+      h,
+      radius: 10,
+      bodyFill: face?.bgColor ?? theme.groupBody,
+      stroke: { width: 2, color: this.group.color ?? theme.groupStroke },
+      titleFill: theme.groupTitle,
+      titleH: TITLE_H,
+    });
     body.eventMode = 'static';
     if (this.opts.headless) {
       // Sub-panel embed: swallow drags (the host tile must not move from

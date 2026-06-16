@@ -38,6 +38,33 @@ export function addTitleButton(
   host.addChild(hit);
 }
 
+export interface TileBodyStyle {
+  w: number;
+  h: number;
+  /** Corner radius (modules 8, groups 10). */
+  radius: number;
+  bodyFill: number | string;
+  stroke: { width: number; color: number | string };
+  titleFill: number | string;
+  /** Title-bar height (default 24). */
+  titleH?: number;
+}
+
+/**
+ * The shared tile skeleton: a rounded body with a fill + stroke, and a title
+ * bar that's rounded at the top and square at the bottom (a rounded rect plus
+ * an 8px square overlap). Clears `g` first. Tile-specific extras (a module's
+ * tint stripe + resize grip, a group's background image) are drawn by the
+ * caller afterward.
+ */
+export function drawTileBody(g: Graphics, s: TileBodyStyle): void {
+  const titleH = s.titleH ?? 24;
+  g.clear();
+  g.roundRect(0, 0, s.w, s.h, s.radius).fill(s.bodyFill).stroke(s.stroke);
+  g.roundRect(0, 0, s.w, titleH, s.radius).fill(s.titleFill);
+  g.rect(0, titleH - 8, s.w, 8).fill(s.titleFill);
+}
+
 export interface ToggleTapOpts {
   /** Ignore taps whose tile-local Y falls below the title bar (faced tiles). */
   titleBarOnly?: boolean;

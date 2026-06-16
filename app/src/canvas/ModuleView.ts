@@ -21,7 +21,7 @@ import { PresetBar, fitText } from './PresetBar';
 import { theme } from '../theme';
 import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import type { Tooltip } from './Tooltip';
-import { addTitleButton, attachHeadlessBody, attachToggleTap } from './tile/chrome';
+import { addTitleButton, attachHeadlessBody, attachToggleTap, drawTileBody } from './tile/chrome';
 import { PoleRail, PORT_RADIUS, type Pole } from './tile/PoleRail';
 import type { FaceDef, FaceRenderer } from './faces/types';
 import { VcfFace } from './faces/vcf';
@@ -353,16 +353,18 @@ export class ModuleView extends Container {
     const w = this.w;
     const h = this.h;
     const glow = this.liveColor;
-    this.body.clear();
-    this.body
-      .roundRect(0, 0, w, h, 8)
-      .fill(selected ? theme.moduleBodySelected : theme.moduleBody)
-      .stroke({
+    drawTileBody(this.body, {
+      w,
+      h,
+      radius: 8,
+      bodyFill: selected ? theme.moduleBodySelected : theme.moduleBody,
+      stroke: {
         width: selected ? 2 : glow !== null ? 1.5 : 1,
         color: selected ? theme.selectedStroke : glow ?? theme.moduleStroke,
-      });
-    this.body.roundRect(0, 0, w, TITLE_H, 8).fill(theme.moduleTitle);
-    this.body.rect(0, TITLE_H - 8, w, 8).fill(theme.moduleTitle);
+      },
+      titleFill: theme.moduleTitle,
+      titleH: TITLE_H,
+    });
     const stripe = glow ?? this.instance.color;
     if (stripe !== undefined) {
       this.body.rect(0, TITLE_H, w, 3).fill(stripe);
