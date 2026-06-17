@@ -38,6 +38,20 @@ export function addTitleButton(
   host.addChild(hit);
 }
 
+/**
+ * Tear down a tile's children for an in-place rebuild, preserving any node the
+ * `keep` predicate matches — the ResizeController's persistent handles must
+ * outlive the rebuild so its captured drag node is never destroyed.
+ */
+export function clearTileChildren(host: Container, keep: (child: Container) => boolean): void {
+  const kids = [...host.children];
+  host.removeChildren();
+  for (const k of kids) {
+    if (keep(k)) continue;
+    k.destroy({ children: true });
+  }
+}
+
 export interface TileBodyStyle {
   w: number;
   h: number;

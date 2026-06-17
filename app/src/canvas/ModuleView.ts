@@ -20,7 +20,7 @@ import { openSelectMenu } from './SelectMenu';
 import { PresetBar, fitText } from './PresetBar';
 import { theme } from '../theme';
 import type { Tooltip } from './Tooltip';
-import { attachHeadlessBody, attachToggleTap, drawTileBody } from './tile/chrome';
+import { attachHeadlessBody, attachToggleTap, clearTileChildren, drawTileBody } from './tile/chrome';
 import { layoutTitleButtons, moduleTitleSpec } from './tile/titleButtons';
 import { PoleRail, PORT_RADIUS, type Pole } from './tile/PoleRail';
 import { ResizeController } from './tile/ResizeController';
@@ -334,12 +334,7 @@ export class ModuleView extends Container {
   rebuild(): void {
     for (const t of this.flashTimers.values()) clearTimeout(t);
     this.flashTimers.clear();
-    const kids = [...this.children];
-    this.removeChildren();
-    for (const k of kids) {
-      if (this.resize.has(k as Graphics)) continue; // persistent — survive rebuild
-      k.destroy({ children: true });
-    }
+    clearTileChildren(this, (k) => this.resize.has(k as Graphics)); // keep persistent handles
 
     this.poles.clear();
     this.ctrlRedraws = [];

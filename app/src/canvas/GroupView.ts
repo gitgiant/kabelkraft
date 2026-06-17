@@ -15,7 +15,7 @@ import { nextGroupColor, theme } from '../theme';
 import { MODULE_TITLE_H, ModuleView, type PortHandlers } from './ModuleView';
 import { ResizeController } from './tile/ResizeController';
 import { PresetBar, fitText } from './PresetBar';
-import { addTitleButton, attachHeadlessBody, attachToggleTap, drawTileBody } from './tile/chrome';
+import { addTitleButton, attachHeadlessBody, attachToggleTap, clearTileChildren, drawTileBody } from './tile/chrome';
 import { PoleRail, type Pole } from './tile/PoleRail';
 import type { Tooltip } from './Tooltip';
 
@@ -169,12 +169,7 @@ export class GroupView extends Container {
   private buildCollapsedTile(): void {
     // In-place re-render (live resize) reuses this: drop the old tile but keep
     // the persistent resize handles so the captured node is never destroyed.
-    const kids = [...this.children];
-    this.removeChildren();
-    for (const k of kids) {
-      if (this.resize.has(k as Graphics)) continue;
-      k.destroy({ children: true });
-    }
+    clearTileChildren(this, (k) => this.resize.has(k as Graphics)); // keep persistent handles
     this.poles.clear();
     this.liveDraws = [];
     this.embedded = []; // instances are destroyed with the tile's children
