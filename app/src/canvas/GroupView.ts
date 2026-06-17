@@ -13,7 +13,7 @@ import { PORT_TYPE_COLORS, type PortType } from '../core/types';
 import { appState } from '../state';
 import { nextGroupColor, theme } from '../theme';
 import { MODULE_TITLE_H, ModuleView, type PortHandlers } from './ModuleView';
-import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
+import { ResizeController } from './tile/ResizeController';
 import { PresetBar, fitText } from './PresetBar';
 import { addTitleButton, attachHeadlessBody, attachToggleTap, drawTileBody } from './tile/chrome';
 import { PoleRail, type Pole } from './tile/PoleRail';
@@ -75,8 +75,11 @@ export class GroupView extends Container {
   private poles!: PoleRail;
   tileWidth = 170;
   tileHeight = 80;
-  /** Persistent resize hit-zones — survive in-place re-renders during a drag. */
-  private resizeHandles: Graphics[] = [];
+  private resize!: ResizeController;
+  /** Per-drag snapshot of face elements (faced tiles scale them with the tile). */
+  private resizeEls: Array<{ el: FaceElement; x: number; y: number; w: number; h: number; size?: number }> = [];
+  private resizeMinW = 120;
+  private resizeMinH = 80;
   private popUntil = 0;
   private popFrom = { x: 0, y: 0 };
   private static readonly POP_MS = 340;
@@ -92,6 +95,70 @@ export class GroupView extends Container {
   ) {
     super();
     this.poles = new PoleRail(this, this.tooltip);
+    this.resize = new ResizeController(this, this.tooltip, {
+      getSize: () => ({ w: this.tileWidth, h: this.tileHeight }),
+      getStart: () => ({ w: this.tileWidth, h: this.tileHeight, x: this.group.x, y: this.group.y }),
+      overPole: (px, py) => this.poles.overPole(px, py),
+      // Faced tiles scale their elements with the face; snapshot drag-start
+      // geometry and always scale from it (per-move ratios would drift). Also
+      // stop shrinking where the smallest element would drop below usable size.
+      beginDrag: () => {
+        const face = this.group.face;
+        this.resizeEls = (face?.elements ?? []).map((el) => ({
+          el,
+          x: el.x,
+          y: el.y,
+          w: el.w,
+          h: el.h,
+          size: el.size,
+        }));
+        const MIN_W = 120;
+        const MIN_H = 80;
+        const MIN_EL = 10;
+        let minFW = MIN_W;
+        let minFH = MIN_H;
+        if (face) {
+          for (const s of this.resizeEls) {
+            minFW = Math.max(minFW, face.width * Math.min(1, MIN_EL / s.w));
+            minFH = Math.max(minFH, face.height * Math.min(1, MIN_EL / s.h));
+          }
+        }
+        this.resizeMinW = minFW;
+        this.resizeMinH = minFH;
+      },
+      onDrag: (_dir, rawW, rawH, start) => {
+        const face = this.group.face;
+        const cw = Math.max(face ? this.resizeMinW : 120, rawW);
+        // Faced tile height = TITLE_H + face.height; clamp the face area itself.
+        const ch = Math.max(face ? this.resizeMinH + TITLE_H : 80, rawH);
+        if (face) {
+          const rx = cw / (start.w || 1);
+          const ry = (ch - TITLE_H) / (start.h - TITLE_H || 1);
+          face.width = cw;
+          face.height = ch - TITLE_H;
+          const rs = Math.min(rx, ry);
+          for (const s of this.resizeEls) {
+            s.el.x = s.x * rx;
+            s.el.y = s.y * ry;
+            s.el.w = s.w * rx;
+            s.el.h = s.h * ry;
+            if (s.size !== undefined) s.el.size = Math.max(7, s.size * rs);
+          }
+        } else {
+          this.group.w = cw;
+          this.group.h = ch;
+        }
+        return { w: cw, h: ch };
+      },
+      onAnchor: (dir, w, h, start) => {
+        if (dir.includes('w')) this.group.x = start.x + start.w - w;
+        if (dir.includes('n')) this.group.y = start.y + start.h - h;
+      },
+      rerender: () => {
+        this.buildCollapsedTile(); // in-place re-render; handles persist
+        this.position.set(this.group.x, this.group.y);
+      },
+    });
     // Headless embeds always render the faced tile, whatever the child's
     // collapsed state on the (hidden) canvas.
     if (group.collapsed || opts.headless) this.buildCollapsedTile();
@@ -105,7 +172,7 @@ export class GroupView extends Container {
     const kids = [...this.children];
     this.removeChildren();
     for (const k of kids) {
-      if (this.resizeHandles.includes(k as Graphics)) continue;
+      if (this.resize.has(k as Graphics)) continue;
       k.destroy({ children: true });
     }
     this.poles.clear();
@@ -206,7 +273,7 @@ export class GroupView extends Container {
     }));
     this.poles.build(poles, w);
 
-    this.mountResizeHandles();
+    this.resize.mount();
   }
 
   /** Title text + title-bar buttons + color swatch (full tiles only). */
@@ -266,119 +333,6 @@ export class GroupView extends Container {
     );
   }
 
-  // -- resize (all sides) ----------------------------------------------------
-
-  /** Eight persistent hit-zones; re-rendered in place during a drag (faced
-   * tiles write face.width/height, plain tiles write group.w/h). */
-  private mountResizeHandles(): void {
-    if (this.resizeHandles.length === 0) {
-      for (const dir of RESIZE_DIRS) {
-        const g = new Graphics();
-        g.eventMode = 'static';
-        g.cursor = resizeCursor(dir);
-        g.hitArea = {
-          contains: (px, py) =>
-            inResizeBand(dir, px, py, this.tileWidth, this.tileHeight) && !this.poles.overPole(px, py),
-        };
-        g.on('pointerdown', (e) => {
-          e.stopPropagation();
-          this.beginResize(dir, e);
-        });
-        g.on('pointerover', (ev) =>
-          this.tooltip.show(['Resize', 'Drag any edge or corner.'], ev.clientX, ev.clientY),
-        );
-        g.on('pointerout', () => this.tooltip.hide());
-        this.resizeHandles.push(g);
-      }
-    }
-    for (const g of this.resizeHandles) this.addChild(g);
-  }
-
-  private beginResize(dir: ResizeDir, e: FederatedPointerEvent): void {
-    appState.beginUndoable();
-    const face = this.group.face;
-    const startW = this.tileWidth;
-    const startH = this.tileHeight;
-    const startX = this.group.x;
-    const startY = this.group.y;
-    const sx = e.clientX;
-    const sy = e.clientY;
-    const scale = this.worldTransform.a || 1;
-    let raf = 0;
-    // Groups are containers — minimum only, stretch to any size.
-    const MIN_W = 120, MIN_H = 80;
-
-    // Faced tiles scale their elements with the face (positions per-axis, so
-    // layouts spread/condense; sizes ride along). Snapshot drag-start geometry
-    // and always scale from it — per-move ratios would drift.
-    const startEls = (face?.elements ?? []).map((el) => ({
-      el,
-      x: el.x,
-      y: el.y,
-      w: el.w,
-      h: el.h,
-      size: el.size,
-    }));
-    // Stop shrinking where the smallest element would drop below usable size.
-    // An element already below the floor pins that axis at its current size.
-    const MIN_EL = 10;
-    let minFW = MIN_W;
-    let minFH = MIN_H;
-    if (face) {
-      for (const s of startEls) {
-        minFW = Math.max(minFW, face.width * Math.min(1, MIN_EL / s.w));
-        minFH = Math.max(minFH, face.height * Math.min(1, MIN_EL / s.h));
-      }
-    }
-
-    const apply = (ev: PointerEvent) => {
-      const { w, h } = resizeSize(dir, (ev.clientX - sx) / scale, (ev.clientY - sy) / scale, startW, startH);
-      const cw = Math.max(face ? minFW : MIN_W, w);
-      // Faced tile height = TITLE_H + face.height; clamp the face area itself.
-      const ch = Math.max(face ? minFH + TITLE_H : MIN_H, h);
-      if (face) {
-        const rx = cw / (startW || 1);
-        const ry = (ch - TITLE_H) / (startH - TITLE_H || 1);
-        face.width = cw;
-        face.height = ch - TITLE_H;
-        const rs = Math.min(rx, ry);
-        for (const s of startEls) {
-          s.el.x = s.x * rx;
-          s.el.y = s.y * ry;
-          s.el.w = s.w * rx;
-          s.el.h = s.h * ry;
-          if (s.size !== undefined) s.el.size = Math.max(7, s.size * rs);
-        }
-      } else {
-        this.group.w = cw;
-        this.group.h = ch;
-      }
-      // Anchor opposite edge for n/w using the clamped size.
-      if (dir.includes('w')) this.group.x = startX + startW - cw;
-      if (dir.includes('n')) this.group.y = startY + startH - ch;
-    };
-    const onMove = (ev: PointerEvent) => {
-      apply(ev);
-      if (!raf) {
-        raf = requestAnimationFrame(() => {
-          raf = 0;
-          this.buildCollapsedTile(); // in-place re-render; handles persist
-          this.position.set(this.group.x, this.group.y);
-        });
-      }
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      if (raf) cancelAnimationFrame(raf);
-      // Final snap to the committed size (mutations already persisted on group;
-      // beginUndoable at drag start captured the one undo step).
-      this.buildCollapsedTile();
-      this.position.set(this.group.x, this.group.y);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
 
   // -- face elements (core/face.ts) -----------------------------------------
 

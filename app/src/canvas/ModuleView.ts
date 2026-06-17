@@ -19,10 +19,10 @@ import { appSettings, updateSettings } from '../core/settings';
 import { openSelectMenu } from './SelectMenu';
 import { PresetBar, fitText } from './PresetBar';
 import { theme } from '../theme';
-import { RESIZE_DIRS, inResizeBand, resizeCursor, resizeSize, type ResizeDir } from './resize';
 import type { Tooltip } from './Tooltip';
 import { addTitleButton, attachHeadlessBody, attachToggleTap, drawTileBody } from './tile/chrome';
 import { PoleRail, PORT_RADIUS, type Pole } from './tile/PoleRail';
+import { ResizeController } from './tile/ResizeController';
 import type { FaceDef, FaceRenderer } from './faces/types';
 import { VcfFace } from './faces/vcf';
 import { EnvelopeFace } from './faces/envelope';
@@ -146,9 +146,7 @@ export interface ParamFaceOpts {
 export class ModuleView extends Container {
   private poles!: PoleRail;
   private body = new Graphics();
-  /** Eight persistent resize hit-zones — created once, never destroyed mid-
-   * gesture (re-added on every rebuild) so PixiJS hover/cursor never wedges. */
-  private resizeHandles: Graphics[] = [];
+  private resize!: ResizeController;
   private flashTimers = new Map<string, number>();
   private selected = false;
   private popUntil = 0;
@@ -238,6 +236,34 @@ export class ModuleView extends Container {
     super();
     this.position.set(instance.x, instance.y);
     this.poles = new PoleRail(this, this.tooltip, () => (isTouchMode() ? 28 : 20));
+    this.resize = new ResizeController(this, this.tooltip, {
+      getSize: () => ({ w: this.w, h: this.h }),
+      getStart: () => ({ w: this.w, h: this.h, x: this.instance.x, y: this.instance.y }),
+      onDrag: (_dir, rawW, rawH) => {
+        // Write raw; the w/h getters clamp to the def's bounds on read-back.
+        this.instance.w = rawW;
+        this.instance.h = rawH;
+        return { w: this.w, h: this.h };
+      },
+      onAnchor: (dir, w, h, start) => {
+        if (dir.includes('w')) this.instance.x = start.x + start.w - w;
+        if (dir.includes('n')) this.instance.y = start.y + start.h - h;
+      },
+      // Store the clamped size so saved patches stay in bounds.
+      commit: (w, h) => {
+        this.instance.w = w;
+        this.instance.h = h;
+      },
+      rerender: () => {
+        this.rebuild();
+        this.position.set(this.instance.x, this.instance.y);
+      },
+      onResetDefault: () => {
+        delete this.instance.w;
+        delete this.instance.h;
+        this.rebuild();
+      },
+    });
     this.face = this.makeFace();
     this.rebuild();
   }
@@ -310,7 +336,7 @@ export class ModuleView extends Container {
     const kids = [...this.children];
     this.removeChildren();
     for (const k of kids) {
-      if (this.resizeHandles.includes(k as Graphics)) continue; // persistent — survive rebuild
+      if (this.resize.has(k as Graphics)) continue; // persistent — survive rebuild
       k.destroy({ children: true });
     }
 
@@ -331,7 +357,7 @@ export class ModuleView extends Container {
     }
     // Handles sit just above the body so ports/face/title (added next) win hit
     // priority in their bands, while the handles still beat body-drag on edges.
-    this.mountResizeHandles();
+    this.resize.mount();
     this.buildTitle();
     this.buildPorts();
     this.buildFace();
@@ -529,81 +555,6 @@ export class ModuleView extends Container {
       portId,
       window.setTimeout(() => this.setPortHighlight(portId, false), 350),
     );
-  }
-
-  // -- resize ------------------------------------------------------------------
-
-  /** Create the 8 persistent hit-zones once, then (re-)attach them on top of
-   * the body. Their hit-tests read this.w/this.h live, so no per-frame layout. */
-  private mountResizeHandles(): void {
-    if (this.resizeHandles.length === 0) {
-      for (const dir of RESIZE_DIRS) {
-        const g = new Graphics();
-        g.eventMode = 'static';
-        g.cursor = resizeCursor(dir);
-        g.hitArea = { contains: (px, py) => inResizeBand(dir, px, py, this.w, this.h) };
-        g.on('pointerdown', (e) => {
-          e.stopPropagation();
-          if (e.detail >= 2) {
-            appState.beginUndoable();
-            delete this.instance.w;
-            delete this.instance.h;
-            this.rebuild();
-            return;
-          }
-          this.beginResize(dir, e);
-        });
-        g.on('pointerover', (ev) =>
-          this.tooltip.show(['Resize', 'Drag any edge or corner. Double-click: default size.'], ev.clientX, ev.clientY),
-        );
-        g.on('pointerout', () => this.tooltip.hide());
-        this.resizeHandles.push(g);
-      }
-    }
-    for (const g of this.resizeHandles) this.addChild(g);
-  }
-
-  private beginResize(dir: ResizeDir, e: FederatedPointerEvent): void {
-    appState.beginUndoable(); // whole resize = one undo step
-    const startW = this.w;
-    const startH = this.h;
-    const startX = this.instance.x;
-    const startY = this.instance.y;
-    const sx = e.clientX;
-    const sy = e.clientY;
-    const scale = this.worldTransform.a || 1;
-    let raf = 0;
-    // Anchor the opposite edge for n/w drags using the *clamped* size, so a
-    // size hitting its min/max doesn't drift the fixed edge.
-    const anchor = () => {
-      if (dir.includes('w')) this.instance.x = startX + startW - this.w;
-      if (dir.includes('n')) this.instance.y = startY + startH - this.h;
-      this.position.set(this.instance.x, this.instance.y);
-    };
-    const onMove = (ev: PointerEvent) => {
-      const { w, h } = resizeSize(dir, (ev.clientX - sx) / scale, (ev.clientY - sy) / scale, startW, startH);
-      this.instance.w = w;
-      this.instance.h = h;
-      if (!raf) {
-        raf = requestAnimationFrame(() => {
-          raf = 0;
-          anchor();
-          this.rebuild();
-        });
-      }
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      if (raf) cancelAnimationFrame(raf);
-      // Store the clamped size so saved patches stay in bounds.
-      this.instance.w = this.w;
-      this.instance.h = this.h;
-      anchor();
-      this.rebuild();
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
   }
 
   // -- pop-in animation ----------------------------------------------------------
