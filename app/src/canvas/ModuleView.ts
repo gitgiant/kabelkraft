@@ -20,7 +20,8 @@ import { openSelectMenu } from './SelectMenu';
 import { PresetBar, fitText } from './PresetBar';
 import { theme } from '../theme';
 import type { Tooltip } from './Tooltip';
-import { addTitleButton, attachHeadlessBody, attachToggleTap, drawTileBody } from './tile/chrome';
+import { attachHeadlessBody, attachToggleTap, drawTileBody } from './tile/chrome';
+import { layoutTitleButtons, moduleTitleSpec } from './tile/titleButtons';
 import { PoleRail, PORT_RADIUS, type Pole } from './tile/PoleRail';
 import { ResizeController } from './tile/ResizeController';
 import type { FaceDef, FaceRenderer } from './faces/types';
@@ -417,11 +418,11 @@ export class ModuleView extends Container {
   }
 
   private buildTitle(): void {
-    // Glyph buttons occupy the right end of the title bar (per module type);
-    // the preset picker sits just left of them, the (truncated) name at left.
-    const hasAiButton = this.instance.type === 'lyrics' || this.instance.type === 'visualizer';
-    const rightInset = this.instance.type === 'composer' ? 44 : hasAiButton ? 22 : 4;
-    const pickerRightX = this.w - rightInset;
+    // Glyph buttons (per module type) occupy the right end of the title bar; the
+    // preset picker sits just left of them (inset derived from button count),
+    // the (truncated) name at left. The button/toggle table is data-driven.
+    const spec = moduleTitleSpec(this.instance.type, this.instance.id);
+    const pickerRightX = layoutTitleButtons(this, this.tooltip, this.w, spec.buttons);
     const nameMaxW = Math.max(24, Math.min(90, (pickerRightX - 8) * 0.5));
     const titleMaxW = Math.max(16, pickerRightX - (nameMaxW + 36) - 14);
 
@@ -431,46 +432,6 @@ export class ModuleView extends Container {
     // group tiles do the same.
     title.eventMode = 'none';
     this.addChild(title);
-
-    // Container title-bar buttons (GroupView pattern: fixed hit rects, since
-    // glyph bounds are font-dependent).
-    const titleButton = (glyph: string, x: number, tip: string[], onTap: () => void): void =>
-      addTitleButton(this, this.tooltip, glyph, x, tip, onTap);
-
-    // Composer: group-tile-style title-bar toggle — ⛶ opens the roll in
-    // place, ⤡ shrinks back to the compact preview tile — plus AI clip writing.
-    if (this.instance.type === 'composer') {
-      const open = appState.composerOpen.has(this.instance.id);
-      titleButton(
-        open ? '⤡' : '⛶',
-        this.w - 8,
-        open
-          ? ['Shrink', 'Collapse back to the compact clip tile.']
-          : ['Open piano roll', 'Expand the editor inside the module.'],
-        () => {
-          if (appState.composerOpen.has(this.instance.id)) appState.closeComposer(this.instance.id);
-          else appState.openComposer(this.instance.id);
-        },
-      );
-      titleButton('🤖', this.w - 28, ['AI clip', 'Describe a melody or beat — the AI writes this clip.'], () =>
-        appState.requestComposerAi(this.instance.id),
-      );
-    }
-
-    // Lyrics: AI line writing — opens the timed-sheet editor with its AI popup.
-    if (this.instance.type === 'lyrics') {
-      titleButton('🤖', this.w - 8, ['AI lyrics', 'Describe a song — the AI writes timed lyric lines.'], () =>
-        appState.requestLyricsAi(this.instance.id),
-      );
-    }
-
-    // Visualizer: AI scene writing — opens the graph editor, whose AI bar
-    // carries the container's full configuration (inputs + current graph).
-    if (this.instance.type === 'visualizer') {
-      titleButton('🤖', this.w - 8, ['AI visuals', 'Describe a scene — the AI rewrites this visual graph.'], () =>
-        appState.openVisEditor(this.instance.id),
-      );
-    }
 
     // Preset picker (◀ name ▶), right-aligned before the glyph buttons.
     this.addChild(
@@ -488,9 +449,8 @@ export class ModuleView extends Container {
     this.body.on('pointerdown', (e) => this.handlers.onBodyDown(this, e));
     // Containers: double-click the title bar toggles the grown in-place
     // editor ↔ compact tile — the same gesture as group tiles (PRD §6).
-    const toggle = this.containerToggle();
-    if (toggle) {
-      attachToggleTap(this.body, toggle, { titleBarOnly: true, titleH: TITLE_H, resetOnFire: true });
+    if (spec.toggle) {
+      attachToggleTap(this.body, spec.toggle, { titleBarOnly: true, titleH: TITLE_H, resetOnFire: true });
     }
     this.body.on('pointerover', (e) =>
       this.tooltip.show(
@@ -500,25 +460,6 @@ export class ModuleView extends Container {
       ),
     );
     this.body.on('pointerout', () => this.tooltip.hide());
-  }
-
-  /** Open ↔ shrink action for container tiles (null = not a container). */
-  private containerToggle(): (() => void) | null {
-    const id = this.instance.id;
-    if (this.instance.type === 'composer') {
-      return () =>
-        appState.composerOpen.has(id) ? appState.closeComposer(id) : appState.openComposer(id);
-    }
-    if (this.instance.type === 'visualizer') {
-      // Title bar dblclick targets the graph editor (in-tile, like the
-      // composer's piano roll); the big display view keeps its ⛶ button.
-      return () => {
-        if (appState.visEditorOpen === id) appState.closeVisEditor();
-        else if (appState.visualizerOpen === id) appState.closeVisualizer();
-        else appState.openVisEditor(id);
-      };
-    }
-    return null;
   }
 
   private buildPorts(): void {
