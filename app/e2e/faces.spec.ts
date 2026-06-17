@@ -7,6 +7,7 @@ import {
   dragVertical,
   faceElementCenter,
   groupExpandButton,
+  groupLocalPoint,
   settleFrames,
   TILE_TITLE_H,
 } from './util';
@@ -110,7 +111,7 @@ test('expand button opens the group; toolbar Shrink pulls it back into the face'
     page,
     async () => {
       const pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), groupId);
-      return pt && { x: pt.x + 60, y: pt.y + 12 };
+      return pt && groupLocalPoint(pt, 60, 12);
     },
     () => page.evaluate((g) => !window.__kk.graph.groups.get(g)!.collapsed, groupId),
     { dblclick: true },
@@ -306,8 +307,8 @@ test('resizing a faced tile scales its elements; shrink stops at the usable floo
     await settleFrames(page);
     const pt = (await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), groupId))!;
     const f = await readFace();
-    const cx = pt.x + f.width - 3;
-    const cy = pt.y + TILE_TITLE_H + f.height - 3;
+    const cx = pt.x + (f.width - 3) * pt.scale;
+    const cy = pt.y + (TILE_TITLE_H + f.height - 3) * pt.scale;
     await page.mouse.move(cx, cy);
     await page.mouse.down();
     // Clamp the destination inside the viewport — offscreen moves are dropped.

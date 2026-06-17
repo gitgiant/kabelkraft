@@ -54,7 +54,7 @@ test('filter face: response curve drag sets cutoff + Q; knobs work', async ({ pa
 
   // Drag on the curve display (bottom area): center = cutoff ≈ √(40·18000), Q ≈ mid.
   const pt = await page.evaluate((i) => window.__kkCanvas.clientPointFor(i), vcf);
-  await page.mouse.click(pt!.x, pt!.y + 76);
+  await page.mouse.click(pt!.x, pt!.y + 76 * pt!.scale);
   const mid = await page.evaluate(
     (i) => window.__kk.graph.modules.get(i)!.params, vcf,
   );

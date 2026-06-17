@@ -233,8 +233,9 @@ test('knob and XY faces respond to canvas pointer drags', async ({ page }) => {
   expect(v).toBeGreaterThan(0.5);
 
   // XY pad (190×210, pad spans x 18–172 / y 32–176): click near top-right.
+  // Offsets are tile-local px → scale by the view's auto-fit zoom.
   const xyPt = await page.evaluate((i) => window.__kkCanvas.clientPointFor(i.xy), ids);
-  await page.mouse.click(xyPt!.x + 60, xyPt!.y - 55);
+  await page.mouse.click(xyPt!.x + 60 * xyPt!.scale, xyPt!.y - 55 * xyPt!.scale);
   const xv = await page.evaluate((i) => window.__kk.graph.modules.get(i.xy)!.params.x, ids);
   const yv = await page.evaluate((i) => window.__kk.graph.modules.get(i.xy)!.params.y, ids);
   expect(xv).toBeGreaterThan(0.6);

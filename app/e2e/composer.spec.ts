@@ -109,7 +109,9 @@ test('piano roll editor: open, draw a note, quantize via popup, copy/paste', asy
   expect(starts).toHaveLength(2);
   expect(starts.some((s) => Math.abs(s - Math.round(s * 4) / 4) > 0.01)).toBe(true);
 
-  // Quantize all notes to 1/4 via the popup.
+  // Quantize all notes to 1/4 via the popup. Quantize acts on the selection
+  // (drawing a note leaves just it selected), so select all first.
+  await page.keyboard.press('Control+a');
   await page.locator('button', { hasText: 'Quantize…' }).click();
   await expect(page.locator('.popup')).toBeVisible();
   await page.locator('.popup select').selectOption('1/4');

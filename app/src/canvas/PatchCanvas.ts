@@ -271,14 +271,17 @@ export class PatchCanvas {
     return null;
   }
 
-  /** Client-space center of a module tile — canvas e2e drive their mouse with this. */
-  clientPointFor(moduleId: string): { x: number; y: number } | null {
+  /** Client-space center of a module tile, plus the world scale — canvas e2e
+   * drive their mouse with this (multiply any tile-local offset by `scale`, as
+   * the view auto-zooms to fit content). */
+  clientPointFor(moduleId: string): { x: number; y: number; scale: number } | null {
     const view = this.views.get(moduleId);
     if (!view) return null;
     const rect = this.app.canvas.getBoundingClientRect();
     return {
       x: rect.left + this.world.position.x + (view.position.x + view.w / 2) * this.world.scale.x,
       y: rect.top + this.world.position.y + (view.position.y + view.h / 2) * this.world.scale.y,
+      scale: this.world.scale.x,
     };
   }
 
@@ -339,14 +342,17 @@ export class PatchCanvas {
     };
   }
 
-  /** Client position of a collapsed group tile's top-left corner (e2e + tools). */
-  clientPointForGroup(groupId: string): { x: number; y: number } | null {
+  /** Client position of a collapsed group tile's top-left corner, plus the
+   * world scale (e2e + tools must multiply tile-local offsets by it — the view
+   * auto-zooms to fit content, so it is not generally 1). */
+  clientPointForGroup(groupId: string): { x: number; y: number; scale: number } | null {
     const view = this.groupViews.get(groupId);
     if (!view) return null;
     const rect = this.app.canvas.getBoundingClientRect();
     return {
       x: rect.left + this.world.position.x + view.position.x * this.world.scale.x,
       y: rect.top + this.world.position.y + view.position.y * this.world.scale.y,
+      scale: this.world.scale.x,
     };
   }
 

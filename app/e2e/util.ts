@@ -210,25 +210,94 @@ export const TILE_TITLE_H = 24;
 
 /**
  * Client-space center of a face element on a COLLAPSED group tile.
- * `tilePt` is clientPointForGroup (tile top-left); the element's rotary /
- * active area is the top w×w square of its box.
+ * `tilePt` is clientPointForGroup (tile top-left + world scale); offsets are in
+ * tile-local px and are scaled by `tilePt.scale` (the view auto-zooms to fit).
+ * The element's rotary / active area is the top w×w square of its box.
  */
 export function faceElementCenter(
-  tilePt: { x: number; y: number },
+  tilePt: { x: number; y: number; scale: number },
   el: { x: number; y: number; w: number },
 ): { x: number; y: number } {
   return {
-    x: tilePt.x + el.x + el.w / 2,
-    y: tilePt.y + TILE_TITLE_H + el.y + el.w / 2,
+    x: tilePt.x + (el.x + el.w / 2) * tilePt.scale,
+    y: tilePt.y + (TILE_TITLE_H + el.y + el.w / 2) * tilePt.scale,
   };
 }
 
 /** The ⛶ expand button near the right edge of a collapsed group's title bar. */
 export function groupExpandButton(
-  tilePt: { x: number; y: number },
+  tilePt: { x: number; y: number; scale: number },
   faceWidth: number,
 ): { x: number; y: number } {
-  return { x: tilePt.x + faceWidth - 70, y: tilePt.y + TILE_TITLE_H / 2 };
+  return {
+    x: tilePt.x + (faceWidth - 70) * tilePt.scale,
+    y: tilePt.y + (TILE_TITLE_H / 2) * tilePt.scale,
+  };
+}
+
+/** Map a tile-local point (px, relative to the group tile's top-left, before
+ * the title bar) to client space, applying the view's auto-fit scale. */
+export function groupLocalPoint(
+  tilePt: { x: number; y: number; scale: number },
+  lx: number,
+  ly: number,
+): { x: number; y: number } {
+  return { x: tilePt.x + lx * tilePt.scale, y: tilePt.y + ly * tilePt.scale };
+}
+
+/**
+ * Client-space center of a face knob bound to `moduleId:paramId` on a collapsed
+ * group tile — found by walking the live face tree (the knob may sit inside a
+ * nested group sub-panel embed). Geometry is derived from the actual face
+ * elements + embed transforms, so a starter-patch face redesign can't stale it.
+ * Returns null if no such knob is on the tile.
+ */
+export async function faceKnobClient(
+  page: Page,
+  groupId: string,
+  moduleId: string,
+  paramId: string,
+): Promise<{ x: number; y: number } | null> {
+  return page.evaluate(
+    ([gid, mid, pid, titleH]) => {
+      const s = window.__kk;
+      type Pt = { x: number; y: number } | null;
+      // Knob/sub-panel embed math mirrors GroupView.buildFaceElement /
+      // buildGroupViewElement: returns the knob center in group-tile-local px.
+      const center = (g: { face?: { width: number; height: number; elements: Array<Record<string, unknown>> } }, depth = 0): Pt => {
+        const face = g.face;
+        if (!face || depth > 6) return null;
+        for (const el of face.elements) {
+          if (el.kind === 'knob' && el.moduleId === mid && el.paramId === pid) {
+            const w = el.w as number, h = el.h as number;
+            const r = Math.max(8, Math.min(w, h - (el.label ? 16 : 0)) / 2 - 6);
+            return { x: (el.x as number) + w / 2, y: titleH + (el.y as number) + r + 6 };
+          }
+        }
+        for (const el of face.elements) {
+          if (el.kind === 'view' && el.groupId) {
+            const child = s.graph.groups.get(el.groupId as string);
+            const inner = child ? center(child, depth + 1) : null;
+            if (inner && child?.face) {
+              const ew = el.w as number, eh = el.h as number;
+              const sc = Math.min(ew / child.face.width, eh / child.face.height);
+              return {
+                x: (el.x as number) + (ew - child.face.width * sc) / 2 + inner.x * sc,
+                y: titleH + (el.y as number) + (eh - child.face.height * sc) / 2 - titleH * sc + inner.y * sc,
+              };
+            }
+          }
+        }
+        return null;
+      };
+      const grp = s.graph.groups.get(gid);
+      const c = grp ? center(grp) : null;
+      const pt = window.__kkCanvas.clientPointForGroup(gid);
+      if (!c || !pt) return null;
+      return { x: pt.x + c.x * pt.scale, y: pt.y + c.y * pt.scale };
+    },
+    [groupId, moduleId, paramId, TILE_TITLE_H] as const,
+  );
 }
 
 /**

@@ -6,6 +6,8 @@ import {
   clickUntil,
   dragVertical,
   faceElementCenter,
+  faceKnobClient,
+  groupLocalPoint,
   settleFrames,
   TILE_TITLE_H,
 } from './util';
@@ -103,7 +105,7 @@ test('double-click on the embedded composer view opens the piano roll over the t
     page,
     async () => {
       const pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), groupId);
-      return pt && { x: pt.x + 20 + 140, y: pt.y + TILE_TITLE_H + 20 + 90 };
+      return pt && groupLocalPoint(pt, 20 + 140, TILE_TITLE_H + 20 + 90);
     },
     () => page.evaluate((c) => window.__kk.composerOpen.has(c), ids.comp),
     { dblclick: true },
@@ -200,7 +202,7 @@ test('double-click on a sub-panel drills in: child and parent expand', async ({ 
     page,
     async () => {
       const pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), parentId);
-      return pt && { x: pt.x + 250, y: pt.y + TILE_TITLE_H + 160 };
+      return pt && groupLocalPoint(pt, 250, TILE_TITLE_H + 160);
     },
     () =>
       page.evaluate(
@@ -260,27 +262,14 @@ test('Init Poly Synth starter: nested sub-panels, views and XY live on the boot 
   expect(info.moduleViews).toBe(2); // composer clip + filter curve
   expect(info.hasXy).toBe(true);
 
-  // Drag the FX sub-panel's reverb Mix knob THROUGH the parent face:
-  // fx view at (510,210,140×99) embedding the 340×240 FX face → s≈0.4118;
-  // child knob fr1 at (10,148,70×86) → rotary center (45,183) child-local.
-  const s = 140 / 340;
+  // Drag the FX sub-panel's reverb Mix knob THROUGH the parent face — its
+  // client position is walked from the live face tree (nested group embed), so
+  // a starter-patch face redesign re-locates it instead of breaking the test.
   const before = await page.evaluate((i) => window.__kk.graph.modules.get(i)!.params.mix, info.reverbId);
   await settleFrames(page);
-  let pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), info.parentId);
-  const knobAt = (p: { x: number; y: number }) => ({
-    x: p.x + 510 + s * 45,
-    y: p.y + TILE_TITLE_H + 210 + (99 - 240 * s) / 2 + s * 183,
-  });
-  // Keep the FX panel inside the viewport before mouse work.
-  const k0 = knobAt(pt!);
-  const panX = k0.x < 20 ? 200 : k0.x > 1420 ? -200 : 0;
-  const panY = k0.y < 20 ? 200 : k0.y > 980 ? -200 : 0;
-  if (panX || panY) {
-    await page.evaluate(([dx, dy]) => window.__kkCanvas.panBy(dx, dy), [panX, panY] as const);
-    await settleFrames(page);
-    pt = await page.evaluate((g) => window.__kkCanvas.clientPointForGroup(g), info.parentId);
-  }
-  await dragVertical(page, knobAt(pt!), -50);
+  const knob = (await faceKnobClient(page, info.parentId, info.reverbId, 'mix'))!;
+  expect(knob).not.toBeNull();
+  await dragVertical(page, knob, -50);
   await expect
     .poll(() => page.evaluate((i) => window.__kk.graph.modules.get(i)!.params.mix, info.reverbId))
     .toBeGreaterThan(before);
