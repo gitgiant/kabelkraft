@@ -1,5 +1,8 @@
 # Plan: face passthrough views — live container views on group faces
 
+> **STATUS: SHIPPED 2026-06-12.** All phases (module embeds + child-group
+> sub-panels, FaceEditor, tests) on main.
+
 Goal: container faces get dynamic UI — e.g. a synth group's face hosting an XY
 pad, its composer's clip view, and its visualizer's live scene.
 

@@ -1,5 +1,8 @@
 # Plan: stable group poles, editable group I/O, controller-less starters
 
+> **STATUS: SHIPPED — on main.** notethru component, group pole model + stored
+> override, Face Editor Poles panel, restructured starters, tests.
+
 ## Decisions (locked via grilling)
 
 - **Docking (#1) — ABORTED** this round.

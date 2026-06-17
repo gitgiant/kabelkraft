@@ -1,5 +1,8 @@
 # Visualizer 3D Plan
 
+> **STATUS: SHIPPED — merged to main (commit 9ddbd24).** Both PRs: raymarch
+> tunnel/fractal/terrain + raster bars3d/particles3d.
+
 3D support for the visual engine. Two render paths land as additive `source`
 nodes that output the same `rgba8unorm` premultiplied texture every existing
 node produces — so blur / bloom / feedback / kaleido / blend / scenes all

@@ -1,5 +1,9 @@
 # Container Unification Plan
 
+> **STATUS: SHIPPED 2026-06-17.** Phases 1–5 + 6-lite on main (chrome, PoleRail,
+> drawTileBody, ResizeController, titleButtons, clearTileChildren). Full phase 6
+> (ContainerTile facade) dropped — residual dup too thin to justify it.
+
 Kill the duplicated tile-chrome between `ModuleView` (1352 lines) and `GroupView`
 (1072 lines). Both `extends Container` (PIXI) and independently re-implement body
 draw, title bar, resize, pole rail, double-tap toggle, and headless-embed body.

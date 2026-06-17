@@ -1,5 +1,8 @@
 # Plan: Component-built instruments + AI patch generation from primitives
 
+> **STATUS: SHIPPED — on main.** All components in the registry; extended by
+> OSCILLATOR_REWORK_PLAN + OSC_EXPANSION_PLAN.
+
 ## Goal
 
 Kill the monolithic generator modules (`synth`, `sampler`, `drum`). Every instrument is

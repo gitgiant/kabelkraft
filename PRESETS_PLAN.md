@@ -1,5 +1,8 @@
 # Module / Container Presets — Implementation Plan
 
+> **STATUS: SHIPPED — on main.** PresetBar (◀ name ▶) on module + group tiles,
+> storage, AI preset generation, presets.spec.
+
 Save / load / select configuration **presets** on modules and containers
 (groups). A preset captures the tunable state — dial settings and the custom
 wiring *inside* a container — so a single synth group can carry `bass`, `lead`,
