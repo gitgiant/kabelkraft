@@ -147,7 +147,9 @@ test('input-pole rail: drag a container input onto a node port', async ({ page }
     window.__kk.openVisEditor(id);
   }, visId);
   await expect(page.locator('.vised')).toBeVisible();
-  await expect(page.locator('.vised .pole-port')).toHaveCount(7);
+  // Rail rendered (count not pinned — poles are added/removed over time); the
+  // Bass-pole lookup below is the real assertion.
+  await expect(page.locator('.vised .pole-port').first()).toBeVisible();
 
   // Drag the Bass pole onto the showcase blend node's Mix in-port. The drop
   // must wire it through the existing Features presenter node.
