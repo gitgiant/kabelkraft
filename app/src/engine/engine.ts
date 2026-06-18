@@ -196,6 +196,7 @@ export class Engine {
   /** Tear the context down so the next start() rebuilds with fresh options. */
   async stop(): Promise<void> {
     this.stopPreview();
+    this.metroStopScheduler();
     this.closeAllInputs();
     this.node?.disconnect();
     this.node = null;
@@ -499,8 +500,80 @@ export class Engine {
 
   private previewSource: AudioBufferSourceNode | null = null;
 
+  // -- Monitor metronome (Options → Recording) ------------------------------
+  // A main-thread lookahead scheduler → ctx.destination, parallel to the
+  // master bus, so the click is heard while tracking but never reaches the
+  // recorder (which taps the worklet mix). Play-gated: clicks only while the
+  // transport is playing, locked to song position for downbeat accents.
+  private metroEnabled = false;
+  private metroVolume = 0.5;
+  private metroTimer: ReturnType<typeof setInterval> | null = null;
+  private metroTempo = 120;
+  private metroMeter = 4;
+  private metroPlaying = false;
+  private metroPhaseBeats = 0;
+  private metroNextTime = 0;
+  private metroBeat = 0;
+
+  /** Arm/disarm the monitor metronome and set its click level (0–1). */
+  setMetronome(enabled: boolean, volume: number): void {
+    this.metroEnabled = enabled;
+    this.metroVolume = volume;
+    this.updateMetro();
+  }
+
+  private updateMetro(): void {
+    if (this.metroEnabled && this.metroPlaying && this.running) this.metroStartScheduler();
+    else this.metroStopScheduler();
+  }
+
+  private metroStartScheduler(): void {
+    if (this.metroTimer || !this.ctx) return;
+    this.metroBeat = Math.max(0, Math.round(this.metroPhaseBeats));
+    this.metroNextTime = this.ctx.currentTime + 0.06;
+    this.metroTick();
+    this.metroTimer = setInterval(() => this.metroTick(), 25);
+  }
+
+  private metroStopScheduler(): void {
+    if (this.metroTimer) {
+      clearInterval(this.metroTimer);
+      this.metroTimer = null;
+    }
+  }
+
+  private metroTick(): void {
+    if (!this.ctx) return;
+    const lookahead = 0.1; // schedule clicks 100 ms ahead of the clock
+    while (this.metroNextTime < this.ctx.currentTime + lookahead) {
+      this.scheduleClick(this.metroNextTime, this.metroBeat % this.metroMeter === 0);
+      this.metroNextTime += 60 / this.metroTempo;
+      this.metroBeat++;
+    }
+  }
+
+  private scheduleClick(when: number, accent: boolean): void {
+    if (!this.ctx) return;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.frequency.value = accent ? 1600 : 1000;
+    const peak = this.metroVolume * (accent ? 1 : 0.7);
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.linearRampToValueAtTime(peak, when + 0.001);
+    g.gain.exponentialRampToValueAtTime(0.0001, when + 0.05);
+    osc.connect(g);
+    g.connect(this.ctx.destination);
+    osc.start(when);
+    osc.stop(when + 0.06);
+  }
+
   sendTransport(t: TransportState, jumpTo?: number): void {
     this.send({ type: 'transport', playing: t.playing, tempo: t.tempo, songPosition: jumpTo });
+    this.metroTempo = t.tempo;
+    this.metroPlaying = t.playing;
+    this.metroMeter = Math.max(1, t.timeSignature?.num ?? 4);
+    if (jumpTo !== undefined) this.metroPhaseBeats = jumpTo;
+    this.updateMetro();
   }
 
   allocVoiceId(): number {

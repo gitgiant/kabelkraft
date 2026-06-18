@@ -26,6 +26,7 @@ export type EngineModuleType =
   | 'flanger'
   | 'bitcrusher'
   | 'compressor'
+  | 'ducker'
   | 'peq'
   | 'mbcomp'
   | 'midiIn'

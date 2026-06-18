@@ -10,6 +10,15 @@
   let playing = $state(appState.transport.playing);
   let audioOn = $state(false);
   let muted = $state(false);
+  let recording = $state(false);
+  let recSeconds = $state(0);
+  let metroArmed = $state(appState.metronomeArmed);
+
+  function fmtTime(s: number): string {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}:${sec.toString().padStart(2, '0')}`;
+  }
   let canUndo = $state(false);
   let canRedo = $state(false);
   let canGroup = $state(false);
@@ -63,6 +72,9 @@
       audioOn = appState.engine.running;
       const a = appSettings().audio;
       muted = a.muted || a.masterGain === 0;
+      recording = appState.isMasterRecording();
+      recSeconds = appState.masterRecordingSeconds();
+      metroArmed = appState.metronomeArmed;
     }, 500);
     return () => {
       offM();
@@ -261,6 +273,21 @@
     <button onclick={() => appState.transportCommand('play')} title="Play (Space)">▶</button>
     <button onclick={() => appState.transportCommand('pause')} title="Pause (Space)">⏸</button>
     <button onclick={() => appState.transportCommand('stop')} title="Stop (Enter)">⏹</button>
+    <button
+      class="record"
+      class:armed={recording}
+      onclick={() => appState.toggleMasterRecord()}
+      title="Record master output to .wav — click again to stop and save"
+    >⏺</button>
+    {#if recording}
+      <span class="rec-time" title="Recording length">{fmtTime(recSeconds)}</span>
+    {/if}
+    <button
+      class="metro"
+      class:armed={metroArmed}
+      onclick={() => appState.setMetronome(!metroArmed)}
+      title="Metronome: monitor click while the transport plays (never recorded)"
+    >♩</button>
     <label title="Master tempo (PRD: default 120 BPM)">
       <input
         type="number"
@@ -425,6 +452,24 @@
   }
   .transport.playing {
     outline: 1px solid #52e07a;
+  }
+  .record.armed {
+    color: #ff4d4d;
+    animation: rec-blink 1s steps(2, start) infinite;
+  }
+  @keyframes rec-blink {
+    50% { opacity: 0.35; }
+  }
+  .rec-time {
+    font-size: 12px;
+    color: #ff8a8a;
+    font-variant-numeric: tabular-nums;
+    min-width: 34px;
+  }
+  .metro.armed {
+    color: var(--accent);
+    outline: 1px solid var(--accent);
+    border-radius: 4px;
   }
   .transport label {
     display: flex;

@@ -72,6 +72,14 @@ export type StateEvent =
 
 type Listener = () => void;
 
+/** Minimal File System Access API surface for the save-as dialog (Chromium). */
+type SaveFilePicker = (opts: {
+  suggestedName?: string;
+  types?: { description?: string; accept: Record<string, string[]> }[];
+}) => Promise<{
+  createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+}>;
+
 export class AppState {
   graph = new Graph(MODULE_DEFS);
   readonly engine = new Engine();
@@ -592,8 +600,12 @@ export class AppState {
     string,
     { chunksL: Float32Array[]; chunksR: Float32Array[]; samples: number; sampleRate: number }
   >();
+  /** Sentinel id for the transport's built-in master-bus recorder. */
+  static readonly MASTER_REC_ID = '__master__';
   /** For UI + tests: last finished recording length in seconds. */
   lastRecordingSeconds = 0;
+  /** Monitor metronome armed (transient; click volume persists in settings). */
+  metronomeArmed = false;
 
   constructor() {
     this.engine.onRecordData((data) => {
@@ -638,6 +650,7 @@ export class AppState {
     this.engine.defaultInputId = audio.inputId;
     await this.engine.start(audio);
     this.engine.setMasterGain(audio.muted ? 0 : audio.masterGain);
+    this.engine.setMetronome(this.metronomeArmed, appSettings().recording.metronomeVolume);
     if (!wasRunning) {
       this.visHub.setSampleRate(this.engine.sampleRate);
       this.syncEngine();
@@ -1951,6 +1964,19 @@ export class AppState {
     });
   }
 
+  /** Transport record button: toggle capture of the master bus (PRD §8.7). */
+  toggleMasterRecord(): void {
+    this.toggleRecord(AppState.MASTER_REC_ID);
+  }
+
+  isMasterRecording(): boolean {
+    return this.recordings.has(AppState.MASTER_REC_ID);
+  }
+
+  masterRecordingSeconds(): number {
+    return this.recordingSeconds(AppState.MASTER_REC_ID);
+  }
+
   private finishRecording(moduleId: string): void {
     this.engine.recordStop(moduleId);
     // Give the final flush a moment to arrive before assembling the file.
@@ -1967,14 +1993,58 @@ export class AppState {
         offset += rec.chunksL[i].length;
       }
       this.lastRecordingSeconds = rec.samples / rec.sampleRate;
-      const blob = encodeWav(chL, chR, rec.sampleRate);
-      const a = document.createElement('a');
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      a.href = URL.createObjectURL(blob);
-      a.download = `${this.projectName}-${stamp}.wav`;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      const blob = encodeWav(chL, chR, rec.sampleRate, appSettings().recording.bitDepth);
+      void this.saveRecording(blob, this.recordingFilename());
     }, 150);
+  }
+
+  /** Build the save-dialog default name from the filename template. */
+  private recordingFilename(): string {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const name = appSettings()
+      .recording.filenameTemplate.replace(/\{project\}/g, this.projectName || 'Untitled')
+      .replace(/\{timestamp\}/g, stamp);
+    return `${name || 'recording'}.wav`;
+  }
+
+  /** Native "Save As" where supported (Chromium); blob download elsewhere. */
+  private async saveRecording(blob: Blob, defaultName: string): Promise<void> {
+    const picker = (window as unknown as { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker;
+    if (typeof picker === 'function') {
+      try {
+        const handle = await picker({
+          suggestedName: defaultName,
+          types: [{ description: 'WAV audio', accept: { 'audio/wav': ['.wav'] } }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return;
+      } catch (err) {
+        // User cancelled the dialog — don't fall back to a forced download.
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        // Any other failure: fall through to the download path below.
+      }
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = defaultName;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // -- Metronome (monitor click; Options → Recording) -----------------------
+
+  /** Arm/disarm the monitor metronome. Click level lives in settings. */
+  setMetronome(armed: boolean): void {
+    this.metronomeArmed = armed;
+    this.engine.setMetronome(armed, appSettings().recording.metronomeVolume);
+    this.emit('transportChanged');
+  }
+
+  /** Re-push the metronome level after an Options → Recording change. */
+  refreshMetronome(): void {
+    this.engine.setMetronome(this.metronomeArmed, appSettings().recording.metronomeVolume);
   }
 
   // -- Transport ---------------------------------------------------------

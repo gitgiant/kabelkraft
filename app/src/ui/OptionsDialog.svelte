@@ -17,11 +17,12 @@
   import { downloadProject } from './project-io';
 
   type Tab =
-    | 'project' | 'audio' | 'midi' | 'display' | 'ai' | 'general' | 'shortcuts' | 'storage' | 'debug';
+    | 'project' | 'audio' | 'recording' | 'midi' | 'display' | 'ai' | 'general' | 'shortcuts' | 'storage' | 'debug';
 
   const TABS: Array<{ id: Tab; label: string }> = [
     { id: 'project', label: 'Project' },
     { id: 'audio', label: 'Audio' },
+    { id: 'recording', label: 'Recording' },
     { id: 'midi', label: 'MIDI' },
     { id: 'display', label: 'Display' },
     { id: 'ai', label: 'AI' },
@@ -578,6 +579,33 @@
               <p class="pane-note opt-input-error">⚠ {e.device}: capture failed — {e.error}</p>
             {/each}
 
+          {:else if tab === 'recording'}
+            <p class="pane-note">The transport ⏺ button records the master output to a .wav. On stop you're prompted where to save (native dialog where supported, otherwise a download).</p>
+            <label class="row">
+              <span>Bit depth</span>
+              <select class="opt-rec-bitdepth" bind:value={cfg.recording.bitDepth}
+                onchange={() => save((s) => { s.recording.bitDepth = cfg.recording.bitDepth; })}>
+                <option value={16}>16-bit PCM</option>
+                <option value={24}>24-bit PCM</option>
+                <option value={32}>32-bit float</option>
+              </select>
+              <span class="dim">higher = more fidelity, bigger files</span>
+            </label>
+            <label class="row">
+              <span>Filename</span>
+              <input class="opt-rec-filename grow" type="text" bind:value={cfg.recording.filenameTemplate}
+                onchange={() => save((s) => { s.recording.filenameTemplate = cfg.recording.filenameTemplate; })} />
+              <span class="dim">tokens: {'{project}'} · {'{timestamp}'}</span>
+            </label>
+            <label class="row">
+              <span>Metronome volume</span>
+              <input class="opt-rec-metro-vol" type="range" min="0" max="1" step="0.01"
+                bind:value={cfg.recording.metronomeVolume}
+                oninput={() => { save((s) => { s.recording.metronomeVolume = cfg.recording.metronomeVolume; }); appState.refreshMetronome(); }} />
+              <span class="dim">{Math.round(cfg.recording.metronomeVolume * 100)}%</span>
+            </label>
+            <p class="pane-note dim">The metronome is a monitor click (arm it from the toolbar ♩ button); it plays while the transport runs and is never captured in the recording.</p>
+
           {:else if tab === 'midi'}
             {#if !midiSupported}
               <p class="pane-note">WebMIDI isn't available in this browser — Chrome/Edge support it; Firefox/Safari don't.</p>
@@ -693,6 +721,12 @@
                 onchange={() => save((s) => { s.display.visMaxRes = cfg.display.visMaxRes; })}>
                 {#each VIS_RES_SCALES as r (r)}<option value={r}>{Math.round(r * 100)}%</option>{/each}
               </select>
+            </label>
+            <label class="row">
+              <input class="opt-wire-anim" type="checkbox" bind:checked={cfg.display.wireAnim}
+                onchange={() => save((s) => { s.display.wireAnim = cfg.display.wireAnim; })} />
+              <span>Animate wires</span>
+              <span class="dim">signal glow &amp; traveling flow dots on patch cables — off for static wires</span>
             </label>
 
           {:else if tab === 'ai'}

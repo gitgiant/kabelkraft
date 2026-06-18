@@ -18,6 +18,41 @@ import { Tooltip } from './Tooltip';
 
 
 const NOTE_FLASH_MS = 250;
+/** A note flow-dot's travel time source→dest. */
+const NOTE_TRAVEL_MS = 400;
+
+/** Stable [0,1) phase from a wire id so audio dot streams aren't in lockstep. */
+function phaseHash(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return (h >>> 0) / 0xffffffff;
+}
+
+/** Squared distance from point p to segment ab. */
+function distToSegSq(
+  p: { x: number; y: number },
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 > 0 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2 : 0;
+  t = Math.min(1, Math.max(0, t));
+  const cx = a.x + t * dx;
+  const cy = a.y + t * dy;
+  return (p.x - cx) ** 2 + (p.y - cy) ** 2;
+}
+
+/** Point on a polyline at fractional t∈[0,1] (lerp between nearest samples). */
+function pointAt(points: Array<{ x: number; y: number }>, t: number): { x: number; y: number } {
+  const f = Math.min(0.999999, Math.max(0, t)) * (points.length - 1);
+  const i = Math.floor(f);
+  const k = f - i;
+  const a = points[i];
+  const b = points[i + 1] ?? a;
+  return { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k };
+}
 
 interface WireDrag {
   moduleId: string;
@@ -92,6 +127,16 @@ export class PatchCanvas {
   // Two-finger pinch: zoom (scale ratio) + pan (midpoint delta). Only armed
   // when no object drag is in flight, so it never hijacks a module/wire grab.
   private pinch: { dist: number; mid: { x: number; y: number } } | null = null;
+  // Mousewheel zoom runs through a single on-demand rAF loop. The wheel handler
+  // only accumulates intent into `zoomTarget` + anchor; the loop owns every
+  // scale/position write and coalesces N events/frame into one render. Trackpad
+  // (small pixel deltas) snaps current=target each frame; a mouse-wheel notch
+  // (chunky delta) eases current→target so the discrete jump glides.
+  private zoomTarget = 1;
+  private zoomAnchor = { x: 0, y: 0 };
+  private zoomSnap = false; // true = no easing this frame (trackpad / immediate)
+  private zoomRaf = 0;
+  private zoomLastTs = 0;
 
   // -- touch-mode gesture state (see core/mobile.ts) --------------------------
   /** Long-press: toggles multi-select (module) or starts a rubber-band (canvas). */
@@ -422,117 +467,176 @@ export class PatchCanvas {
   }
 
   /**
-   * Auto-arrange (toolbar): layered signal-flow layout. Nodes are visible
-   * module tiles and collapsed group tiles; wires define left→right layers
-   * (sources → effects → outputs). Unwired nodes park in a final column.
-   * One undo step; the view re-centers on the result.
+   * Auto-arrange (toolbar): layered signal-flow layout, applied recursively.
+   * Each container (the canvas, then every expanded group) lays out its own
+   * direct children — module tiles, collapsed group tiles, and expanded
+   * sub-groups (themselves arranged first, then placed as one sized block) —
+   * left→right by wire flow (sources → effects → outputs), unwired parked in a
+   * final column. One undo step; the view re-centers on the result.
    */
   autoArrange(): void {
     const graph = appState.graph;
-    interface ArrNode {
+    const GAP_X = 90;
+    const GAP_Y = 50;
+    const FRAME_PAD = 24; // must track drawFrames()
+    const FRAME_TITLE = 16;
+
+    // A laid-out unit: knows its size and how to commit its final top-left.
+    interface Unit {
       id: string;
       w: number;
       h: number;
-      y0: number;
-      mv?: ModuleView;
-      gv?: GroupView;
-    }
-    const nodes = new Map<string, ArrNode>();
-    for (const [id, v] of this.views) {
-      if (v.visible) nodes.set(id, { id, w: v.w, h: v.h, y0: v.position.y, mv: v });
-    }
-    for (const [id, gv] of this.groupViews) {
-      nodes.set(id, { id, w: gv.tileWidth, h: gv.tileHeight, y0: gv.position.y, gv });
-    }
-    if (nodes.size === 0) return;
-    appState.beginUndoable();
-
-    // Wires between visible anchors (a hidden module anchors to its group tile).
-    const anchorOf = (moduleId: string) => graph.hiddenBehind(moduleId)?.id ?? moduleId;
-    const edges: Array<[string, string]> = [];
-    const wired = new Set<string>();
-    for (const wire of graph.wires.values()) {
-      const a = anchorOf(wire.from.moduleId);
-      const b = anchorOf(wire.to.moduleId);
-      if (a === b || !nodes.has(a) || !nodes.has(b)) continue;
-      edges.push([a, b]);
-      wired.add(a);
-      wired.add(b);
+      sortY: number; // current y, to keep vertical order roughly stable
+      place: (x: number, y: number) => void;
     }
 
-    // Longest-path layering; iteration cap keeps feedback loops finite.
-    const layer = new Map<string, number>();
-    for (const id of nodes.keys()) layer.set(id, 0);
-    for (let iter = 0; iter < nodes.size; iter++) {
-      let changed = false;
-      for (const [a, b] of edges) {
-        const want = layer.get(a)! + 1;
-        if (layer.get(b)! < want && want < nodes.size) {
-          layer.set(b, want);
-          changed = true;
-        }
+    // Direct children of a container (null = the canvas root).
+    const directChildren = (containerId: string | null): { moduleIds: string[]; groupIds: string[] } => {
+      if (containerId === null) {
+        return {
+          moduleIds: [...graph.modules.keys()].filter((id) => !graph.groupOfModule(id)),
+          groupIds: [...graph.groups.keys()].filter((id) => !graph.parentGroup(id)),
+        };
       }
-      if (!changed) break;
-    }
-    const maxWired = Math.max(0, ...[...wired].map((id) => layer.get(id)!));
-    for (const id of nodes.keys()) {
-      if (!wired.has(id)) layer.set(id, maxWired + 1); // park unwired nodes
-    }
+      const c = graph.groups.get(containerId);
+      return { moduleIds: c?.moduleIds ?? [], groupIds: c?.groupIds ?? [] };
+    };
 
-    // Columns left→right; nodes stacked within a column, centered on y=0.
-    const GAP_X = 90;
-    const GAP_Y = 50;
-    const columns = new Map<number, ArrNode[]>();
-    for (const node of nodes.values()) {
-      const l = layer.get(node.id)!;
-      if (!columns.has(l)) columns.set(l, []);
-      columns.get(l)!.push(node);
-    }
-    let cx = 0;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const l of [...columns.keys()].sort((a, b) => a - b)) {
-      const col = columns.get(l)!;
-      col.sort((a, b) => a.y0 - b.y0); // keep rough vertical order stable
-      const totalH = col.reduce((s, n) => s + n.h, 0) + GAP_Y * (col.length - 1);
-      let cy = -totalH / 2;
-      const colW = Math.max(...col.map((n) => n.w));
-      for (const node of col) {
-        const nx = cx + (colW - node.w) / 2;
-        if (node.mv) {
-          // Model snaps to final; the tile glides there visually.
-          this.queueTween(node.mv, nx, cy);
-          node.mv.instance.x = nx;
-          node.mv.instance.y = cy;
-        } else if (node.gv) {
-          const dx = nx - node.gv.group.x;
-          const dy = cy - node.gv.group.y;
-          this.queueTween(node.gv, nx, cy);
-          node.gv.group.x = nx;
-          node.gv.group.y = cy;
-          // Members travel with the collapsed tile so expand stays nearby.
-          for (const id of graph.modulesInGroup(node.gv.group.id)) {
-            const m = graph.modules.get(id);
-            if (m) {
-              m.x += dx;
-              m.y += dy;
-            }
+    // Wires between a container's direct children (deep endpoints map up to the
+    // direct child whose subtree owns them).
+    const edgesFor = (containerId: string | null): Array<[string, string]> => {
+      const { moduleIds, groupIds } = directChildren(containerId);
+      const owner = new Map<string, string>();
+      for (const m of moduleIds) owner.set(m, m);
+      for (const gid of groupIds) for (const m of graph.modulesInGroup(gid)) owner.set(m, gid);
+      const edges: Array<[string, string]> = [];
+      for (const w of graph.wires.values()) {
+        const a = owner.get(w.from.moduleId);
+        const b = owner.get(w.to.moduleId);
+        if (a && b && a !== b) edges.push([a, b]);
+      }
+      return edges;
+    };
+
+    // Longest-path layered layout. Returns total size and a deferred `place`
+    // that positions every unit's top-left, normalised to a (0,0) origin.
+    const layout = (units: Unit[], edges: Array<[string, string]>): { w: number; h: number; place: (ox: number, oy: number) => void } => {
+      const layer = new Map<string, number>();
+      const wired = new Set<string>();
+      for (const u of units) layer.set(u.id, 0);
+      for (const [a, b] of edges) { wired.add(a); wired.add(b); }
+      for (let iter = 0; iter < units.length; iter++) {
+        let changed = false;
+        for (const [a, b] of edges) {
+          const want = layer.get(a)! + 1;
+          if (layer.get(b)! < want && want < units.length) { layer.set(b, want); changed = true; }
+        }
+        if (!changed) break;
+      }
+      const maxWired = Math.max(0, ...[...wired].map((id) => layer.get(id)!));
+      for (const u of units) if (!wired.has(u.id)) layer.set(u.id, maxWired + 1); // park unwired
+
+      const columns = new Map<number, Unit[]>();
+      for (const u of units) {
+        const l = layer.get(u.id)!;
+        if (!columns.has(l)) columns.set(l, []);
+        columns.get(l)!.push(u);
+      }
+      const rel = new Map<string, { x: number; y: number }>();
+      let cx = 0;
+      for (const l of [...columns.keys()].sort((a, b) => a - b)) {
+        const col = columns.get(l)!;
+        col.sort((a, b) => a.sortY - b.sortY);
+        const totalH = col.reduce((s, u) => s + u.h, 0) + GAP_Y * (col.length - 1);
+        const colW = Math.max(...col.map((u) => u.w));
+        let cy = -totalH / 2;
+        for (const u of col) {
+          rel.set(u.id, { x: cx + (colW - u.w) / 2, y: cy });
+          cy += u.h + GAP_Y;
+        }
+        cx += colW + GAP_X;
+      }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const u of units) {
+        const p = rel.get(u.id)!;
+        minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x + u.w); maxY = Math.max(maxY, p.y + u.h);
+      }
+      if (!Number.isFinite(minX)) { minX = minY = maxX = maxY = 0; }
+      return {
+        w: maxX - minX,
+        h: maxY - minY,
+        place: (ox, oy) => {
+          for (const u of units) {
+            const p = rel.get(u.id)!;
+            u.place(ox + p.x - minX, oy + p.y - minY);
           }
-        }
-        minX = Math.min(minX, nx);
-        minY = Math.min(minY, cy);
-        maxX = Math.max(maxX, nx + node.w);
-        maxY = Math.max(maxY, cy + node.h);
-        cy += node.h + GAP_Y;
+        },
+      };
+    };
+
+    // Build the layout units for one container, recursing into expanded groups.
+    const buildUnits = (containerId: string | null): Unit[] => {
+      const { moduleIds, groupIds } = directChildren(containerId);
+      const units: Unit[] = [];
+      for (const id of moduleIds) {
+        const v = this.views.get(id);
+        if (!v || !v.visible) continue;
+        units.push({
+          id, w: v.w, h: v.h, sortY: v.position.y,
+          place: (x, y) => { this.queueTween(v, x, y); v.instance.x = x; v.instance.y = y; },
+        });
       }
-      cx += colW + GAP_X;
-    }
+      for (const gid of groupIds) {
+        const g = graph.groups.get(gid);
+        if (!g) continue;
+        if (g.collapsed) {
+          const gv = this.groupViews.get(gid);
+          if (!gv) continue;
+          units.push({
+            id: gid, w: gv.tileWidth, h: gv.tileHeight, sortY: gv.position.y,
+            place: (x, y) => {
+              const dx = x - g.x, dy = y - g.y;
+              this.queueTween(gv, x, y);
+              g.x = x; g.y = y;
+              // Hidden members travel with the tile so expand stays nearby.
+              for (const mid of graph.modulesInGroup(gid)) {
+                const m = graph.modules.get(mid);
+                if (m) { m.x += dx; m.y += dy; }
+              }
+            },
+          });
+        } else {
+          // Expanded sub-group: arrange its insides first, then place the whole
+          // padded frame as one block in the parent's flow.
+          const inner = layout(buildUnits(gid), edgesFor(gid));
+          units.push({
+            id: gid,
+            w: inner.w + FRAME_PAD * 2,
+            h: inner.h + FRAME_PAD * 2 + FRAME_TITLE,
+            sortY: g.y,
+            place: (x, y) => {
+              g.x = x; g.y = y; // collapse-target follows the arranged frame
+              inner.place(x + FRAME_PAD, y + FRAME_PAD + FRAME_TITLE);
+            },
+          });
+        }
+      }
+      return units;
+    };
+
+    const rootUnits = buildUnits(null);
+    if (rootUnits.length === 0) return;
+    appState.beginUndoable();
+    const root = layout(rootUnits, edgesFor(null));
+    root.place(0, 0);
 
     // Re-center the view on the arranged patch (glides along with the tiles).
     const scale = this.world.scale.x;
     this.queueTween(
       this.world,
-      this.app.screen.width / 2 - ((minX + maxX) / 2) * scale,
-      this.app.screen.height / 2 - ((minY + maxY) / 2) * scale,
+      this.app.screen.width / 2 - (root.w / 2) * scale,
+      this.app.screen.height / 2 - (root.h / 2) * scale,
     );
   }
 
@@ -600,6 +704,10 @@ export class PatchCanvas {
         // front, so clicks on a module still hit the module — only the empty
         // frame area reaches here).
         g.eventMode = 'static';
+        // Swallow the pointerdown so it never bubbles to the stage — otherwise
+        // the stage's empty-canvas double-click handler fires auto-arrange on
+        // top of (or instead of) the frame's collapse.
+        g.on('pointerdown', (e) => e.stopPropagation());
         let lastTap = 0;
         g.on('pointertap', () => {
           const now = performance.now();
@@ -612,9 +720,15 @@ export class PatchCanvas {
         });
         title.eventMode = 'static';
         title.cursor = 'grab';
-        // Drag the title bar to move the whole group; a click (no drag) collapses.
+        // Drag the title bar to move the whole group; double-click collapses it
+        // (single tap was lost whenever the drag threshold tripped first).
         title.on('pointerdown', (e) => this.startFrameDrag(group, e));
-        title.on('pointertap', () => appState.toggleGroupCollapsed(group.id));
+        let lastTitleTap = 0;
+        title.on('pointertap', () => {
+          const now = performance.now();
+          if (now - lastTitleTap < 350) appState.toggleGroupCollapsed(group.id);
+          lastTitleTap = now;
+        });
         // AI edit + rename + recolor on the frame title row (PRD §6).
         const ai = new Text({ text: '🤖', style: { fontSize: 11, fill: theme.textDim } });
         ai.eventMode = 'static';
@@ -658,7 +772,22 @@ export class PatchCanvas {
       if (prev === undefined || prev === group.collapsed) continue;
       if (graph.groupHiddenBehind(group.id)) continue;
       if (group.collapsed) {
-        this.groupViews.get(group.id)?.popIn();
+        const gv = this.groupViews.get(group.id);
+        if (gv) {
+          // Shrinking: the small tile reappears at the group's stored spot,
+          // which the expanded frame may have outgrown. If that spot is now
+          // covered, slide the tile to open space (Arrange-on-toggle reflows
+          // the whole patch instead, so skip the nudge then).
+          if (!appSettings().general.autoArrangeOnToggle) {
+            const spot = this.findOpenSpot(gv.tileWidth, gv.tileHeight, group.x, group.y, gv);
+            if (spot.x !== group.x || spot.y !== group.y) {
+              group.x = spot.x;
+              group.y = spot.y;
+              gv.position.set(spot.x, spot.y);
+            }
+          }
+          gv.popIn();
+        }
       } else {
         for (const id of graph.modulesInGroup(group.id)) {
           const v = this.views.get(id);
@@ -863,15 +992,32 @@ export class PatchCanvas {
    * it never spawns buried under or overlapping anything.
    */
   private placeInOpenSpace(view: ModuleView): void {
+    const pos = this.findOpenSpot(view.w, view.h, view.position.x, view.position.y, view);
+    view.position.set(pos.x, pos.y);
+    view.instance.x = pos.x;
+    view.instance.y = pos.y;
+  }
+
+  /**
+   * Nearest free top-left to (x0,y0) for a w×h rect, spiralling outward over
+   * the visible module/group tiles. Returns (x0,y0) unchanged when it is
+   * already clear. `ignore` excludes the moving tile from the obstacle set.
+   */
+  private findOpenSpot(
+    w: number,
+    h: number,
+    x0: number,
+    y0: number,
+    ignore?: ModuleView | GroupView,
+  ): { x: number; y: number } {
     const margin = 16;
-    const w = view.w, h = view.h;
     const obstacles: Array<{ x: number; y: number; w: number; h: number }> = [];
     for (const other of this.views.values()) {
-      if (other === view || !other.visible) continue;
+      if (other === ignore || !other.visible) continue;
       obstacles.push({ x: other.position.x, y: other.position.y, w: other.w, h: other.h });
     }
     for (const gv of this.groupViews.values()) {
-      if (!gv.visible) continue;
+      if (gv === ignore || !gv.visible) continue;
       obstacles.push({ x: gv.position.x, y: gv.position.y, w: gv.tileWidth, h: gv.tileHeight });
     }
     const free = (px: number, py: number): boolean =>
@@ -883,23 +1029,18 @@ export class PatchCanvas {
           py + h + margin > b.y,
       );
 
-    const x0 = view.position.x, y0 = view.position.y;
-    let found: { x: number; y: number } | null = free(x0, y0) ? { x: x0, y: y0 } : null;
+    if (free(x0, y0)) return { x: x0, y: y0 };
     const step = 48;
-    for (let ring = 1; ring <= 80 && !found; ring++) {
-      for (let gx = -ring; gx <= ring && !found; gx++) {
-        for (let gy = -ring; gy <= ring && !found; gy++) {
+    for (let ring = 1; ring <= 80; ring++) {
+      for (let gx = -ring; gx <= ring; gx++) {
+        for (let gy = -ring; gy <= ring; gy++) {
           if (Math.max(Math.abs(gx), Math.abs(gy)) !== ring) continue; // ring border only
           const px = x0 + gx * step, py = y0 + gy * step;
-          if (free(px, py)) found = { x: px, y: py };
+          if (free(px, py)) return { x: px, y: py };
         }
       }
     }
-
-    const pos = found ?? { x: x0, y: y0 };
-    view.position.set(pos.x, pos.y);
-    view.instance.x = pos.x;
-    view.instance.y = pos.y;
+    return { x: x0, y: y0 };
   }
 
   /** Gentle de-overlap after a hand-drop: nudge off overlapping modules only. */
@@ -931,6 +1072,7 @@ export class PatchCanvas {
   // -- stage events ------------------------------------------------------------
 
   private lastWireTap = { id: '', at: 0 };
+  private lastBgClick = 0;
 
   private onStageDown(e: FederatedPointerEvent): void {
     if (this.pinch) return; // second finger of a pinch: ignore
@@ -971,6 +1113,14 @@ export class PatchCanvas {
       this.pendingDeselect = true;
       this.armLongPress(e, { kind: 'canvas' });
     } else {
+      // Double-click empty canvas: auto-arrange the patch.
+      const now = performance.now();
+      if (now - this.lastBgClick < 350) {
+        this.lastBgClick = 0;
+        this.autoArrange();
+        return;
+      }
+      this.lastBgClick = now;
       appState.select(null);
     }
     this.panning = {
@@ -1195,17 +1345,70 @@ export class PatchCanvas {
     this.panning = null;
   }
 
+  // Zoom limits + feel constants. ZOOM_K sets wheel sensitivity (zoom is
+  // multiplicative, so factor = exp(-deltaY*k) is linear in perceived speed).
+  // A chunky |deltaY| (mouse-wheel notch) routes through eased animation; small
+  // pixel deltas (trackpad) snap. ZOOM_TAU is the ease time-constant in ms.
+  private static readonly ZOOM_MIN = 0.2;
+  private static readonly ZOOM_MAX = 2.5;
+  private static readonly ZOOM_K = 0.0015;
+  private static readonly ZOOM_NOTCH = 40; // |deltaY| at/above = animate
+  private static readonly ZOOM_CLAMP = 50; // per-event delta cap (anti-teleport)
+  private static readonly ZOOM_TAU = 80;
+
   private onWheel(e: WheelEvent): void {
     e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    const next = Math.min(2.5, Math.max(0.2, this.world.scale.x * factor));
     const rect = this.app.canvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
-    const wx = (px - this.world.position.x) / this.world.scale.x;
-    const wy = (py - this.world.position.y) / this.world.scale.y;
+    this.zoomAnchor = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const d = Math.max(-PatchCanvas.ZOOM_CLAMP, Math.min(PatchCanvas.ZOOM_CLAMP, e.deltaY));
+    const factor = Math.exp(-d * PatchCanvas.ZOOM_K);
+    this.zoomTarget = Math.min(
+      PatchCanvas.ZOOM_MAX,
+      Math.max(PatchCanvas.ZOOM_MIN, this.zoomTarget * factor),
+    );
+    // Trackpad fires a dense stream of small pixel deltas; a mouse wheel fires
+    // sparse chunky notches (deltaMode LINE, or large pixel deltas on Chromium).
+    // Trackpad snaps (zero added latency); mouse notch eases toward the target.
+    this.zoomSnap = e.deltaMode === 0 && Math.abs(e.deltaY) < PatchCanvas.ZOOM_NOTCH;
+    if (!this.zoomRaf) {
+      this.zoomLastTs = performance.now();
+      this.zoomRaf = requestAnimationFrame((t) => this.stepZoom(t));
+    }
+  }
+
+  /** rAF loop: ease (or snap) world scale toward `zoomTarget`, keeping the world
+   * point under `zoomAnchor` fixed. Self-cancels once settled. */
+  private stepZoom(ts: number): void {
+    const dt = Math.max(0, ts - this.zoomLastTs);
+    this.zoomLastTs = ts;
+    const cur = this.world.scale.x;
+    const next = this.zoomSnap
+      ? this.zoomTarget
+      : cur + (this.zoomTarget - cur) * (1 - Math.exp(-dt / PatchCanvas.ZOOM_TAU));
+    const { x, y } = this.zoomAnchor;
+    const wx = (x - this.world.position.x) / cur;
+    const wy = (y - this.world.position.y) / cur;
     this.world.scale.set(next);
-    this.world.position.set(px - wx * next, py - wy * next);
+    this.world.position.set(x - wx * next, y - wy * next);
+    if (Math.abs(this.zoomTarget - next) > 0.0005) {
+      this.zoomRaf = requestAnimationFrame((t) => this.stepZoom(t));
+    } else {
+      this.world.scale.set(this.zoomTarget); // land exactly
+      this.world.position.set(x - wx * this.zoomTarget, y - wy * this.zoomTarget);
+      this.zoomRaf = 0;
+    }
+  }
+
+  /** Directly set scale + position (pinch, fit). Syncs the zoom target and kills
+   * any in-flight wheel animation so the rAF loop can't yank the view back. */
+  private setZoomImmediate(scale: number, posX: number, posY: number): void {
+    if (this.zoomRaf) {
+      cancelAnimationFrame(this.zoomRaf);
+      this.zoomRaf = 0;
+    }
+    this.zoomTarget = scale;
+    this.world.scale.set(scale);
+    this.world.position.set(posX, posY);
   }
 
   // -- touch pinch-zoom -------------------------------------------------------
@@ -1291,12 +1494,11 @@ export class PatchCanvas {
     const next = Math.min(2.5, Math.max(0.2, this.world.scale.x * factor));
     const wx = (prev.mid.x - this.world.position.x) / this.world.scale.x;
     const wy = (prev.mid.y - this.world.position.y) / this.world.scale.y;
-    this.world.scale.set(next);
-    this.world.position.set(prev.mid.x - wx * next, prev.mid.y - wy * next);
-    // Pan: translate by how far the midpoint travelled between frames.
-    this.world.position.set(
-      this.world.position.x + (mid.x - prev.mid.x),
-      this.world.position.y + (mid.y - prev.mid.y),
+    // Zoom-anchored position, plus the pan from how far the midpoint travelled.
+    this.setZoomImmediate(
+      next,
+      prev.mid.x - wx * next + (mid.x - prev.mid.x),
+      prev.mid.y - wy * next + (mid.y - prev.mid.y),
     );
     this.pinch = { dist, mid };
   }
@@ -1374,8 +1576,7 @@ export class PatchCanvas {
     // Only ever zoom out: keep current scale unless content no longer fits.
     const fit = Math.min((sw - pad) / w, (sh - pad) / h);
     const scale = Math.max(0.2, Math.min(this.world.scale.x, fit));
-    this.world.scale.set(scale);
-    this.world.position.set(sw / 2 - cx * scale, sh / 2 - cy * scale);
+    this.setZoomImmediate(scale, sw / 2 - cx * scale, sh / 2 - cy * scale);
   }
 
   /** Fit the whole patch in view; if already fitted, return to 100%. */
@@ -1401,8 +1602,7 @@ export class PatchCanvas {
       px = sw / 2 - cx;
       py = sh / 2 - cy;
     }
-    this.world.scale.set(scale);
-    this.world.position.set(px, py);
+    this.setZoomImmediate(scale, px, py);
   }
 
   // -- wire rendering --------------------------------------------------------
@@ -1468,12 +1668,15 @@ export class PatchCanvas {
 
   private hitTestWire(e: FederatedPointerEvent): Wire | null {
     const p = this.world.toLocal(e.global);
-    const threshold = (isTouchMode() ? 14 : 8) / this.world.scale.x;
+    const threshold = (isTouchMode() ? 20 : 8) / this.world.scale.x;
+    const t2 = threshold * threshold;
     for (const wire of appState.graph.wires.values()) {
       const points = this.wirePath(wire);
       if (!points) continue;
-      for (const pt of points) {
-        if (Math.hypot(pt.x - p.x, pt.y - p.y) < threshold) return wire;
+      // Distance to each segment (not just sampled points) so long wires have
+      // no grab gaps between the 24 bezier samples.
+      for (let i = 0; i < points.length - 1; i++) {
+        if (distToSegSq(p, points[i], points[i + 1]) < t2) return wire;
       }
     }
     return null;
@@ -1523,41 +1726,57 @@ export class PatchCanvas {
     this.wireLayer.clear();
     this.drawFrames();
 
+    // Animate wires (signal glow + flow dots) unless disabled in Display
+    // settings. Off → static cables at rest width/alpha.
+    const anim = appSettings().display.wireAnim;
+    // Scale-aware: keep wires a constant on-screen thickness regardless of zoom.
+    const sw = 1 / this.world.scale.x;
+
     for (const wire of appState.graph.wires.values()) {
       const points = this.wirePath(wire);
       if (!points) continue;
 
-      let color = wire.color ?? PORT_TYPE_COLORS[wire.type];
+      const color = wire.color ?? PORT_TYPE_COLORS[wire.type];
       let alpha = 0.35;
-      let width = 2;
+      // Constant width for every wire; signal modulates brightness only.
+      const width = 2;
+      // Flow-dot signal level (0=idle, no dots) and travel param. Audio wires
+      // carry continuous signal — glow only, no traveling dots.
+      let level = 0;
+      let t = 0; // note: progress 0→1; control: animated phase 0→1
 
-      if (wire.type === 'audio') {
-        // Pulse with the actual signal (PRD §4.4): source module's meter.
-        const meter = appState.meters[wire.from.moduleId];
-        if (meter) {
-          alpha = 0.35 + Math.min(0.65, meter.rms * 2.2);
-          width = 2 + Math.min(4, meter.peak * 4);
-        }
-      } else if (wire.type === 'note') {
-        const flash = appState.noteFlash.get(wire.from.moduleId);
-        if (flash !== undefined && now - flash < NOTE_FLASH_MS) {
-          const k = 1 - (now - flash) / NOTE_FLASH_MS;
-          alpha = 0.35 + 0.65 * k;
-          width = 2 + 3 * k;
-        }
-      } else if (wire.type === 'control') {
-        // Glow proportional to the live control value (PRD §4.4).
-        const v = appState.controlValues[wire.from.moduleId];
-        if (v !== undefined) {
-          alpha = 0.3 + 0.6 * v;
-          width = 2 + 2 * v;
+      if (anim) {
+        if (wire.type === 'audio') {
+          // Pulse with the actual signal (PRD §4.4): source module's meter.
+          const meter = appState.meters[wire.from.moduleId];
+          if (meter) alpha = 0.35 + Math.min(0.6, meter.rms * 3);
+        } else if (wire.type === 'note') {
+          const flash = appState.noteFlash.get(wire.from.moduleId);
+          if (flash !== undefined && now - flash < NOTE_FLASH_MS) {
+            const k = 1 - (now - flash) / NOTE_FLASH_MS;
+            alpha = 0.35 + 0.65 * k;
+          }
+          // Dot travels for the full NOTE_TRAVEL_MS window, then fades out.
+          if (flash !== undefined && now - flash < NOTE_TRAVEL_MS) {
+            t = (now - flash) / NOTE_TRAVEL_MS;
+            level = 1;
+          }
+        } else if (wire.type === 'control') {
+          // Glow proportional to the live control value (PRD §4.4).
+          const v = appState.controlValues[wire.from.moduleId];
+          if (v !== undefined) {
+            alpha = 0.3 + 0.6 * v;
+            level = Math.min(1, v);
+          }
         }
       }
 
       if (wire.id === appState.selectedWireId) {
-        this.strokePath(points, width + 4, 0xffffff, 0.25);
+        this.strokePath(points, (width + 4) * sw, 0xffffff, 0.25);
       }
-      this.strokePath(points, width, color, alpha);
+      this.strokePath(points, width * sw, color, alpha);
+
+      if (anim && level > 0) this.drawFlowDots(wire.type, points, color, width * sw, level, t, phaseHash(wire.id), now);
     }
 
     // Live wire being dragged.
@@ -1568,7 +1787,7 @@ export class PatchCanvas {
         const [start, end] = this.wireDrag.direction === 'out' ? [a, b] : [b, a];
         const port = appState.graph.port({ moduleId: this.wireDrag.moduleId, portId: this.wireDrag.portId });
         if (port) {
-          this.strokePath(this.bezierPoints(start, end), 2.5, PORT_TYPE_COLORS[port.type], 0.9);
+          this.strokePath(this.bezierPoints(start, end), 2 * sw, PORT_TYPE_COLORS[port.type], 0.9);
         }
       }
     }
@@ -1603,6 +1822,43 @@ export class PatchCanvas {
     this.wireLayer.moveTo(points[0].x, points[0].y);
     for (let i = 1; i < points.length; i++) this.wireLayer.lineTo(points[i].x, points[i].y);
     this.wireLayer.stroke({ width, color, alpha, cap: 'round', join: 'round' });
+  }
+
+  /**
+   * Flow dots riding a wire source→dest. note: one dot at progress `t`, fading
+   * as it lands. control: 2 dots drifting at a signal-driven speed, phase
+   * offset by `phase` so streams aren't in lockstep. Audio wires get glow only
+   * (no dots). `level` (0–1) scales brightness and speed. `strokeW` is the
+   * already-scale-corrected wire width.
+   */
+  private drawFlowDots(
+    type: Wire['type'],
+    points: Array<{ x: number; y: number }>,
+    color: number,
+    strokeW: number,
+    level: number,
+    t: number,
+    phase: number,
+    now: number,
+  ): void {
+    const r = strokeW * 0.9;
+    const dot = (pos: { x: number; y: number }, a: number) => {
+      this.wireLayer.circle(pos.x, pos.y, r).fill({ color, alpha: a });
+      this.wireLayer.circle(pos.x, pos.y, r * 0.45).fill({ color: 0xffffff, alpha: a * 0.9 });
+    };
+    if (type === 'note') {
+      // Single packet; fade over the back third of its travel.
+      const fade = t > 0.66 ? 1 - (t - 0.66) / 0.34 : 1;
+      dot(pointAt(points, t), Math.max(0, fade));
+      return;
+    }
+    // control: two drifting dots, speed ∝ level (one cycle ≈ 1.4s at full).
+    const speed = 0.0007 * (0.3 + 0.7 * level);
+    const base = (now * speed + phase) % 1;
+    for (let i = 0; i < 2; i++) {
+      const tt = (base + i * 0.5) % 1;
+      dot(pointAt(points, tt), 0.4 + 0.5 * level);
+    }
   }
 }
 

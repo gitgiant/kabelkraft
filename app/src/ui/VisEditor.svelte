@@ -841,7 +841,7 @@
     border-radius: 10px;
     display: flex;
     flex-direction: column;
-    z-index: 60;
+    z-index: 50;
     overflow: hidden;
   }
   .vised-bar {
@@ -851,6 +851,11 @@
     padding: 6px 10px;
     background: var(--panel, #181820);
     border-bottom: 1px solid var(--panel-border, #2a2a36);
+  }
+  /* Match the menu UI: compact 12px controls (global button defaults to 14px). */
+  .vised-bar button {
+    font-size: 12px;
+    padding: 3px 8px;
   }
   .vised-title {
     font-weight: 700;

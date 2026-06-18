@@ -252,6 +252,11 @@ test('tutorial steps auto-advance and complete', async ({ page }) => {
 
 test('recorder captures playing audio and downloads a WAV', async ({ page }) => {
   await bootWithAudio(page);
+  // The recorder now prefers a native save dialog; force the download fallback
+  // so the headless run can assert the saved file instead of stalling on a picker.
+  await page.evaluate(() => {
+    (window as unknown as { showSaveFilePicker?: unknown }).showSaveFilePicker = undefined;
+  });
   const rig = await classicRig(page);
 
   const recorderId = await page.evaluate((vcaId) => {
@@ -273,6 +278,29 @@ test('recorder captures playing audio and downloads a WAV', async ({ page }) => 
 
   const downloadPromise = page.waitForEvent('download');
   await page.evaluate((id) => window.__kk.toggleRecord(id), recorderId);
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/\.wav$/);
+
+  const seconds = await page.evaluate(() => window.__kk.lastRecordingSeconds);
+  expect(seconds).toBeGreaterThan(0.5);
+});
+
+test('transport record captures the master bus and saves a WAV', async ({ page }) => {
+  await bootWithAudio(page);
+  await page.evaluate(() => {
+    (window as unknown as { showSaveFilePicker?: unknown }).showSaveFilePicker = undefined;
+  });
+  await classicRig(page);
+
+  await play(page);
+  await page.evaluate(() => window.__kk.toggleMasterRecord());
+
+  await expect
+    .poll(() => page.evaluate(() => window.__kk.masterRecordingSeconds()), { timeout: 5000 })
+    .toBeGreaterThan(0.5);
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.evaluate(() => window.__kk.toggleMasterRecord());
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toMatch(/\.wav$/);
 

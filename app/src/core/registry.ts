@@ -592,6 +592,32 @@ const compressor: ModuleDef = {
   height: 230,
 };
 
+const ducker: ModuleDef = {
+  type: 'ducker',
+  name: 'Ducker',
+  category: 'effect',
+  description:
+    'Sidechain ducker: a key signal pushes the main input down. Wire a kick to Key for the ' +
+    'classic pump (Key wins); or drive Trig with an LFO/sequencer for tempo-synced ducking. ' +
+    'Red bar shows live gain reduction.',
+  ports: [
+    audioIn(),
+    { id: 'key', label: 'Key', type: 'audio', direction: 'in', description: 'Audio detector; its level ducks the main input. Takes priority over Trig.' },
+    { id: 'trig', label: 'Trig', type: 'control', direction: 'in', description: 'Control driver (LFO/seq/envelope); used when Key is unwired.' },
+    audioOutPort(),
+  ],
+  params: [
+    { id: 'amount', label: 'Amount', min: 0, max: 1, default: 0.7, randomizable: true },
+    { id: 'attack', label: 'Attack', min: 0.1, max: 100, default: 5, unit: 'ms', curve: 'exp', randomizable: true },
+    { id: 'release', label: 'Release', min: 10, max: 1000, default: 120, unit: 'ms', curve: 'exp', randomizable: true },
+    { id: 'detect', label: 'Detect', min: 0, max: 1, default: 0, randomizable: false },
+    { id: 'sense', label: 'Sense', min: -12, max: 24, default: 0, unit: 'dB', randomizable: false },
+    bypassParam(),
+  ],
+  width: 260,
+  height: 230,
+};
+
 const limiterFx: ModuleDef = {
   type: 'limiter',
   name: 'Limiter',
@@ -1376,7 +1402,7 @@ export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
     transport, sequencer, arp, composer, notethru, lfo, envelope, random, keyboard, midiIn, midiOut,
     voice, osc, fmosc, wtosc, smpl, pluck, resonator, addosc, granular, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
-    delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, mbcomp, limiterFx, modulator,
+    delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, ducker, mbcomp, limiterFx, modulator,
     mixer, recorder, audioInDef, audioOut, levels, visualizer,
     stt, transporttext, textinput, lyrics, notenames, intelligence, bgVisual,
   ].map((d) => [d.type, d]),

@@ -25,6 +25,8 @@ export interface DisplaySettings {
   visMaxRes: number;
   /** Touch controls mode (drawers, fat hit targets, gestures). */
   touchMode: TouchModePref;
+  /** Animate patch wires (signal glow + traveling flow dots). Off = static wires. */
+  wireAnim: boolean;
 }
 
 export interface GeneralSettings {
@@ -60,12 +62,25 @@ export interface MidiSettings {
   disabledInputs: string[];
 }
 
+/** WAV bit depth: 16/24 integer PCM, or 32-bit IEEE float. */
+export type BitDepth = 16 | 24 | 32;
+
+export interface RecordingSettings {
+  /** Output WAV bit depth (32 = IEEE float). */
+  bitDepth: BitDepth;
+  /** Save-dialog default name. Tokens: {project}, {timestamp}. */
+  filenameTemplate: string;
+  /** Monitor metronome click level 0–1 (never recorded). */
+  metronomeVolume: number;
+}
+
 export interface AppSettings {
   version: 1;
   display: DisplaySettings;
   general: GeneralSettings;
   audio: AudioSettings;
   midi: MidiSettings;
+  recording: RecordingSettings;
   ai: AiSettings;
 }
 
@@ -78,10 +93,11 @@ export const UI_SCALES = [0.75, 0.9, 1, 1.1, 1.25, 1.5] as const;
 export function defaultSettings(): AppSettings {
   return {
     version: 1,
-    display: { theme: 'dark', uiScale: 1, visMaxFps: 240, visMaxRes: 1, touchMode: 'auto' },
+    display: { theme: 'dark', uiScale: 1, visMaxFps: 240, visMaxRes: 1, touchMode: 'auto', wireAnim: true },
     general: { defaultTempo: 120, confirmLeave: false, autosave: true, autosaveInterval: 30, qwertyPiano: true, autoArrangeOnToggle: false },
     audio: { latencyHint: 'interactive', sampleRate: 0, sinkId: '', inputId: '', masterGain: 1, muted: false },
     midi: { disabledInputs: [] },
+    recording: { bitDepth: 24, filenameTemplate: '{project}-{timestamp}', metronomeVolume: 0.5 },
     ai: structuredClone(DEFAULT_AI_SETTINGS),
   };
 }
@@ -106,6 +122,7 @@ export function sanitizeSettings(raw: unknown): AppSettings {
       touchMode: ['auto', 'on', 'off'].includes(s.display?.touchMode as string)
         ? (s.display!.touchMode as TouchModePref)
         : 'auto',
+      wireAnim: s.display?.wireAnim !== false,
     },
     general: {
       defaultTempo: clamp(s.general?.defaultTempo, 20, 300, d.general.defaultTempo),
@@ -131,6 +148,16 @@ export function sanitizeSettings(raw: unknown): AppSettings {
       disabledInputs: Array.isArray(s.midi?.disabledInputs)
         ? s.midi.disabledInputs.filter((x): x is string => typeof x === 'string')
         : [],
+    },
+    recording: {
+      bitDepth: [16, 24, 32].includes(Number(s.recording?.bitDepth))
+        ? (Number(s.recording!.bitDepth) as BitDepth)
+        : d.recording.bitDepth,
+      filenameTemplate:
+        typeof s.recording?.filenameTemplate === 'string' && s.recording.filenameTemplate.trim()
+          ? s.recording.filenameTemplate
+          : d.recording.filenameTemplate,
+      metronomeVolume: clamp(s.recording?.metronomeVolume, 0, 1, d.recording.metronomeVolume),
     },
     ai: sanitizeAiSettings(s.ai),
   };

@@ -1113,7 +1113,7 @@
 <style>
   .piano-roll {
     position: fixed;
-    z-index: 60;
+    z-index: 50;
     transform-origin: 0 0;
     background: var(--panel);
     border: 1px solid var(--panel-border);
@@ -1126,7 +1126,7 @@
     overflow: hidden;
   }
   .piano-roll.active {
-    z-index: 61;
+    z-index: 51;
     border-color: var(--accent);
   }
   .toolbar-row {
@@ -1135,9 +1135,17 @@
     gap: 6px;
     flex-wrap: nowrap;
     flex: none;
-    height: 26px;
+    height: 24px;
     min-width: 0;
     overflow: hidden;
+  }
+  /* Match the menu UI: compact 12px controls (global button defaults to 14px). */
+  .toolbar-row button,
+  .toolbar-row .file-btn,
+  .toolbar-row select,
+  .toolbar-row input {
+    font-size: 12px;
+    padding: 2px 8px;
   }
   .count {
     font-size: 11px;

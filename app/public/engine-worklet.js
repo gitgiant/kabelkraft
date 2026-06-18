@@ -1668,6 +1668,9 @@ class RandomModule {
   }
 }
 
+/** Sentinel id for the transport's built-in master-bus recorder. */
+const MASTER_REC_ID = '__master__';
+
 class RecorderModule {
   constructor(id, params) {
     this.id = id;
@@ -1843,8 +1846,27 @@ class ComposerModule {
   }
 
   allNotesOff(emitOff) {
-    for (const n of this.activeNotes) emitOff(this.id, n.voiceId);
+    for (const n of this.activeNotes) emitOff(this.id, n.voiceId, n.release);
     this.activeNotes = [];
+  }
+
+  /**
+   * Clip edited live: note-off any sounding voice whose source note is gone
+   * (deleted, or moved so its start/pitch changed), so it stops immediately
+   * instead of wedging a downstream gate open until its scheduled end — or
+   * forever, if its end is never reached. Voices whose note still exists
+   * (velocity/pan/mod tweaks leave start+pitch put) keep ringing untouched.
+   */
+  syncActive(emitOff) {
+    const notes = (this.data && this.data.notes) || [];
+    const live = new Set(notes.map((n) => `${n.pitch}:${n.start}`));
+    this.activeNotes = this.activeNotes.filter((n) => {
+      if (n.key !== undefined && !live.has(n.key)) {
+        emitOff(this.id, n.voiceId, n.release);
+        return false;
+      }
+      return true;
+    });
   }
 }
 
@@ -2915,6 +2937,65 @@ class CompressorModule {
   }
 }
 
+/** Sidechain ducker: key audio (or a control trig) pushes the main input down. */
+class DuckerModule {
+  constructor(id, params) {
+    this.id = id;
+    this.type = 'ducker';
+    this.params = params;
+    this.controlIn = {};
+    this.inputs = { in: makeStereoBuf(), key: makeStereoBuf() };
+    this.outL = new Float32Array(128);
+    this.outR = new Float32Array(128);
+    this.keyWired = false; // set by the host on graph changes
+    this.env = 0; // smoothed duck amount, 0–1
+    this.rms = 0; // running mean-square for RMS detection
+    this.grDb = 0; // block-max gain reduction for the UI meter
+  }
+
+  render(blockSize) {
+    const p = this.params;
+    const amount = p.amount ?? 0.7;
+    const aA = Math.exp(-1 / (Math.max(0.0001, (p.attack ?? 5) / 1000) * sampleRate));
+    const aR = Math.exp(-1 / (Math.max(0.001, (p.release ?? 120) / 1000) * sampleRate));
+    const sense = Math.pow(10, (p.sense ?? 0) / 20);
+    const rms = (p.detect ?? 0) >= 0.5;
+    const trig = this.keyWired ? undefined : cval(this.controlIn.trig, 0);
+    let blockGr = 0;
+
+    for (let i = 0; i < blockSize; i++) {
+      // Key (audio) wins; else Trig (control); else passthrough — no duck.
+      let drive;
+      if (this.keyWired) {
+        const l = this.inputs.key.L[i] * sense;
+        const r = this.inputs.key.R[i] * sense;
+        if (rms) {
+          this.rms += (l * l + r * r - this.rms) * 0.01;
+          drive = Math.sqrt(this.rms);
+        } else {
+          drive = Math.max(Math.abs(l), Math.abs(r));
+        }
+      } else if (trig !== undefined) {
+        drive = Math.min(1, Math.max(0, trig));
+      } else {
+        this.outL[i] = this.inputs.in.L[i];
+        this.outR[i] = this.inputs.in.R[i];
+        continue;
+      }
+      // Shared attack/release 1-pole — works for both sources.
+      this.env = drive > this.env
+        ? drive + (this.env - drive) * aA
+        : drive + (this.env - drive) * aR;
+      const duck = Math.min(1, amount * this.env);
+      const gain = 1 - duck;
+      this.outL[i] = this.inputs.in.L[i] * gain;
+      this.outR[i] = this.inputs.in.R[i] * gain;
+      if (duck > blockGr) blockGr = duck;
+    }
+    this.grDb = -20 * Math.log10(Math.max(DB_FLOOR, 1 - blockGr));
+  }
+}
+
 class LimiterModule {
   constructor(id, params) {
     this.id = id;
@@ -3145,6 +3226,9 @@ class EngineProcessor extends AudioWorkletProcessor {
     this.noteWires = [];
     this.controlWires = [];
     this.transport = { playing: false, tempo: 120, posBeats: 0 };
+    // Built-in master-bus recorder: captures the summed mix (out[0]/out[1])
+    // pre the main-thread master gain, so monitor level/mute don't reach the file.
+    this.masterRec = new RecorderModule(MASTER_REC_ID, {});
     this.sampleCount = 0;
     this.nextVoiceId = 1e9; // engine-internal ids, distinct from main-thread ids
     this.lastStatusTime = 0;
@@ -3216,6 +3300,8 @@ class EngineProcessor extends AudioWorkletProcessor {
             next.set(m.id, new BitcrusherModule(m.id, m.params));
           } else if (m.type === 'compressor') {
             next.set(m.id, new CompressorModule(m.id, m.params));
+          } else if (m.type === 'ducker') {
+            next.set(m.id, new DuckerModule(m.id, m.params));
           } else if (m.type === 'limiter') {
             next.set(m.id, new LimiterModule(m.id, m.params));
           } else if (m.type === 'modulator') {
@@ -3292,6 +3378,8 @@ class EngineProcessor extends AudioWorkletProcessor {
         for (const mod of this.modules.values()) {
           if (mod.type === 'compressor') {
             mod.scWired = this.audioWires.some((w) => w.toModuleId === mod.id && w.toPortId === 'sc');
+          } else if (mod.type === 'ducker') {
+            mod.keyWired = this.audioWires.some((w) => w.toModuleId === mod.id && w.toPortId === 'key');
           } else if (mod.type === 'modulator') {
             mod.carrierWired = this.audioWires.some(
               (w) => w.toModuleId === mod.id && w.toPortId === 'carrier',
@@ -3315,7 +3403,14 @@ class EngineProcessor extends AudioWorkletProcessor {
       }
       case 'data': {
         const mod = this.modules.get(msg.moduleId);
-        if (mod && mod.data) mod.data[msg.key] = msg.value;
+        if (mod && mod.data) {
+          mod.data[msg.key] = msg.value;
+          // Composer clip notes changed live: release voices of deleted/moved
+          // notes now, so they don't hang until their scheduled end (or panic).
+          if (mod.type === 'composer' && msg.key === 'notes' && mod.syncActive) {
+            mod.syncActive((srcId, voiceId, release) => this.routeNoteOff(srcId, voiceId, release));
+          }
+        }
         break;
       }
       case 'transport': {
@@ -3355,11 +3450,20 @@ class EngineProcessor extends AudioWorkletProcessor {
         break;
       }
       case 'recordStart': {
+        if (msg.moduleId === MASTER_REC_ID) {
+          this.masterRec.recording = true;
+          break;
+        }
         const mod = this.modules.get(msg.moduleId);
         if (mod && mod.type === 'recorder') mod.recording = true;
         break;
       }
       case 'recordStop': {
+        if (msg.moduleId === MASTER_REC_ID) {
+          this.masterRec.recording = false;
+          this.flushRecorder(this.masterRec);
+          break;
+        }
         const mod = this.modules.get(msg.moduleId);
         if (mod && mod.type === 'recorder') {
           mod.recording = false;
@@ -3549,6 +3653,7 @@ class EngineProcessor extends AudioWorkletProcessor {
         voiceId,
         offAtSample: this.sampleCount + durSamples,
         release: note.release === undefined ? 0.5 : note.release,
+        key: `${note.pitch}:${note.start}`, // identity for live-edit reconcile
       });
     }
   }
@@ -3727,6 +3832,13 @@ class EngineProcessor extends AudioWorkletProcessor {
 
     this.sampleCount += blockSize;
 
+    // Master-bus capture: out[0]/out[1] is the full mix, pre master-gain.
+    if (this.masterRec.recording) {
+      this.masterRec.chunksL.push(out[0].slice(0, blockSize));
+      this.masterRec.chunksR.push((out[1] || out[0]).slice(0, blockSize));
+      this.masterRec.pendingSamples += blockSize;
+    }
+
     // Ship MIDI Out events promptly (per block) — status cadence is too slow.
     let midiEvents = null;
     for (const mod of this.modules.values()) {
@@ -3742,6 +3854,9 @@ class EngineProcessor extends AudioWorkletProcessor {
       if (mod.type === 'recorder' && mod.recording && mod.pendingSamples >= sampleRate / 4) {
         this.flushRecorder(mod);
       }
+    }
+    if (this.masterRec.recording && this.masterRec.pendingSamples >= sampleRate / 4) {
+      this.flushRecorder(this.masterRec);
     }
 
     this.procTimeMs += Date.now() - procStart;

@@ -389,20 +389,21 @@ import { extractJson } from '../core/aiimport';
 {/if}
 
 <style>
+  /* Non-modal: a pass-through positioning layer so the toolbar / canvas stay
+     clickable while the dialog floats. Only the dialog itself catches clicks. */
   .ai-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.55);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 65;
+    pointer-events: none;
     transition: opacity 0.12s ease;
   }
   /* While dragging the ready chip, get out of the way so the canvas is the drop target. */
   .ai-backdrop.placing {
     opacity: 0;
-    pointer-events: none;
   }
   .ai-dialog {
     width: 640px;
@@ -414,6 +415,8 @@ import { extractJson } from '../core/aiimport';
     display: flex;
     flex-direction: column;
     gap: 10px;
+    pointer-events: auto;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   }
   .ai-header {
     display: flex;

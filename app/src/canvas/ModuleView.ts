@@ -201,6 +201,7 @@ export class ModuleView extends Container {
     audioIn: { make: () => new ParamFace({ rail: 'vmeterIn', bottomRow: 'audioIn' }), customLayout: true },
     audioOut: { make: () => new ParamFace({ rail: 'vmeterOut', bottomRow: 'audioOut' }), customLayout: true },
     compressor: { make: () => new ParamFace({ rail: 'grmeter' }), customLayout: true },
+    ducker: { make: () => new ParamFace({ rail: 'grmeter' }), customLayout: true },
     limiter: { make: () => new ParamFace({ rail: 'grmeter' }), customLayout: true },
     mbcomp: { make: () => new ParamFace({ rail: 'grmeter' }), customLayout: true },
     midiIn: { make: () => new ParamFace({ bottomRow: 'midi' }), customLayout: true },
