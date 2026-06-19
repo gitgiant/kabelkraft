@@ -35,6 +35,7 @@ import { GranularFace } from './faces/granular';
 import { StepGridFace } from './faces/sequencer';
 import { TextFace } from './faces/text';
 import { SamplerFace } from './faces/sampler';
+import { TtsFace } from './faces/tts';
 import { WtoscFace } from './faces/wtosc';
 import { VisualizerFace } from './faces/visualizer';
 import { IntelligenceFace } from './faces/intelligence';
@@ -88,6 +89,9 @@ export interface PortHandlers {
   onPortUp(moduleId: string, portId: string, e: FederatedPointerEvent): void;
   onBodyDown(view: ModuleView, e: FederatedPointerEvent): void;
 }
+
+/** Wheel-adjust closure stashed on a control's hit graphic for PatchCanvas. */
+export type WheelAdjust = (deltaY: number, clientX: number, clientY: number) => void;
 
 /**
  * A drawable, draggable scalar control — a ParamSpec, a drum-pad field, or a
@@ -156,6 +160,15 @@ export class ModuleView extends Container {
 
   /** Redraw closures for every control widget; run on any param change. */
   private ctrlRedraws: Array<() => void> = [];
+  /** Mod-animation gate: re-run knob redraws only when a new status landed. */
+  private lastModVersion = -1;
+  /** Was any param modulated last status — drives one snap-back redraw on release. */
+  private wasModulated = false;
+  /** Manual double-click tracking (Pixi pointerdown `detail` is unreliable). */
+  private lastDownKey = '';
+  private lastDownAt = 0;
+  /** Wheel-adjust undo coalescing: one snapshot per scroll burst. */
+  private lastWheelAt = 0;
   /** Control centers by param id — e2e and tools aim pointers with this. */
   private paramAnchors = new Map<string, { x: number; y: number }>();
   /** Resolved live tint (packed RGB); null = default accent. */
@@ -187,6 +200,7 @@ export class ModuleView extends Container {
     transport: { make: () => new TransportFace(), customLayout: true, fixedMin: true },
     sequencer: { make: () => new StepGridFace(), customLayout: true },
     smpl: { make: () => new SamplerFace(), customLayout: true },
+    tts: { make: () => new TtsFace(), customLayout: true },
     visualizer: { make: () => new VisualizerFace(), customLayout: true, unbounded: true },
     wtosc: { make: () => new WtoscFace(), customLayout: true },
     pluck: { make: () => new StringFace(), customLayout: true },
@@ -206,7 +220,6 @@ export class ModuleView extends Container {
     mbcomp: { make: () => new ParamFace({ rail: 'grmeter' }), customLayout: true },
     midiIn: { make: () => new ParamFace({ bottomRow: 'midi' }), customLayout: true },
     midiOut: { make: () => new ParamFace({ bottomRow: 'midi' }), customLayout: true },
-    bgvisual: { make: () => new ParamFace(), customLayout: true },
   };
 
   /** Pure param-grid modules (delay, reverb, lfo…) with no special layout. */
@@ -628,7 +641,13 @@ export class ModuleView extends Container {
       appState.armMidiLearn(this.instance.id, c.learnId);
       return true;
     }
-    if (e.detail >= 2) {
+    // Double-click: prefer the native click-count, but fall back to manual
+    // timing — Pixi doesn't reliably set `detail` on pointerdown.
+    const now = performance.now();
+    const isDouble = e.detail >= 2 || (this.lastDownKey === c.key && now - this.lastDownAt < 350);
+    this.lastDownKey = c.key;
+    this.lastDownAt = now;
+    if (isDouble) {
       if (e.shiftKey && !c.options) {
         const raw = window.prompt(
           `${c.label} (${c.min}–${c.max}${c.unit ? ' ' + c.unit : ''})`,
@@ -648,6 +667,32 @@ export class ModuleView extends Container {
     return false;
   }
 
+  /**
+   * Mouse-wheel over a control: nudge the value (up = increase). Bursts within
+   * 500 ms coalesce into a single undo step. Driven from PatchCanvas.onWheel,
+   * which hit-tests the control and routes the event here instead of zooming.
+   */
+  wheelCtrl(c: CtrlSpec, deltaY: number, clientX: number, clientY: number): void {
+    const now = performance.now();
+    if (now - this.lastWheelAt > 500) appState.beginUndoable();
+    this.lastWheelAt = now;
+    const dir = deltaY < 0 ? 1 : -1;
+    if (c.options) {
+      c.set(Math.min(c.options.length - 1, Math.max(0, Math.round(c.get()) + dir)));
+    } else {
+      const start = this.ctrlNorm(c, c.get());
+      c.set(this.ctrlFromNorm(c, start + dir * 0.04));
+    }
+    this.refreshParams();
+    this.tooltip.showNow([this.ctrlTipTitle(c)], clientX, clientY);
+  }
+
+  /** Tag a control's hit graphic so PatchCanvas.onWheel can route wheel to it. */
+  private tagWheel(hit: Graphics, c: CtrlSpec): void {
+    (hit as Graphics & { __wheel?: WheelAdjust }).__wheel = (dy, x, y) =>
+      this.wheelCtrl(c, dy, x, y);
+  }
+
   // -- control widgets -----------------------------------------------------------
 
   /** Rotary knob for a continuous control. Value is shown on hover/drag only;
@@ -663,11 +708,15 @@ export class ModuleView extends Container {
     if (maxW) fitLabel(label, maxW);
     this.addChild(label);
 
+    const a0 = Math.PI * 0.75;
+    const a1 = Math.PI * 2.25;
+    const ang = (n: number) => a0 + (a1 - a0) * Math.min(1, Math.max(0, n));
     const redraw = () => {
-      const n = Math.min(1, Math.max(0, this.ctrlNorm(c, c.get())));
-      const a0 = Math.PI * 0.75;
-      const a1 = Math.PI * 2.25;
-      const av = a0 + (a1 - a0) * n;
+      // When a mod wire drives this param, the worklet reports [cur, lo, hi]
+      // (native units); the pointer rides `cur` and a band spans lo→hi.
+      const mod = appState.modVals[this.instance.id]?.[c.key];
+      const cur = mod ? mod[0] : c.get();
+      const av = ang(this.ctrlNorm(c, cur));
       g.clear();
       g.circle(cx, cy, r * 0.74).fill(theme.inset).stroke({ width: 1, color: theme.moduleStroke });
       // moveTo before each arc: without it the path connects from its
@@ -676,6 +725,14 @@ export class ModuleView extends Container {
       g.arc(cx, cy, r, a0, a1).stroke({ width: 3, color: theme.inset });
       g.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
       g.arc(cx, cy, r, a0, av).stroke({ width: 3, color: this.accent() });
+      if (mod) {
+        // Modulation reach band (lo→hi) at the outer ring.
+        const alo = ang(this.ctrlNorm(c, mod[1]));
+        const ahi = ang(this.ctrlNorm(c, mod[2]));
+        g.moveTo(cx + Math.cos(Math.min(alo, ahi)) * r, cy + Math.sin(Math.min(alo, ahi)) * r);
+        g.arc(cx, cy, r, Math.min(alo, ahi), Math.max(alo, ahi))
+          .stroke({ width: 3, color: this.accent(), alpha: 0.4 });
+      }
       g.moveTo(cx + Math.cos(av) * r * 0.25, cy + Math.sin(av) * r * 0.25)
         .lineTo(cx + Math.cos(av) * r * 0.66, cy + Math.sin(av) * r * 0.66)
         .stroke({ width: 2, color: this.accent() });
@@ -710,6 +767,7 @@ export class ModuleView extends Container {
       this.tooltip.show([this.ctrlTipTitle(c), CTRL_HINT], ev.clientX, ev.clientY),
     );
     hit.on('pointerout', () => this.tooltip.hide());
+    this.tagWheel(hit, c);
     this.addChild(hit);
   }
 
@@ -798,6 +856,7 @@ export class ModuleView extends Container {
       ),
     );
     hit.on('pointerout', () => this.tooltip.hide());
+    this.tagWheel(hit, c);
     this.addChild(hit);
   }
 
@@ -861,6 +920,7 @@ export class ModuleView extends Container {
       this.tooltip.show([this.ctrlTipTitle(c), CTRL_HINT], ev.clientX, ev.clientY),
     );
     hit.on('pointerout', () => this.tooltip.hide());
+    this.tagWheel(hit, c);
     this.addChild(hit);
   }
 
@@ -1143,6 +1203,14 @@ export class ModuleView extends Container {
   /** Called from the canvas ticker: faces redraw their live visuals + meters. */
   updateLive(): void {
     this.face.live?.(this);
+    // Animate knobs of modulated params at status rate (~30Hz). One final redraw
+    // fires when modulation stops (wasModulated → !isMod) to snap knobs back.
+    const isMod = !!appState.modVals[this.instance.id];
+    if ((isMod || this.wasModulated) && appState.modVersion !== this.lastModVersion) {
+      this.lastModVersion = appState.modVersion;
+      this.wasModulated = isMod;
+      for (const fn of this.ctrlRedraws) fn();
+    }
   }
 
   setSelected(on: boolean): void {

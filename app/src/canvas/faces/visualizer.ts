@@ -38,8 +38,14 @@ export class VisualizerFace implements FaceRenderer {
     // Double-click anywhere on the scene opens the graph editor.
     bg.eventMode = 'static';
     bg.cursor = 'pointer';
+    // Manual double-tap timing — Pixi's pointertap `detail` is unreliable
+    // (see ModuleView), so a real double-click often never reached 2.
+    let lastTap = 0;
     bg.on('pointertap', (e) => {
-      if (e.detail === 2) {
+      const now = performance.now();
+      const dbl = now - lastTap < 350;
+      lastTap = dbl ? 0 : now;
+      if (dbl) {
         e.stopPropagation();
         appState.openVisEditor(view.instance.id);
       }

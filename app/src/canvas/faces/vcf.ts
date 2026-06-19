@@ -11,6 +11,9 @@ import type { FaceRenderer } from './types';
 export class VcfFace implements FaceRenderer {
   private curveG: Graphics | null = null;
   private rect = { x: 0, y: 0, w: 0, h: 0 };
+  /** Status version last drawn — gates the live curve redraw to ~30Hz. */
+  private lastModV = -1;
+  private wasModulated = false;
 
   build(view: ModuleView): void {
     const x = 10;
@@ -68,6 +71,16 @@ export class VcfFace implements FaceRenderer {
     view.addChild(hit);
   }
 
+  /** Redraw the curve at the live modulated cutoff when a mod wire drives it. */
+  live(view: ModuleView): void {
+    const isMod = appState.modVals[view.instance.id]?.cutoff !== undefined;
+    if ((isMod || this.wasModulated) && appState.modVersion !== this.lastModV) {
+      this.lastModV = appState.modVersion;
+      this.wasModulated = isMod;
+      this.refresh(view);
+    }
+  }
+
   /** Visual indicator: log-frequency magnitude curve of the current settings. */
   refresh(view: ModuleView): void {
     if (!this.curveG) return;
@@ -75,7 +88,9 @@ export class VcfFace implements FaceRenderer {
     const r = this.rect;
     const p = view.instance.params;
     const sr = appState.engine.sampleRate;
-    const coefs = vcfCoefs(Math.round(p.mode ?? 0), p.cutoff ?? 1200, p.res ?? 0.2, sr);
+    // Effective cutoff: worklet-reported live value when modulated, else the param.
+    const cutoffEff = appState.modVals[view.instance.id]?.cutoff?.[0] ?? p.cutoff ?? 1200;
+    const coefs = vcfCoefs(Math.round(p.mode ?? 0), cutoffEff, p.res ?? 0.2, sr);
 
     const F_LO = 20;
     const F_HI = 20000;
@@ -104,7 +119,7 @@ export class VcfFace implements FaceRenderer {
     g.stroke({ width: 2, color: PORT_TYPE_COLORS.audio });
 
     // Cutoff handle.
-    const cutoff = Math.min(F_HI, Math.max(F_LO, p.cutoff ?? 1200));
+    const cutoff = Math.min(F_HI, Math.max(F_LO, cutoffEff));
     const cx = r.x + (Math.log(cutoff / F_LO) / Math.log(F_HI / F_LO)) * r.w;
     g.circle(cx, yFor(biquadResponseDb(coefs, cutoff, sr)), 5)
       .fill(PORT_TYPE_COLORS.audio)

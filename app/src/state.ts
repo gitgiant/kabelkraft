@@ -31,6 +31,7 @@ import {
 } from './core/face';
 import { MidiManager } from './core/midi';
 import { SttManager } from './core/stt';
+import { synthesizeSpeech } from './core/tts/tts';
 import type { LyricsLine } from './core/ailyrics';
 import { formatTransportText, noteName } from './core/texttools';
 import { DEFAULT_TRANSPORT, type TextEvent, type TransportState } from './core/types';
@@ -68,7 +69,8 @@ export type StateEvent =
   | 'projectMetaChanged' // name/artists/description/picture edited
   | 'presetsChanged' // a module/container preset was saved/loaded/renamed/etc.
   | 'presetMenuChanged' // preset menu popup opened/closed
-  | 'groupCollapseToggled'; // a group was expanded/collapsed (tile toggle)
+  | 'groupCollapseToggled' // a group was expanded/collapsed (tile toggle)
+  | 'ttsChanged'; // TTS module text/voice/generation state changed
 
 type Listener = () => void;
 
@@ -108,6 +110,10 @@ export class AppState {
   stringData: NonNullable<StatusMessage['stringData']> = {};
   /** Live Granular grain clouds ([x,rate,phase] triples) per module. */
   grainData: NonNullable<StatusMessage['grainData']> = {};
+  /** Live modulated param values: modVals[id][paramId] = [cur,lo,hi], native units. */
+  modVals: NonNullable<StatusMessage['modVals']> = {};
+  /** Bumped each status post — gates knob/display redraw to ~30Hz status rate. */
+  modVersion = 0;
   /** Per-frame audio analysis for visual containers (FFT etc. run UI-side). */
   private readonly visHub = new VisFeatureHub();
 
@@ -153,21 +159,41 @@ export class AppState {
   }
 
   /**
-   * The visualizer currently routed to the window background, plus its opacity.
-   * Scans bgvisual modules (first enabled one wins) for a visual wire into Vis
-   * In and returns the source visualizer id. Null = no active background.
+   * The visualizer currently sent to the window background, plus its opacity.
+   * A visualizer with bg=1 paints full-window behind the patch; enabling one
+   * clears the others (setBackgroundVisualizer), so at most one is on. Null =
+   * no active background.
    */
   backgroundTarget(): { sourceId: string; opacity: number } | null {
     for (const m of this.graph.modules.values()) {
-      if (m.type !== 'bgvisual') continue;
-      if ((m.params['enabled'] ?? 1) < 0.5) continue;
-      for (const w of this.graph.wires.values()) {
-        if (w.type !== 'visual' || w.to.moduleId !== m.id || w.to.portId !== 'vin') continue;
-        const src = this.graph.modules.get(w.from.moduleId);
-        if (src?.type === 'visualizer') return { sourceId: src.id, opacity: m.params['opacity'] ?? 1 };
-      }
+      if (m.type !== 'visualizer' || !m.data?.['bg']) continue;
+      return { sourceId: m.id, opacity: (m.data['bgOpacity'] as number) ?? 1 };
     }
     return null;
+  }
+
+  /**
+   * Send a visualizer to the window background (or clear it). Enabling takes
+   * over: bg is cleared on every other visualizer so the latest one wins.
+   * Stored in data (UI-only, like display caps) so it stays off the param band.
+   */
+  setBackgroundVisualizer(moduleId: string, on: boolean): void {
+    this.beginUndoable();
+    for (const m of this.graph.modules.values()) {
+      if (m.type !== 'visualizer') continue;
+      const want = on && m.id === moduleId;
+      if (Boolean(m.data?.['bg']) !== want) m.data = { ...m.data, bg: want };
+    }
+    this.emit('visGraphChanged');
+  }
+
+  /** Background opacity for a visualizer (live drag → undoable=false). */
+  setBackgroundOpacity(moduleId: string, opacity: number, undoable = false): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (mod?.type !== 'visualizer') return;
+    if (undoable) this.beginUndoable();
+    mod.data = { ...mod.data, bgOpacity: opacity };
+    this.emit('visGraphChanged');
   }
 
   // -- text streams (VISUALIZER_ENGINE_PLAN.md Phase 3) -----------------------
@@ -528,6 +554,26 @@ export class AppState {
     this.emit('composerChanged');
   }
 
+  /**
+   * Resize a module's tile from its in-place editor's corner grip (world px).
+   * The view getters clamp to the module's min/max, so a raw write is safe.
+   * Emits the per-type event that rebuilds the tile frame (and so the pinned
+   * editor panel) — `graphChanged` only adds/removes whole tiles.
+   */
+  setTileSize(moduleId: string, w: number, h: number): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (!mod) return;
+    mod.w = Math.max(80, w);
+    mod.h = Math.max(80, h);
+    this.emit(
+      mod.type === 'composer'
+        ? 'composerChanged'
+        : mod.type === 'visualizer'
+          ? 'visualizerChanged'
+          : 'graphChanged',
+    );
+  }
+
   /** Knob/Slider module shown in the range-config popup; null = closed. */
   rangeConfigOpen: string | null = null;
 
@@ -578,6 +624,12 @@ export class AppState {
   noteFlash = new Map<string, number>();
   /** Per-keyboard-module held voices: moduleId → (key → voiceId). */
   private heldVoices = new Map<string, Map<string, number>>();
+  /** TTS modules currently synthesizing (face shows a spinner). */
+  private ttsSynth = new Set<string>();
+  /** Last synthesis error per TTS module (face shows it). */
+  private ttsErrors = new Map<string, string>();
+  /** In-flight voice init/download progress per TTS module (message + 0..1). */
+  private ttsDownload = new Map<string, { message: string; fraction: number }>();
   /**
    * Sample PCM keyed by owning module id — deliberately outside the graph
    * so undo snapshots stay small (see core/samples.ts).
@@ -634,6 +686,8 @@ export class AppState {
       this.wtData = status.wtData ?? {};
       this.stringData = status.stringData ?? {};
       this.grainData = status.grainData ?? {};
+      this.modVals = status.modVals ?? {};
+      this.modVersion++;
       for (const [id, feed] of Object.entries(this.visData)) this.visHub.pushStatus(id, feed);
       const now = performance.now();
       for (const id of status.noteActivity) this.noteFlash.set(id, now);
@@ -734,6 +788,83 @@ export class AppState {
       channels.push(decoded.getChannelData(c).slice());
     }
     this.setSample(moduleId, { name: file.name, sampleRate: decoded.sampleRate, channels }, pad);
+  }
+
+  // -- Text to Speech (TTS_PLAN.md) ----------------------------------------
+
+  /** Is this TTS module currently synthesizing? */
+  ttsBusy(moduleId: string): boolean {
+    return this.ttsSynth.has(moduleId);
+  }
+
+  /** Last synthesis error for this TTS module, if any. */
+  ttsError(moduleId: string): string | undefined {
+    return this.ttsErrors.get(moduleId);
+  }
+
+  /** In-flight voice init/download progress, if a synthesis is running. */
+  ttsProgress(moduleId: string): { message: string; fraction: number } | undefined {
+    return this.ttsDownload.get(moduleId);
+  }
+
+  /** Set a TTS module's text (clears the stale generated buffer flag). */
+  setTtsText(moduleId: string, text: string): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (!mod || mod.type !== 'tts') return;
+    mod.data = { ...mod.data, text, generated: false };
+    this.emit('ttsChanged');
+  }
+
+  /** Set a TTS module's voice/accent (clears the stale generated buffer flag). */
+  setTtsVoice(moduleId: string, voiceId: string): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (!mod || mod.type !== 'tts') return;
+    mod.data = { ...mod.data, voiceId, generated: false };
+    this.emit('ttsChanged');
+  }
+
+  /** Synthesize the module's text into a playable buffer (cached as a sample). */
+  async generateTts(moduleId: string): Promise<void> {
+    const mod = this.graph.modules.get(moduleId);
+    if (!mod || mod.type !== 'tts') return;
+    const text = ((mod.data?.text as string) ?? '').trim();
+    if (!text) return;
+    const voiceId = (mod.data?.voiceId as string) ?? '';
+    const speed = mod.params.speed ?? 1;
+    await this.ensureEngine();
+    this.ttsErrors.delete(moduleId);
+    this.ttsSynth.add(moduleId);
+    this.emit('ttsChanged');
+    try {
+      // piper-plus downloads + caches the model on first use, reporting init
+      // progress; synthesis then runs on the cached model.
+      const pcm = await synthesizeSpeech(text, voiceId, speed, (message, fraction) => {
+        this.ttsDownload.set(moduleId, { message, fraction });
+        this.emit('ttsChanged');
+      });
+      const name = text.length > 24 ? `${text.slice(0, 24)}…` : text;
+      this.setSample(moduleId, { name, sampleRate: pcm.sampleRate, channels: pcm.channels });
+      mod.data = { ...mod.data, generated: true };
+    } catch (e) {
+      this.ttsErrors.set(moduleId, e instanceof Error ? e.message : 'synthesis failed');
+    } finally {
+      this.ttsDownload.delete(moduleId);
+      this.ttsSynth.delete(moduleId);
+      this.emit('ttsChanged');
+    }
+  }
+
+  /** Trigger the generated speech at root pitch + emit its text for karaoke. */
+  speakTts(moduleId: string): void {
+    const mod = this.graph.modules.get(moduleId);
+    if (!mod || mod.type !== 'tts' || !this.samples.has(moduleId)) return;
+    void this.ensureEngine();
+    const root = Math.round(mod.params.root ?? 60);
+    const voiceId = this.engine.allocVoiceId();
+    this.engine.noteOnModule(moduleId, voiceId, root, 0.9);
+    this.noteFlash.set(moduleId, performance.now());
+    const text = (mod.data?.text as string) ?? '';
+    if (text) this.emitText(moduleId, text, true);
   }
 
   // -- Sample editor (PRD §8.2) --------------------------------------------
@@ -2117,6 +2248,9 @@ export class AppState {
     const samples = [...this.samples.entries()]
       .map(([key, sample]) => ({ ...parseSampleKey(key), sample }))
       .filter(({ moduleId }) => this.graph.modules.has(moduleId))
+      // TTS buffers are regenerable from text+voiceId (TTS_PLAN.md) — never
+      // embed them; the module rehydrates via Generate after load.
+      .filter(({ moduleId }) => this.graph.modules.get(moduleId)?.type !== 'tts')
       .map(({ moduleId, pad, sample }) => encodeSample(moduleId, sample, pad));
     // Only assets still referenced by some face.
     const referenced = new Set<string>();

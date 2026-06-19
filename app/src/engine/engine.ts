@@ -70,6 +70,7 @@ const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
   'resonator',
   'addosc',
   'granular',
+  'tts',
   'notenames',
 ]);
 

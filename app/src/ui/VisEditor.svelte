@@ -47,7 +47,33 @@
     panelLeft = r.left + INSET_X * r.scale;
     panelTop = r.top + INSET_T * r.scale;
   }
+
+  /** Drag the bottom-right grip to resize the underlying visualizer tile. */
+  function dragResize(e: PointerEvent): void {
+    if (!moduleId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    appState.beginUndoable();
+    const id = moduleId;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startW = panelW;
+    const startH = panelH;
+    const onMove = (ev: PointerEvent) => {
+      const w = startW + (ev.clientX - startX) / scale + INSET_X * 2;
+      const h = startH + (ev.clientY - startY) / scale + INSET_T + INSET_B;
+      appState.setTileSize(id, w, h);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
   let graph = $state<VisGraphData>({ nodes: [], wires: [] });
+  let bgOn = $state(false);
+  let bgOpacity = $state(1);
   let selectedNode = $state<string | null>(null);
   let selectedWire = $state<string | null>(null);
   let svgEl = $state<SVGSVGElement>();
@@ -106,6 +132,21 @@
     const g = mod ? visGraphOf(mod.data) : null;
     // Deep copy so in-progress edits never alias state the renderer reads.
     graph = g ? structuredClone($state.snapshot(g) as VisGraphData) : { nodes: [], wires: [] };
+    bgOn = Boolean(mod?.data?.['bg']);
+    bgOpacity = (mod?.data?.['bgOpacity'] as number) ?? 1;
+  }
+
+  /** Send this visualizer to the window background (latest enabled takes over). */
+  function toggleBg(): void {
+    if (!moduleId) return;
+    bgOn = !bgOn;
+    appState.setBackgroundVisualizer(moduleId, bgOn);
+  }
+
+  function setBgOpacity(v: number): void {
+    if (!moduleId) return;
+    bgOpacity = v;
+    appState.setBackgroundOpacity(moduleId, v);
   }
 
   function apply(undoable = true): void {
@@ -578,6 +619,14 @@
     <div class="vised-bar">
       <span class="vised-title">Visual Graph</span>
       <span class="spacer"></span>
+      {#if bgOn}
+        <label class="bg-opacity" title="Background opacity">
+          <input type="range" min="0" max="1" step="0.01" value={bgOpacity} oninput={(e) => setBgOpacity(+e.currentTarget.value)} />
+        </label>
+      {/if}
+      <button class="bg-toggle" class:on={bgOn} onclick={toggleBg} title="Paint this visualizer full-window behind the patch (latest enabled wins)">
+        {bgOn ? '🖼 Background ✓' : '🖼 Send to Background'}
+      </button>
       <button onclick={() => moduleId && appState.openVisualizer(moduleId)} title="Big view">⛶</button>
       <button onclick={close} title="Close (Esc)">✕</button>
     </div>
@@ -829,6 +878,11 @@
         {/if}
       </div>
     </div>
+    <div
+      class="resize-grip"
+      title="Drag to resize the editor"
+      onpointerdown={dragResize}
+    ></div>
   </div>
 {/if}
 
@@ -861,6 +915,18 @@
     font-weight: 700;
     font-size: 13px;
     color: var(--text, #e8e8ee);
+  }
+  .bg-toggle.on {
+    background: var(--accent);
+    color: #1a1a20;
+    font-weight: 600;
+  }
+  .bg-opacity {
+    display: flex;
+    align-items: center;
+  }
+  .bg-opacity input[type='range'] {
+    width: 80px;
   }
   .spacer {
     flex: 1;
@@ -895,9 +961,40 @@
     flex: 1;
     overflow: auto;
     background: var(--graph-bg);
+    /* Always show the bars (macOS hides overlay scrollbars otherwise). */
+    scrollbar-width: thin;
+    scrollbar-color: var(--text-dim, #888) transparent;
+  }
+  .graph-scroll::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+  }
+  .graph-scroll::-webkit-scrollbar-thumb {
+    background: var(--text-dim, #888);
+    border-radius: 6px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  .graph-scroll::-webkit-scrollbar-track {
+    background: rgba(127, 127, 127, 0.12);
   }
   svg {
     display: block;
+  }
+  .resize-grip {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    width: 16px;
+    height: 16px;
+    cursor: nwse-resize;
+    z-index: 3;
+    background:
+      linear-gradient(135deg, transparent 0 50%, var(--text-dim, #888) 50% 60%, transparent 60% 70%, var(--text-dim, #888) 70% 80%, transparent 80%);
+    opacity: 0.6;
+  }
+  .resize-grip:hover {
+    opacity: 1;
   }
   .node .body {
     fill: var(--control);

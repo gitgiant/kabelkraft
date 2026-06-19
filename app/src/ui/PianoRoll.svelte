@@ -529,7 +529,13 @@
 
   function clampScrollY(v: number): number {
     const { h } = gridSize();
-    return Math.min(128 * rowH - h, Math.max(0, v));
+    return Math.min(Math.max(0, 128 * rowH - h), Math.max(0, v));
+  }
+
+  /** Horizontal scroll range: the clip's full width minus the visible grid. */
+  function clampScrollX(v: number): number {
+    const { w } = gridSize();
+    return Math.min(Math.max(0, clipLength * zoomX - w), Math.max(0, v));
   }
 
   function onGridWheel(e: WheelEvent) {
@@ -539,16 +545,81 @@
       // Ctrl + wheel: zoom the X axis around the cursor.
       const beat = xToBeat(x);
       zoomX = Math.min(480, Math.max(8, zoomX * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
-      scrollX = Math.max(0, beat * zoomX - x);
+      scrollX = clampScrollX(beat * zoomX - x);
     } else if (e.altKey) {
       const pitchAnchor = (y + scrollY) / rowH;
       rowH = Math.min(28, Math.max(6, rowH * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
       scrollY = clampScrollY(pitchAnchor * rowH - y);
     } else if (e.shiftKey) {
-      scrollX = Math.max(0, scrollX + (e.deltaY + e.deltaX));
+      // Shift + wheel: force horizontal (mouse-wheel users).
+      scrollX = clampScrollX(scrollX + (e.deltaY + e.deltaX));
     } else {
+      // Trackpad two-finger gestures arrive as deltaX/deltaY — scroll both axes.
       scrollY = clampScrollY(scrollY + e.deltaY);
+      if (e.deltaX) scrollX = clampScrollX(scrollX + e.deltaX);
     }
+  }
+
+  // -- scrollbars + corner resize grip ---------------------------------------
+
+  /** Thumb geometry for an overlay scrollbar (all logical, pre-scale px). */
+  function barGeom(content: number, view: number, scroll: number) {
+    const track = Math.max(0, view);
+    if (content <= view + 0.5) return { show: false, size: track, pos: 0, track };
+    const size = Math.max(24, (view / content) * track);
+    const range = content - view;
+    const pos = range > 0 ? (scroll / range) * (track - size) : 0;
+    return { show: true, size, pos, track };
+  }
+
+  const vBar = $derived(barGeom(128 * rowH, Math.max(50, bodyH), scrollY));
+  const hBar = $derived(barGeom(clipLength * zoomX, Math.max(50, bodyW - KEYS_W - 2), scrollX));
+
+  /** Drag a scrollbar thumb; maps track px (descaled) back to scroll px. */
+  function dragBar(e: PointerEvent, axis: 'x' | 'y') {
+    e.preventDefault();
+    e.stopPropagation();
+    const startClient = axis === 'x' ? e.clientX : e.clientY;
+    const startScroll = axis === 'x' ? scrollX : scrollY;
+    const bar = axis === 'x' ? hBar : vBar;
+    const content = axis === 'x' ? clipLength * zoomX : 128 * rowH;
+    const view = bar.track;
+    const range = content - view;
+    const travel = bar.track - bar.size;
+    const onMove = (ev: PointerEvent) => {
+      const d = ((axis === 'x' ? ev.clientX : ev.clientY) - startClient) / scale;
+      const next = travel > 0 ? startScroll + (d / travel) * range : startScroll;
+      if (axis === 'x') scrollX = clampScrollX(next);
+      else scrollY = clampScrollY(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  /** Drag the bottom-right grip to resize the underlying composer tile. */
+  function dragResize(e: PointerEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    appState.beginUndoable();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startW = panelW;
+    const startH = panelH;
+    const onMove = (ev: PointerEvent) => {
+      const w = startW + (ev.clientX - startX) / scale + INSET_X * 2;
+      const h = startH + (ev.clientY - startY) / scale + INSET_T + INSET_B;
+      appState.setTileSize(moduleId, w, h);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
   }
 
   // -- keys column: click to preview ----------------------------------------
@@ -959,6 +1030,24 @@
           oncontextmenu={(e) => e.preventDefault()}
           title="draw: click · delete: right-click · select: ctrl-drag / shift-click · pan: middle-drag · zoom: ctrl-wheel (alt = rows)"
         ></canvas>
+        {#if vBar.show}
+          <div class="scrollbar v" title="Scroll pitches">
+            <div
+              class="thumb"
+              style="top:{vBar.pos}px;height:{vBar.size}px"
+              onpointerdown={(e) => dragBar(e, 'y')}
+            ></div>
+          </div>
+        {/if}
+        {#if hBar.show}
+          <div class="scrollbar h" style="left:{KEYS_W + 2}px" title="Scroll time">
+            <div
+              class="thumb"
+              style="left:{hBar.pos}px;width:{hBar.size}px"
+              onpointerdown={(e) => dragBar(e, 'x')}
+            ></div>
+          </div>
+        {/if}
       </div>
 
       <div class="lane-row">
@@ -976,6 +1065,12 @@
           title="Drag to paint the selected per-note parameter"
         ></canvas>
       </div>
+
+      <div
+        class="resize-grip"
+        title="Drag to resize the editor"
+        onpointerdown={dragResize}
+      ></div>
     </div>
 
     {#if quantOpen}
@@ -1178,6 +1273,57 @@
     min-height: 0;
     gap: 2px;
     overflow: hidden;
+    position: relative;
+  }
+  .scrollbar {
+    position: absolute;
+    background: rgba(127, 127, 127, 0.12);
+    border-radius: 5px;
+    z-index: 2;
+  }
+  .scrollbar.v {
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: 9px;
+  }
+  .scrollbar.h {
+    right: 0;
+    bottom: 0;
+    height: 9px;
+  }
+  .scrollbar .thumb {
+    position: absolute;
+    background: var(--text-dim, #888);
+    opacity: 0.55;
+    border-radius: 5px;
+    cursor: grab;
+  }
+  .scrollbar.v .thumb {
+    left: 1px;
+    right: 1px;
+  }
+  .scrollbar.h .thumb {
+    top: 1px;
+    bottom: 1px;
+  }
+  .scrollbar .thumb:hover {
+    opacity: 0.85;
+  }
+  .resize-grip {
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    width: 16px;
+    height: 16px;
+    cursor: nwse-resize;
+    z-index: 3;
+    background:
+      linear-gradient(135deg, transparent 0 50%, var(--text-dim, #888) 50% 60%, transparent 60% 70%, var(--text-dim, #888) 70% 80%, transparent 80%);
+    opacity: 0.6;
+  }
+  .resize-grip:hover {
+    opacity: 1;
   }
   canvas {
     border-radius: 4px;

@@ -1,4 +1,5 @@
 import { Graphics } from 'pixi.js';
+import { appState } from '../../state';
 import type { ModuleView } from '../ModuleView';
 import type { FaceRenderer } from './types';
 
@@ -6,6 +7,9 @@ import type { FaceRenderer } from './types';
 export class SpectrumFace implements FaceRenderer {
   private g: Graphics | null = null;
   private rect = { x: 0, y: 0, w: 0, h: 0 };
+  /** Status version last drawn — gates the live (tilt-mod) redraw to ~30Hz. */
+  private lastModV = -1;
+  private wasModulated = false;
 
   build(view: ModuleView): void {
     view.buildParamFace({
@@ -20,6 +24,16 @@ export class SpectrumFace implements FaceRenderer {
     this.refresh(view);
   }
 
+  /** Redraw bars at the live modulated tilt when a mod wire drives it. */
+  live(view: ModuleView): void {
+    const isMod = appState.modVals[view.instance.id]?.tilt !== undefined;
+    if ((isMod || this.wasModulated) && appState.modVersion !== this.lastModV) {
+      this.lastModV = appState.modVersion;
+      this.wasModulated = isMod;
+      this.refresh(view);
+    }
+  }
+
   refresh(view: ModuleView): void {
     const g = this.g;
     if (!g) return;
@@ -28,7 +42,8 @@ export class SpectrumFace implements FaceRenderer {
     g.roundRect(x, y, w, h, 4).fill({ color: 0x0d0d14 }).stroke({ width: 1, color: 0x2a2a36 });
     const p = view.instance.params;
     const P = Math.max(1, Math.min(64, Math.round(Number(p.partials) || 16)));
-    const tExp = (Number(p.tilt) || 0) / 6.0206;
+    const tiltEff = appState.modVals[view.instance.id]?.tilt?.[0] ?? (Number(p.tilt) || 0);
+    const tExp = tiltEff / 6.0206;
     const b = Math.min(1, Math.max(0, Number(p.odd ?? 0.5))) * 2 - 1;
     const gains: number[] = [];
     let peak = 1e-4;

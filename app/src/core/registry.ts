@@ -7,6 +7,7 @@ import type { ModuleDef, ParamSpec } from './module';
 import { defaultNote } from './composer';
 import { ROOT_NAMES, SCALE_NAMES } from './scales';
 import { initVisGraph } from '../visual/migrate';
+import { DEFAULT_VOICE_ID } from './tts/voices';
 
 export {
   DRUM_BASE_NOTE,
@@ -272,31 +273,15 @@ const visualizer: ModuleDef = {
     { id: 'vout', label: 'Vis Out', type: 'visual', direction: 'out', description: 'This visualizer’s rendered frame; chain it into another visualizer’s Vis In.' },
     { id: 'tint', label: 'Tint', type: 'visual', direction: 'in', description: 'Wire a visualizer frame — accent colors on this tile take its derived color.' },
   ],
+  // Send-to-background (data.bg / data.bgOpacity, set from the visual editor)
+  // paints this visualizer full-window behind the patch; enabling one clears
+  // the others so the latest takes over. Kept in data, not params, so it stays
+  // off the tile's param band.
   params: [],
   customFace: true,
   defaultData: () => ({ graph: initVisGraph() }),
   width: 280,
   height: 280,
-};
-
-const bgVisual: ModuleDef = {
-  type: 'bgvisual',
-  name: 'Background',
-  category: 'visual',
-  description:
-    'Background sink: paints a wired visualizer frame across the whole app window, ' +
-    'behind the patch (the patch canvas goes transparent while it is on). Wire any ' +
-    'visualizer’s Vis Out into Vis In — layer/chain scenes upstream first. Opacity ' +
-    'fades it; turn On off to restore the normal canvas background.',
-  ports: [
-    { id: 'vin', label: 'Vis In', type: 'visual', direction: 'in', description: 'Visualizer frame to paint full-window behind the patch.' },
-  ],
-  params: [
-    { id: 'enabled', label: 'On', min: 0, max: 1, default: 1, options: ['off', 'on'], randomizable: false },
-    { id: 'opacity', label: 'Opacity', min: 0, max: 1, default: 1, randomizable: false },
-  ],
-  width: 200,
-  height: 130,
 };
 
 // TODO(intelligence): placeholder module — the face shows one AI prompt
@@ -890,6 +875,37 @@ const smpl: ModuleDef = {
   defaultData: () => ({ sampleName: '' }),
 };
 
+const tts: ModuleDef = {
+  type: 'tts',
+  name: 'Text to Speech',
+  category: 'component',
+  description:
+    'Speaks typed text with a local neural voice (Piper). Pick a voice/accent, type a line, ' +
+    'and Generate — the synthesized speech becomes a playable buffer. Speak triggers it; a Note ' +
+    'input transposes it (robot/talkbox) with an A/D/S/R amp envelope. Wire Text into a ' +
+    'Visualizer for karaoke. Voices download on first use and cache locally.',
+  ports: [
+    { id: 'notes', label: 'Notes', type: 'note', direction: 'in', description: 'Note input — transposes and triggers the spoken buffer.' },
+    audioOutPort('Synthesized speech output (stereo).'),
+    { id: 'out', label: 'Text', type: 'text', direction: 'out', description: 'The spoken text, emitted on Speak — wire into a Visualizer for karaoke.' },
+  ],
+  params: [
+    { id: 'root', label: 'Root', min: 24, max: 96, default: 60, randomizable: false },
+    { id: 'pitch', label: 'Pitch', min: -24, max: 24, default: 0, unit: 'st', randomizable: true },
+    { id: 'speed', label: 'Speed', min: 0.5, max: 2, default: 1, randomizable: false },
+    { id: 'voices', label: 'Voices', min: 1, max: 16, default: 4, randomizable: false },
+    { id: 'attack', label: 'Attack', min: 0.001, max: 4, default: 0.005, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'decay', label: 'Decay', min: 0.001, max: 4, default: 0.1, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'sustain', label: 'Sustain', min: 0, max: 1, default: 1, randomizable: true },
+    { id: 'release', label: 'Release', min: 0.001, max: 8, default: 0.2, unit: 's', curve: 'exp', randomizable: true },
+    { id: 'level', label: 'Level', min: 0, max: 1, default: 0.8, randomizable: false },
+    { id: 'pan', label: 'Pan', min: -1, max: 1, default: 0, randomizable: true },
+  ],
+  width: 250,
+  height: 320,
+  defaultData: () => ({ text: '', voiceId: DEFAULT_VOICE_ID, sampleName: '', generated: false }),
+};
+
 const wtosc: ModuleDef = {
   type: 'wtosc',
   name: 'Wavetable Osc',
@@ -1401,9 +1417,9 @@ const notenames: ModuleDef = {
 export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
   [
     transport, sequencer, arp, composer, notethru, lfo, envelope, random, keyboard, midiIn, midiOut,
-    voice, osc, fmosc, wtosc, smpl, pluck, resonator, addosc, granular, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
+    voice, osc, fmosc, wtosc, smpl, tts, pluck, resonator, addosc, granular, vcf, vca, knob, slider, xy, button, quantizer, sah, slew, cmath, modmatrix,
     delay, reverb, distortion, eq, peq, chorus, flanger, bitcrusher, compressor, ducker, mbcomp, limiterFx, modulator,
     mixer, recorder, audioInDef, audioOut, levels, visualizer,
-    stt, transporttext, textinput, lyrics, notenames, intelligence, bgVisual,
+    stt, transporttext, textinput, lyrics, notenames, intelligence,
   ].map((d) => [d.type, d]),
 );

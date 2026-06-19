@@ -117,10 +117,19 @@ const CLEAR_RGB_INT = (0x0c << 16) | (0x0c << 8) | 0x12;
 /** Per-container throttle, shared across views so duplicates don't double-sample. */
 const lastTintAt = new Map<string, number>();
 
+/**
+ * One animation epoch shared by every renderer instance. Each container can be
+ * drawn by several renderers at once (tile thumbnail, editor preview, window
+ * background) — a per-instance t0 made each its own clock, so the same scene
+ * ran out of phase between views. A shared epoch keeps `time` identical, so all
+ * views (and the music they react to) stay in sync.
+ */
+const VIS_EPOCH = performance.now();
+
 export class ContainerRenderer {
   private pool: TexturePool;
   private states = new NodeStateStore();
-  private readonly t0 = performance.now();
+  private readonly t0 = VIS_EPOCH;
   private lastTime = 0;
 
   /** UI hook: should this container's frame be averaged into a tint? */

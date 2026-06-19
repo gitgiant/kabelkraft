@@ -56,6 +56,7 @@ export type EngineModuleType =
   | 'resonator'
   | 'addosc'
   | 'granular'
+  | 'tts'
   | 'notenames';
 
 export interface EngineModuleSnapshot {
@@ -214,6 +215,12 @@ export interface StatusMessage {
   stringData?: Record<string, { s: Float32Array; a: number }>;
   /** Granular live grain cloud: flat [x, rate, phase] triples + grain count. */
   grainData?: Record<string, { g: Float32Array; c: number }>;
+  /**
+   * Live modulated param values: modVals[moduleId][paramId] = [cur, lo, hi] in
+   * native param units. Present only for params with a connected mod wire
+   * (voice-0). Drives knob arc+pointer animation + live displays.
+   */
+  modVals?: Record<string, Record<string, [number, number, number]>>;
   /** Module ids that emitted notes since the last post (for wire flashes). */
   noteActivity: string[];
   /** Transport position in beats (worklet is the clock while playing). */

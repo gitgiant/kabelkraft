@@ -115,6 +115,13 @@
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && appState.faceLearn) appState.cancelFaceLearn();
       else if (e.key === 'Escape' && groupId && !learning) cancel();
+      else if ((e.key === 'Delete' || e.key === 'Backspace') && groupId && !learning && selectedId) {
+        // Don't hijack the key while editing a field (inspector inputs, AI prompt…).
+        const t = e.target as HTMLElement | null;
+        if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+        e.preventDefault();
+        removeSelected();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => {
@@ -198,6 +205,37 @@
     if (el.kind === 'label' || el.kind === 'image') return false;
     if (el.kind === 'view') return !el.moduleId && !el.groupId;
     return !el.moduleId;
+  }
+
+  /**
+   * Shelf-pack all elements left-to-right, wrapping to new rows, to best-fit
+   * the panel without overlaps. Preserves array order (z-order) and rotation;
+   * grows the panel height if the content needs more room.
+   */
+  function autoArrange() {
+    if (!face.elements.length) return;
+    const pad = Math.max(8, face.grid);
+    const maxX = face.width - pad;
+    let x = pad;
+    let y = pad;
+    let rowH = 0;
+    for (const el of face.elements) {
+      // Reserve a little extra below for the caption line, if any.
+      const h = el.h + (el.label ? 14 : 0);
+      if (x > pad && x + el.w > maxX) {
+        // Wrap to the next shelf.
+        x = pad;
+        y += rowH + pad;
+        rowH = 0;
+      }
+      el.x = snapTo(x, face.grid, face.snap);
+      el.y = snapTo(y, face.grid, face.snap);
+      el.rot = undefined;
+      x += el.w + pad;
+      rowH = Math.max(rowH, h);
+    }
+    const needed = y + rowH + pad;
+    if (needed > face.height) face.height = Math.min(900, needed);
   }
 
   function removeSelected() {
@@ -436,6 +474,7 @@
           {#if face.bgAssetId}
             <button onclick={() => (face.bgAssetId = undefined)} title="Remove background image">✕ BG</button>
           {/if}
+          <button onclick={autoArrange} title="Pack all elements to best-fit the panel">⊟ Auto-arrange</button>
           <span class="spacer"></span>
           <button class="primary" onclick={save}>Save Face</button>
           <button onclick={cancel}>Cancel</button>

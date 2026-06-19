@@ -1359,7 +1359,17 @@ export class PatchCanvas {
   private onWheel(e: WheelEvent): void {
     e.preventDefault();
     const rect = this.app.canvas.getBoundingClientRect();
-    this.zoomAnchor = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const gx = e.clientX - rect.left;
+    const gy = e.clientY - rect.top;
+    // Wheel over a knob/fader adjusts the param instead of zooming the canvas.
+    const target = this.app.renderer.events.rootBoundary.hitTest(gx, gy) as
+      | (Container & { __wheel?: (dy: number, x: number, y: number) => void })
+      | null;
+    if (target?.__wheel) {
+      target.__wheel(e.deltaY, e.clientX, e.clientY);
+      return;
+    }
+    this.zoomAnchor = { x: gx, y: gy };
     const d = Math.max(-PatchCanvas.ZOOM_CLAMP, Math.min(PatchCanvas.ZOOM_CLAMP, e.deltaY));
     const factor = Math.exp(-d * PatchCanvas.ZOOM_K);
     this.zoomTarget = Math.min(

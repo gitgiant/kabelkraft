@@ -5,8 +5,8 @@
   import { FrameGate, clampVisDisplay, visDisplayOf } from '../visual/display';
   import { ContainerRenderer, graphSupported, webgpuAvailable } from '../visual/runtime';
 
-  // Paints the visualizer wired into the active bgvisual's Vis In across the
-  // whole canvas area, behind the patch. The PatchCanvas renderer is permanently
+  // Paints the visualizer that was Sent to Background (bg=1) across the whole
+  // canvas area, behind the patch. The PatchCanvas renderer is permanently
   // transparent (grey is its container's CSS background), so this canvas — z 0
   // behind it — simply shows through; opacity 0 hides it when inactive. Driven by
   // its own rAF like the pop-out loop: appState.visFrame(source) → render.

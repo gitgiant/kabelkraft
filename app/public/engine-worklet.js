@@ -171,6 +171,19 @@ class SmplModule {
   }
 }
 
+/**
+ * Text to Speech voice. Synthesis happens on the main thread (Piper via
+ * onnxruntime-web); the resulting PCM arrives through the same `sample` message
+ * path as the sampler, so playback (pitch, ADSR, polyphony, resample) is the
+ * SmplModule engine verbatim — only the buffer's origin differs.
+ */
+class TtsModule extends SmplModule {
+  constructor(id, params) {
+    super(id, params);
+    this.type = 'tts';
+  }
+}
+
 const LFO_SINE = 0;
 const LFO_TRIANGLE = 1;
 const LFO_SQUARE = 2;
@@ -246,6 +259,40 @@ function cwidth(v) {
 
 function makePolyIn() {
   return { lanes: 0, L: [], R: [] };
+}
+
+// --- Pure modulation helpers ---------------------------------------------
+// Each maps (base param(s), source value) → effective param value. Used by
+// render() AND reportMods() so the formula lives in exactly one place
+// (MOD_VIS_PLAN.md). Source values are control outputs in 0..1.
+function modVcfCutoff(cutoff, amt, m) {
+  return Math.min(18000, Math.max(20, cutoff * Math.pow(2, m * amt)));
+}
+function modVcaGain(level, cv) {
+  return level * Math.min(1, Math.max(0, cv));
+}
+function modOscPwm(pwm, pm) {
+  return Math.min(0.95, Math.max(0.05, pwm + pm));
+}
+function modFmIndex(index, im) {
+  return Math.max(0, index + im);
+}
+function modAdd01(x, d) {
+  return Math.min(1, Math.max(0, x + d));
+}
+function modAddTilt(tilt, tm) {
+  return tilt + tm * 24;
+}
+
+/**
+ * Build a [{paramId, cur, lo, hi}] report for one modulated param.
+ * `m` is the live source value (voice 0). lo/hi = helper at source extremes
+ * 0 and 1, sorted. Returns null when the mod input is unwired (m === undefined).
+ */
+function modReport(paramId, fn, m) {
+  if (m === undefined) return null;
+  const a = fn(0), b = fn(1);
+  return { paramId, cur: fn(m), lo: Math.min(a, b), hi: Math.max(a, b) };
 }
 
 function ensureLanes(mod, n) {
@@ -561,8 +608,7 @@ class OscModule {
       const phaseStep = freq / sampleRate;
       const subStep = phaseStep * subStepMul;
       const pm = cval(pwmModIn, v);
-      let pwm = pwmBase + (pm !== undefined ? pm : 0);
-      if (pwm < 0.05) pwm = 0.05; else if (pwm > 0.95) pwm = 0.95;
+      const pwm = modOscPwm(pwmBase, pm !== undefined ? pm : 0);
       const L = this.polyL[v];
       let ph = this.phases[v];
       let sub = this.subPhases[v];
@@ -592,6 +638,12 @@ class OscModule {
       this.subPhases[v] = sub;
     }
     this.outR.set(this.outL);
+  }
+
+  reportMods() {
+    const pm = cval(this.controlIn.pwmMod, 0);
+    const r = modReport('pwm', (x) => modOscPwm(this.params.pwm ?? 0.5, x), pm);
+    return r ? [r] : [];
   }
 }
 
@@ -643,8 +695,7 @@ class FmoscModule {
       const carStep = carFreq / sampleRate;
       const modStep = (carFreq * ratio) / sampleRate;
       const im = cval(idxModIn, v);
-      let index = indexBase + (im !== undefined ? im : 0);
-      if (index < 0) index = 0;
+      const index = modFmIndex(indexBase, im !== undefined ? im : 0);
       const fmBuf = fm.lanes > 0 ? fm.L[Math.min(v, fm.lanes - 1)] : SILENT_BLOCK;
       const L = this.polyL[v];
       let carPh = this.carPhases[v];
@@ -680,6 +731,12 @@ class FmoscModule {
       this.lastMod[v] = last;
     }
     this.outR.set(this.outL);
+  }
+
+  reportMods() {
+    const im = cval(this.controlIn.idxMod, 0);
+    const r = modReport('index', (x) => modFmIndex(this.params.index ?? 1, x), im);
+    return r ? [r] : [];
   }
 }
 
@@ -797,9 +854,9 @@ class WtoscModule {
       const phaseStep = freq / sampleRate;
       const subStep = phaseStep * subStepMul;
       const pm = cval(posModIn, v);
-      const posNorm = Math.min(1, Math.max(0, wtPos + (pm !== undefined ? pm : 0)));
+      const posNorm = modAdd01(wtPos, pm !== undefined ? pm : 0);
       const mmod = cval(morphModIn, v);
-      const morph = wtB ? Math.min(1, Math.max(0, (p.morph ?? 0) + (mmod !== undefined ? mmod : 0))) : 0;
+      const morph = wtB ? modAdd01(p.morph ?? 0, mmod !== undefined ? mmod : 0) : 0;
       // Per-table frame interpolation setup (constant across the block).
       const aPos = posNorm * (wtA.frames - 1);
       const aF0 = Math.floor(aPos), aF1 = Math.min(wtA.frames - 1, aF0 + 1), aFrac = aPos - aF0;
@@ -844,6 +901,16 @@ class WtoscModule {
     }
     this.outR.set(this.outL);
   }
+
+  reportMods() {
+    const p = this.params;
+    const out = [];
+    const rp = modReport('wtPos', (x) => modAdd01(p.wtPos ?? 0, x), cval(this.controlIn.posMod, 0));
+    if (rp) out.push(rp);
+    const rm = modReport('morph', (x) => modAdd01(p.morph ?? 0, x), cval(this.controlIn.morphMod, 0));
+    if (rm) out.push(rm);
+    return out;
+  }
 }
 
 /** Multimode filter component: Chamberlin SVF per voice lane (mirrors the Synth's). */
@@ -886,7 +953,7 @@ class VcfModule {
       const srcL = pin.lanes > 0 ? pin.L[v] : SILENT_BLOCK;
       const srcR = pin.lanes > 0 ? pin.R[v] : SILENT_BLOCK;
       const m = cval(modIn, v);
-      const cutEff = Math.min(18000, Math.max(20, cutoff * (m !== undefined ? Math.pow(2, m * amt) : 1)));
+      const cutEff = modVcfCutoff(cutoff, amt, m ?? 0);
       const f = Math.min(fMax, 2 * Math.sin((Math.PI * cutEff) / (2 * sampleRate)));
       const st = this.state[v];
       const L = this.polyL[v];
@@ -908,6 +975,12 @@ class VcfModule {
         this.outR[i] += R[i];
       }
     }
+  }
+
+  reportMods() {
+    const p = this.params;
+    const r = modReport('cutoff', (x) => modVcfCutoff(p.cutoff ?? 1200, p.amt ?? 0, x), cval(this.controlIn.mod, 0));
+    return r ? [r] : [];
   }
 }
 
@@ -940,7 +1013,7 @@ class VcaModule {
       const srcL = pin.lanes > 0 ? pin.L[v] : SILENT_BLOCK;
       const srcR = pin.lanes > 0 ? pin.R[v] : SILENT_BLOCK;
       const cv = cval(cvIn, v);
-      const g = level * (cv !== undefined ? Math.min(1, Math.max(0, cv)) : 1);
+      const g = cv !== undefined ? modVcaGain(level, cv) : level;
       const L = this.polyL[v];
       const R = this.polyR[v];
       for (let i = 0; i < blockSize; i++) {
@@ -950,6 +1023,12 @@ class VcaModule {
         this.outR[i] += R[i];
       }
     }
+  }
+
+  reportMods() {
+    const cv = cval(this.controlIn.cv, 0);
+    const r = modReport('level', (x) => modVcaGain(this.params.level ?? 1, x), cv);
+    return r ? [r] : [];
   }
 }
 
@@ -1226,7 +1305,7 @@ class AddoscModule {
       const base = lanes > 0 ? pitchIn[v] * 127 : pitchIn !== undefined ? pitchIn * 127 : 60;
       const f0 = 440 * Math.pow(2, (base + offs - 69) / 12);
       const tm = cval(tiltModIn, v);
-      const tExp = (tilt + (tm !== undefined ? tm * 24 : 0)) / 6.0206;
+      const tExp = modAddTilt(tilt, tm !== undefined ? tm : 0) / 6.0206;
       let gsum = 0, active = 0;
       for (let h = 1; h <= P; h++) {
         const fh = f0 * h * (1 + inharm * 0.0015 * h * (h - 1));
@@ -1255,6 +1334,12 @@ class AddoscModule {
       this.polyR[v].set(L);
     }
     this.outR.set(this.outL);
+  }
+
+  reportMods() {
+    const tm = cval(this.controlIn.tiltMod, 0);
+    const r = modReport('tilt', (x) => modAddTilt(this.params.tilt ?? -6, x), tm);
+    return r ? [r] : [];
   }
 }
 
@@ -1326,7 +1411,7 @@ class GranularModule {
     if (blen < 16) { this.dispCount = 0; return; }
 
     const root = p.root ?? 60;
-    const posN = Math.min(1, Math.max(0, (p.pos ?? 0) + (cval(this.controlIn.posMod, 0) ?? 0)));
+    const posN = modAdd01(p.pos ?? 0, cval(this.controlIn.posMod, 0) ?? 0);
     const grainLen = Math.max(64, Math.floor(Math.max(5, p.size ?? 80) * 0.001 * sampleRate));
     const overlap = Math.max(1, Math.min(8, p.density ?? 4));
     const spray = Math.max(0, p.spray ?? 0);
@@ -1374,6 +1459,12 @@ class GranularModule {
       k++;
     }
     this.dispCount = k;
+  }
+
+  reportMods() {
+    const pm = cval(this.controlIn.posMod, 0);
+    const r = modReport('pos', (x) => modAdd01(this.params.pos ?? 0, x), pm);
+    return r ? [r] : [];
   }
 
   _spawn(pitch, root, posN, blen, grainLen, spray, jitter, spread, srcRate) {
@@ -3260,6 +3351,10 @@ class EngineProcessor extends AudioWorkletProcessor {
             const inst = new SmplModule(m.id, m.params);
             inst.host = this;
             next.set(m.id, inst);
+          } else if (m.type === 'tts') {
+            const inst = new TtsModule(m.id, m.params);
+            inst.host = this;
+            next.set(m.id, inst);
           } else if (m.type === 'wtosc') {
             next.set(m.id, new WtoscModule(m.id, m.params));
           } else if (m.type === 'levels') {
@@ -3439,7 +3534,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       }
       case 'sample': {
         const mod = this.modules.get(msg.moduleId);
-        if (mod && mod.type === 'smpl') mod.setSample(msg.sampleRate, msg.channels, msg.loopStart, msg.loopEnd);
+        if (mod && (mod.type === 'smpl' || mod.type === 'tts')) mod.setSample(msg.sampleRate, msg.channels, msg.loopStart, msg.loopEnd);
         else if (mod && mod.type === 'wtosc') mod.setWavetable(msg.channels, msg.pad);
         else if (mod && mod.type === 'granular') mod.setSample(msg.sampleRate, msg.channels);
         break;
@@ -3948,9 +4043,18 @@ class EngineProcessor extends AudioWorkletProcessor {
     const wtData = {};
     const stringData = {};
     const grainData = {};
+    const modVals = {};
     for (const mod of this.modules.values()) {
       if (mod.type === 'sequencer') seqSteps[mod.id] = mod.currentStep;
       if (mod.value !== undefined) controlValues[mod.id] = mod.value;
+      if (mod.reportMods) {
+        const reps = mod.reportMods();
+        if (reps.length > 0) {
+          const m = {};
+          for (const r of reps) m[r.paramId] = [r.cur, r.lo, r.hi];
+          modVals[mod.id] = m;
+        }
+      }
       if (mod.grDb !== undefined) gainReduction[mod.id] = mod.grDb;
       if (mod.type === 'peq') spectra[mod.id] = mod.spectrum();
       if (mod.type === 'visualizer') visData[mod.id] = mod.visData();
@@ -3975,6 +4079,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       wtData,
       stringData,
       grainData,
+      modVals,
       noteActivity: [...this.noteActivity],
       songPosition: this.transport.posBeats,
       perf,
