@@ -8,6 +8,7 @@
 
 import type { Graph } from '../core/graph';
 import type { TransportState } from '../core/types';
+import { ENGINE_MODULE_TYPES } from '../core/registry';
 import type {
   EngineMessage,
   EngineModuleSnapshot,
@@ -18,61 +19,6 @@ import type {
   StatusMessage,
   WorkletMessage,
 } from './messages';
-
-const ENGINE_MODULE_TYPES = new Set<EngineModuleType>([
-  'synth',
-  'sampler',
-  'drum',
-  'audioIn',
-  'audioOut',
-  'levels',
-  'sequencer',
-  'arp',
-  'composer',
-  'notethru',
-  'lfo',
-  'delay',
-  'reverb',
-  'distortion',
-  'chorus',
-  'flanger',
-  'bitcrusher',
-  'compressor',
-  'peq',
-  'mbcomp',
-  'midiIn',
-  'midiOut',
-  'visualizer',
-  'limiter',
-  'modulator',
-  'envelope',
-  'random',
-  'eq',
-  'mixer',
-  'recorder',
-  'voice',
-  'osc',
-  'fmosc',
-  'wtosc',
-  'smpl',
-  'vcf',
-  'vca',
-  'knob',
-  'slider',
-  'xy',
-  'button',
-  'quantizer',
-  'sah',
-  'slew',
-  'cmath',
-  'modmatrix',
-  'pluck',
-  'resonator',
-  'addosc',
-  'granular',
-  'tts',
-  'notenames',
-]);
 
 export type StatusListener = (status: StatusMessage) => void;
 export type RecordDataListener = (data: RecordDataMessage) => void;

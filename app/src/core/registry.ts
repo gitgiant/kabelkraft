@@ -1423,3 +1423,36 @@ export const MODULE_DEFS: Map<string, ModuleDef> = new Map(
     stt, transporttext, textinput, lyrics, notenames, intelligence,
   ].map((d) => [d.type, d]),
 );
+
+/**
+ * The single source of truth for which module types have a DSP implementation
+ * in the audio worklet (PRD §16). Everything that needs the "is this engine-
+ * side?" answer derives from this one list:
+ *   - `EngineModuleType` (the protocol type in engine/messages.ts) = its members,
+ *   - `ENGINE_MODULE_TYPES` (engine.ts's syncGraph filter) = a Set of it,
+ *   - the worklet's MODULE_FACTORIES keys are held in parity by
+ *     engine/worklet-types.test.ts.
+ * Never hand-add a parallel list — extend this array and the worklet factory,
+ * and the parity test guards the seam. Order mirrors the registry grouping
+ * above for readability; it is not load-bearing.
+ */
+export const ENGINE_TYPES = [
+  // generators / voices
+  'voice', 'osc', 'fmosc', 'wtosc', 'smpl', 'tts', 'pluck', 'resonator', 'addosc', 'granular',
+  // data / control sources
+  'sequencer', 'arp', 'composer', 'notethru', 'lfo', 'envelope', 'random',
+  'knob', 'slider', 'button', 'xy', 'quantizer', 'sah', 'slew', 'cmath', 'modmatrix',
+  // filters / amps
+  'vcf', 'vca',
+  // effects
+  'delay', 'reverb', 'distortion', 'eq', 'peq', 'chorus', 'flanger', 'bitcrusher',
+  'compressor', 'ducker', 'mbcomp', 'limiter', 'modulator',
+  // io / routing / meters
+  'mixer', 'recorder', 'audioIn', 'audioOut', 'levels', 'visualizer', 'notenames', 'midiIn', 'midiOut',
+] as const;
+
+/** Module types the audio worklet implements; carried on every engine snapshot. */
+export type EngineModuleType = (typeof ENGINE_TYPES)[number];
+
+/** Membership form for engine.ts's syncGraph filter. */
+export const ENGINE_MODULE_TYPES: ReadonlySet<EngineModuleType> = new Set(ENGINE_TYPES);

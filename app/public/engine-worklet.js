@@ -3308,6 +3308,74 @@ class MixerModule {
   }
 }
 
+/**
+ * Type → DSP-instance factory. The single source of which module types this
+ * worklet handles; replaces the old 50-arm if/else dispatch. Each entry has a
+ * uniform (snapshot, host) signature and absorbs the few irregular cases:
+ *   - smpl/tts/notethru wire `host` after construction,
+ *   - audioIn/sequencer/composer take the module's `data` blob,
+ *   - knob/slider/button share ControlSourceModule, keyed by `m.type`.
+ * Object.keys(MODULE_FACTORIES) must equal registry ENGINE_TYPES — enforced by
+ * src/engine/worklet-types.test.ts (drift fails the build, not silently at run).
+ */
+const MODULE_FACTORIES = {
+  // generators / voices
+  voice: (m) => new VoiceModule(m.id, m.params),
+  osc: (m) => new OscModule(m.id, m.params),
+  fmosc: (m) => new FmoscModule(m.id, m.params),
+  wtosc: (m) => new WtoscModule(m.id, m.params),
+  smpl: (m, h) => { const i = new SmplModule(m.id, m.params); i.host = h; return i; },
+  tts: (m, h) => { const i = new TtsModule(m.id, m.params); i.host = h; return i; },
+  pluck: (m) => new PluckModule(m.id, m.params),
+  resonator: (m) => new ResonatorModule(m.id, m.params),
+  addosc: (m) => new AddoscModule(m.id, m.params),
+  granular: (m) => new GranularModule(m.id, m.params),
+  // data / control sources
+  sequencer: (m) => new SequencerModule(m.id, m.params, m.data),
+  arp: (m) => new ArpModule(m.id, m.params),
+  composer: (m) => new ComposerModule(m.id, m.params, m.data),
+  notethru: (m, h) => { const i = new NotethruModule(m.id, m.params); i.host = h; return i; },
+  lfo: (m) => new LfoModule(m.id, m.params),
+  envelope: (m) => new EnvelopeModule(m.id, m.params),
+  random: (m) => new RandomModule(m.id, m.params),
+  knob: (m) => new ControlSourceModule(m.id, m.params, m.type),
+  slider: (m) => new ControlSourceModule(m.id, m.params, m.type),
+  button: (m) => new ControlSourceModule(m.id, m.params, m.type),
+  xy: (m) => new XyModule(m.id, m.params),
+  quantizer: (m) => new QuantizerModule(m.id, m.params),
+  sah: (m) => new SahModule(m.id, m.params),
+  slew: (m) => new SlewModule(m.id, m.params),
+  cmath: (m) => new CmathModule(m.id, m.params),
+  modmatrix: (m) => new ModMatrixModule(m.id, m.params),
+  // filters / amps
+  vcf: (m) => new VcfModule(m.id, m.params),
+  vca: (m) => new VcaModule(m.id, m.params),
+  // effects
+  delay: (m) => new DelayModule(m.id, m.params),
+  reverb: (m) => new ReverbModule(m.id, m.params),
+  distortion: (m) => new DistortionModule(m.id, m.params),
+  eq: (m) => new EqModule(m.id, m.params),
+  peq: (m) => new PeqModule(m.id, m.params),
+  chorus: (m) => new ChorusModule(m.id, m.params),
+  flanger: (m) => new FlangerModule(m.id, m.params),
+  bitcrusher: (m) => new BitcrusherModule(m.id, m.params),
+  compressor: (m) => new CompressorModule(m.id, m.params),
+  ducker: (m) => new DuckerModule(m.id, m.params),
+  mbcomp: (m) => new MultibandModule(m.id, m.params),
+  limiter: (m) => new LimiterModule(m.id, m.params),
+  modulator: (m) => new ModulatorModule(m.id, m.params),
+  // io / routing / meters
+  mixer: (m) => new MixerModule(m.id, m.params),
+  recorder: (m) => new RecorderModule(m.id, m.params),
+  audioIn: (m) => new AudioInModule(m.id, m.params, m.data),
+  audioOut: (m) => new AudioOutModule(m.id, m.params),
+  levels: (m) => new LevelsModule(m.id, m.params),
+  visualizer: (m) => new VisualizerModule(m.id, m.params),
+  notenames: (m) => new NotenamesModule(m.id, m.params),
+  midiIn: (m) => new MidiInModule(m.id, m.params),
+  midiOut: (m) => new MidiOutModule(m.id, m.params),
+};
+
 class EngineProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -3347,108 +3415,12 @@ class EngineProcessor extends AudioWorkletProcessor {
             existing.params = m.params; // keep voice/limiter/step state across rewires
             if (m.data) existing.data = m.data;
             next.set(m.id, existing);
-          } else if (m.type === 'smpl') {
-            const inst = new SmplModule(m.id, m.params);
-            inst.host = this;
-            next.set(m.id, inst);
-          } else if (m.type === 'tts') {
-            const inst = new TtsModule(m.id, m.params);
-            inst.host = this;
-            next.set(m.id, inst);
-          } else if (m.type === 'wtosc') {
-            next.set(m.id, new WtoscModule(m.id, m.params));
-          } else if (m.type === 'levels') {
-            next.set(m.id, new LevelsModule(m.id, m.params));
-          } else if (m.type === 'visualizer') {
-            next.set(m.id, new VisualizerModule(m.id, m.params));
-          } else if (m.type === 'notenames') {
-            next.set(m.id, new NotenamesModule(m.id, m.params));
-          } else if (m.type === 'audioIn') {
-            next.set(m.id, new AudioInModule(m.id, m.params, m.data));
-          } else if (m.type === 'audioOut') {
-            next.set(m.id, new AudioOutModule(m.id, m.params));
-          } else if (m.type === 'lfo') {
-            next.set(m.id, new LfoModule(m.id, m.params));
-          } else if (m.type === 'sequencer') {
-            next.set(m.id, new SequencerModule(m.id, m.params, m.data));
-          } else if (m.type === 'arp') {
-            next.set(m.id, new ArpModule(m.id, m.params));
-          } else if (m.type === 'composer') {
-            next.set(m.id, new ComposerModule(m.id, m.params, m.data));
-          } else if (m.type === 'notethru') {
-            const inst = new NotethruModule(m.id, m.params);
-            inst.host = this;
-            next.set(m.id, inst);
-          } else if (m.type === 'delay') {
-            next.set(m.id, new DelayModule(m.id, m.params));
-          } else if (m.type === 'reverb') {
-            next.set(m.id, new ReverbModule(m.id, m.params));
-          } else if (m.type === 'distortion') {
-            next.set(m.id, new DistortionModule(m.id, m.params));
-          } else if (m.type === 'eq') {
-            next.set(m.id, new EqModule(m.id, m.params));
-          } else if (m.type === 'chorus') {
-            next.set(m.id, new ChorusModule(m.id, m.params));
-          } else if (m.type === 'flanger') {
-            next.set(m.id, new FlangerModule(m.id, m.params));
-          } else if (m.type === 'bitcrusher') {
-            next.set(m.id, new BitcrusherModule(m.id, m.params));
-          } else if (m.type === 'compressor') {
-            next.set(m.id, new CompressorModule(m.id, m.params));
-          } else if (m.type === 'ducker') {
-            next.set(m.id, new DuckerModule(m.id, m.params));
-          } else if (m.type === 'limiter') {
-            next.set(m.id, new LimiterModule(m.id, m.params));
-          } else if (m.type === 'modulator') {
-            next.set(m.id, new ModulatorModule(m.id, m.params));
-          } else if (m.type === 'peq') {
-            next.set(m.id, new PeqModule(m.id, m.params));
-          } else if (m.type === 'mbcomp') {
-            next.set(m.id, new MultibandModule(m.id, m.params));
-          } else if (m.type === 'midiIn') {
-            next.set(m.id, new MidiInModule(m.id, m.params));
-          } else if (m.type === 'midiOut') {
-            next.set(m.id, new MidiOutModule(m.id, m.params));
-          } else if (m.type === 'mixer') {
-            next.set(m.id, new MixerModule(m.id, m.params));
-          } else if (m.type === 'envelope') {
-            next.set(m.id, new EnvelopeModule(m.id, m.params));
-          } else if (m.type === 'random') {
-            next.set(m.id, new RandomModule(m.id, m.params));
-          } else if (m.type === 'recorder') {
-            next.set(m.id, new RecorderModule(m.id, m.params));
-          } else if (m.type === 'voice') {
-            next.set(m.id, new VoiceModule(m.id, m.params));
-          } else if (m.type === 'osc') {
-            next.set(m.id, new OscModule(m.id, m.params));
-          } else if (m.type === 'fmosc') {
-            next.set(m.id, new FmoscModule(m.id, m.params));
-          } else if (m.type === 'vcf') {
-            next.set(m.id, new VcfModule(m.id, m.params));
-          } else if (m.type === 'vca') {
-            next.set(m.id, new VcaModule(m.id, m.params));
-          } else if (m.type === 'pluck') {
-            next.set(m.id, new PluckModule(m.id, m.params));
-          } else if (m.type === 'resonator') {
-            next.set(m.id, new ResonatorModule(m.id, m.params));
-          } else if (m.type === 'addosc') {
-            next.set(m.id, new AddoscModule(m.id, m.params));
-          } else if (m.type === 'granular') {
-            next.set(m.id, new GranularModule(m.id, m.params));
-          } else if (m.type === 'knob' || m.type === 'slider' || m.type === 'button') {
-            next.set(m.id, new ControlSourceModule(m.id, m.params, m.type));
-          } else if (m.type === 'xy') {
-            next.set(m.id, new XyModule(m.id, m.params));
-          } else if (m.type === 'quantizer') {
-            next.set(m.id, new QuantizerModule(m.id, m.params));
-          } else if (m.type === 'sah') {
-            next.set(m.id, new SahModule(m.id, m.params));
-          } else if (m.type === 'slew') {
-            next.set(m.id, new SlewModule(m.id, m.params));
-          } else if (m.type === 'cmath') {
-            next.set(m.id, new CmathModule(m.id, m.params));
-          } else if (m.type === 'modmatrix') {
-            next.set(m.id, new ModMatrixModule(m.id, m.params));
+          } else {
+            // Single dispatch point — MODULE_FACTORIES is the worklet's set of
+            // handled types; kept in parity with registry ENGINE_TYPES by
+            // worklet-types.test.ts. Unknown types are skipped (UI-only).
+            const make = MODULE_FACTORIES[m.type];
+            if (make) next.set(m.id, make(m, this));
           }
         }
         this.modules = next;
@@ -4087,5 +4059,8 @@ class EngineProcessor extends AudioWorkletProcessor {
     this.noteActivity.clear();
   }
 }
+
+// Parity surface for worklet-types.test.ts (the test reads this off the class).
+EngineProcessor.MODULE_TYPES = Object.keys(MODULE_FACTORIES);
 
 registerProcessor('kabelkraft-engine', EngineProcessor);

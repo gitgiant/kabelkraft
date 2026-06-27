@@ -9,11 +9,18 @@ defined in the improve-codebase-architecture skill's LANGUAGE.md, not here.
 
 - **Module** — a node in a patch. Has a type (`peq`, `vcf`, `osc`, `delay`…), params,
   data, and ports. Defined declaratively by a **ModuleDef** in `app/src/core/registry.ts`
-  (`MODULE_DEFS`), which is meant to be the single source of truth for a type but today is
-  partially duplicated in `engine.ts`, `messages.ts`, and `public/engine-worklet.js`.
+  (`MODULE_DEFS`) — the single source of truth for a type's ports/params/face.
 - **Patch / Graph** — the set of modules + wires + groups the user builds. Held by
   `Graph` (`core/graph.ts`); mutated through `AppState` (`state.ts`).
 - **Registry** — `core/registry.ts`. The catalog of `ModuleDef`s + shared param enums.
+- **Engine-type manifest** — `core/registry.ts` `ENGINE_TYPES` (`as const`): the one list
+  of types that have a DSP implementation in the worklet. `EngineModuleType` (the
+  `engine/messages.ts` protocol type) and `ENGINE_MODULE_TYPES` (engine.ts's `syncGraph`
+  filter) both **derive** from it; the worklet's `MODULE_FACTORIES` keys are held in lockstep
+  by `engine/worklet-types.test.ts`. **Never hand-add a parallel type list** — extend
+  `ENGINE_TYPES` + the worklet factory, and the parity test guards the seam. (Sibling
+  cross-thread *value* mirrors — `scales.ts` `QUANT_SCALES`, `wavetable.ts`, the EQ FFT — are
+  still kept in sync by hand-comment; a separate problem.)
 
 ## "Face" — two distinct meanings (disambiguation)
 

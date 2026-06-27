@@ -4,60 +4,12 @@
  * the C++/WASM core slots into in Phase 2 (PRD §16).
  */
 
-export type EngineModuleType =
-  | 'synth'
-  | 'sampler'
-  | 'drum'
-  | 'audioIn'
-  | 'audioOut'
-  | 'levels'
-  | 'sequencer'
-  | 'arp'
-  | 'composer'
-  | 'notethru'
-  | 'lfo'
-  | 'envelope'
-  | 'random'
-  | 'delay'
-  | 'reverb'
-  | 'distortion'
-  | 'eq'
-  | 'chorus'
-  | 'flanger'
-  | 'bitcrusher'
-  | 'compressor'
-  | 'ducker'
-  | 'peq'
-  | 'mbcomp'
-  | 'midiIn'
-  | 'midiOut'
-  | 'visualizer'
-  | 'limiter'
-  | 'modulator'
-  | 'mixer'
-  | 'recorder'
-  | 'voice'
-  | 'osc'
-  | 'fmosc'
-  | 'wtosc'
-  | 'smpl'
-  | 'vcf'
-  | 'vca'
-  | 'knob'
-  | 'slider'
-  | 'xy'
-  | 'button'
-  | 'quantizer'
-  | 'sah'
-  | 'slew'
-  | 'cmath'
-  | 'modmatrix'
-  | 'pluck'
-  | 'resonator'
-  | 'addosc'
-  | 'granular'
-  | 'tts'
-  | 'notenames';
+// The set of engine-side module types is owned by the registry (core/registry.ts
+// ENGINE_TYPES) — the single source of truth. Re-exported here so the protocol
+// keeps a stable name; the import is type-only and erases, so this boundary stays
+// runtime-free for a future C++/WASM core.
+import type { EngineModuleType } from '../core/registry';
+export type { EngineModuleType };
 
 export interface EngineModuleSnapshot {
   id: string;
