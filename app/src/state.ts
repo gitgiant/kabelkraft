@@ -43,7 +43,7 @@ import { VisFeatureHub } from './visual/features';
 import { visGraphOf } from './visual/migrate';
 import { createVisRingBuffer } from './visual/ring';
 import { ContainerRenderer, visFramesRendered, visGpuErrors, type ContainerFrame } from './visual/runtime';
-import { hslToRgbInt, rgbIntToHsl } from './core/color';
+import { TintEngine } from './core/tints';
 import { appSettings } from './core/settings';
 import type { VisFeatures, VisGraphData } from './visual/types';
 
@@ -287,108 +287,9 @@ export class AppState {
   }
   // -- derived tints (frame color → UI accents) -----------------------------
 
-  /** Smoothed derived frame colors (packed 24-bit RGB) per visual-source module. */
-  tintValues: Record<string, number> = {};
-  /** Raw sampled targets (luminance-clamped); tintValues eases toward these. */
-  private tintTargets: Record<string, number> = {};
-  /** Cached "who needs a tint" set; invalidated on structural changes. */
-  private tintSourcesCache: Set<string> | null = null;
-
-  /** Visual sources consumed as a tint: wires into `tint` endpoints (module
-   * ports and group intrinsic poles) plus face-element bindings. */
-  tintSourceIds(): Set<string> {
-    if (!this.tintSourcesCache) {
-      const s = new Set<string>();
-      for (const w of this.graph.wires.values()) {
-        if (w.type === 'visual' && w.to.portId === 'tint') s.add(w.from.moduleId);
-      }
-      for (const g of this.graph.groups.values()) {
-        for (const el of g.face?.elements ?? []) {
-          if (el.tintSourceId) s.add(el.tintSourceId);
-        }
-      }
-      this.tintSourcesCache = s;
-    }
-    return this.tintSourcesCache;
-  }
-
-  /** Sampler callback: clamp to a readable luminance and set the ease target. */
-  private pushTintSample(id: string, rgb: number): void {
-    if (!this.tintSourceIds().has(id)) return;
-    const { h, s, l } = rgbIntToHsl(rgb);
-    this.tintTargets[id] = l < 0.22 ? hslToRgbInt(h, s, 0.22) : rgb;
-  }
-
-  /** Source module feeding a tint endpoint (module tint port or group pole). */
-  private tintWireInto(id: string): string | null {
-    for (const w of this.graph.wires.values()) {
-      if (w.type === 'visual' && w.to.moduleId === id && w.to.portId === 'tint') {
-        return w.from.moduleId;
-      }
-    }
-    return null;
-  }
-
-  /** Nearest tint source for a module: own tint port, then enclosing groups
-   * inside-out (nearest wired ancestor wins). Null = default accent. */
-  tintSourceFor(moduleId: string): string | null {
-    const own = this.tintWireInto(moduleId);
-    if (own) return own;
-    let group = this.graph.groupOfModule(moduleId);
-    while (group) {
-      const src = this.tintWireInto(group.id);
-      if (src) return src;
-      group = this.graph.parentGroup(group.id);
-    }
-    return null;
-  }
-
-  /** Nearest tint source for a group: its own pole, then ancestors. */
-  tintSourceForGroup(groupId: string): string | null {
-    let group = this.graph.groups.get(groupId);
-    while (group) {
-      const src = this.tintWireInto(group.id);
-      if (src) return src;
-      group = this.graph.parentGroup(group.id);
-    }
-    return null;
-  }
-
-  /** Resolved tint color for a module, if any source is wired and sampled. */
-  tintFor(moduleId: string): number | null {
-    const src = this.tintSourceFor(moduleId);
-    return src ? (this.tintValues[src] ?? null) : null;
-  }
-
-  /** Resolved tint color for a group tile/face, if any. */
-  tintForGroup(groupId: string): number | null {
-    const src = this.tintSourceForGroup(groupId);
-    return src ? (this.tintValues[src] ?? null) : null;
-  }
-
-  /** Ease displayed tints toward their targets (~150 ms); canvas calls per frame. */
-  tickTints(dtMs: number): void {
-    const wanted = this.tintSourceIds();
-    const k = 1 - Math.exp(-dtMs / 150);
-    for (const id of Object.keys(this.tintTargets)) {
-      if (!wanted.has(id) || !this.graph.modules.has(id)) {
-        delete this.tintTargets[id];
-        delete this.tintValues[id];
-        continue;
-      }
-      const target = this.tintTargets[id];
-      const cur = this.tintValues[id];
-      if (cur === undefined) {
-        this.tintValues[id] = target;
-        continue;
-      }
-      const lerp = (a: number, b: number) => Math.round(a + (b - a) * k);
-      this.tintValues[id] =
-        (lerp((cur >> 16) & 0xff, (target >> 16) & 0xff) << 16) |
-        (lerp((cur >> 8) & 0xff, (target >> 8) & 0xff) << 8) |
-        lerp(cur & 0xff, target & 0xff);
-    }
-  }
+  /** Frame-derived UI tint engine (core/tints.ts). Reads the graph lazily so
+   * it survives the wholesale graph swap on project load / undo. */
+  readonly tints = new TintEngine(() => this.graph);
   /** Module id showing the big in-tile visualizer view; null = closed. */
   visualizerOpen: string | null = null;
   /** Compact tile size remembered across big-view open ↔ close. */
@@ -671,11 +572,9 @@ export class AppState {
     this.engine.onMidiEvents((msg) => this.handleEngineMidi(msg.events));
     this.midi.onMessage((deviceId, data) => this.handleMidiMessage(deviceId, data));
     // Derived-tint sampling: the visual runtime averages frames for consumers.
-    ContainerRenderer.tintWanted = (id) => this.tintSourceIds().has(id);
-    ContainerRenderer.tintSink = (id, rgb) => this.pushTintSample(id, rgb);
-    this.on('graphChanged', () => {
-      this.tintSourcesCache = null;
-    });
+    ContainerRenderer.tintWanted = (id) => this.tints.wanted(id);
+    ContainerRenderer.tintSink = (id, rgb) => this.tints.sample(id, rgb);
+    this.on('graphChanged', () => this.tints.invalidate());
     this.engine.onStatus((status) => {
       this.meters = status.meters;
       this.seqSteps = status.seqSteps;

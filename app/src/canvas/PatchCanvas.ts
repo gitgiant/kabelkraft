@@ -1805,14 +1805,14 @@ export class PatchCanvas {
     // Resolve tints: nearest wired source (own tint port, then enclosing
     // groups inside-out) colors each view's accents. Group tiles resolve
     // their own tint in GroupView.updateLive.
-    appState.tickTints(now - this.lastTickAt);
+    appState.tints.tick(now - this.lastTickAt);
     this.lastTickAt = now;
     for (const [id, view] of this.views) {
-      view.setLiveColor(appState.tintFor(id));
+      view.setLiveColor(appState.tints.tintFor(id));
     }
     // Tint sources hidden inside collapsed groups still render (throttled),
     // so the derived color keeps moving.
-    for (const id of appState.tintSourceIds()) {
+    for (const id of appState.tints.sourceIds()) {
       const v = this.views.get(id);
       if (!v || !v.visible) tickHiddenTintSource(id);
     }

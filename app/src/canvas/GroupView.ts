@@ -513,7 +513,7 @@ export class GroupView extends Container {
     const dim = bound() ? 1 : 0.35;
     // Accent: a bound visual source's frame color, else the group's resolved tint.
     const accent = () => {
-      const c = el.tintSourceId ? appState.tintValues[el.tintSourceId] : undefined;
+      const c = el.tintSourceId ? appState.tints.values[el.tintSourceId] : undefined;
       return c ?? this.resolvedTint();
     };
 
@@ -913,7 +913,7 @@ export class GroupView extends Container {
   /** Resolved tint for this group's face accents (own pole, then ancestors),
    * falling back to the control type color. */
   private resolvedTint(): number {
-    return appState.tintForGroup(this.group.id) ?? PORT_TYPE_COLORS.control;
+    return appState.tints.tintForGroup(this.group.id) ?? PORT_TYPE_COLORS.control;
   }
 
   /** Canvas ticker: refresh meters/readouts and externally-changed controls. */
@@ -926,7 +926,7 @@ export class GroupView extends Container {
       }
     }
     for (const e of this.embedded) {
-      if (e.view instanceof ModuleView) e.view.setLiveColor(appState.tintFor(e.view.instance.id));
+      if (e.view instanceof ModuleView) e.view.setLiveColor(appState.tints.tintFor(e.view.instance.id));
       e.view.updateLive();
     }
   }
