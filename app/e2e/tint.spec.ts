@@ -30,7 +30,7 @@ test('group tint pole accepts visual wires with single fan-in; types enforced', 
     const bad = s.connect({ moduleId: lfo.id, portId: 'out' }, { moduleId: groupId, portId: 'tint' });
 
     // Nearest-source resolution: members inherit the group's tint source.
-    const knobSrc = s.tintSourceFor(knob.id);
+    const knobSrc = s.tints.sourceFor(knob.id);
 
     return {
       tintPole: !!tintPole && tintPole.type === 'visual' && tintPole.direction === 'in',
@@ -89,7 +89,7 @@ test('tint survives save/load; nested groups resolve nearest source', async ({ p
       inner,
       outer,
       // Members of the inner (unwired) group inherit the outer group's source.
-      srcThroughNesting: s.tintSourceFor(knobA.id),
+      srcThroughNesting: s.tints.sourceFor(knobA.id),
       json: s.serialize(),
     };
   });
@@ -103,7 +103,7 @@ test('tint survives save/load; nested groups resolve nearest source', async ({ p
     const intoTint = [...s.graph.wires.values()].filter(
       (w) => w.to.moduleId === r.outer && w.to.portId === 'tint',
     );
-    return { intoTint: intoTint.length, src: s.tintSourceFor(r.knobA) };
+    return { intoTint: intoTint.length, src: s.tints.sourceFor(r.knobA) };
   }, result);
   expect(reloaded.intoTint).toBe(1);
   expect(reloaded.src).toBe(result.vis);
@@ -130,11 +130,11 @@ test('module tint ports exist on containers; derived color flows when GPU render
   if (gpu) {
     // The visualizer tile renders on screen → the sampler derives a color.
     await expect
-      .poll(() => page.evaluate((i) => window.__kk.tintValues[i.vis], ids), { timeout: 10000 })
+      .poll(() => page.evaluate((i) => window.__kk.tints.values[i.vis], ids), { timeout: 10000 })
       .toBeGreaterThanOrEqual(0);
     // …and the composer resolves it as its tint.
     await expect
-      .poll(() => page.evaluate((i) => window.__kk.tintFor(i.comp), ids), { timeout: 5000 })
+      .poll(() => page.evaluate((i) => window.__kk.tints.tintFor(i.comp), ids), { timeout: 5000 })
       .toBeGreaterThanOrEqual(0);
   }
   await settleFrames(page, 5);
