@@ -58,6 +58,49 @@ export interface TransportMessage {
   songPosition?: number;
 }
 
+/** One song-clip note (same shape as core/composer ComposerNote). */
+export interface SongNoteSnapshot {
+  start: number;
+  length: number;
+  pitch: number;
+  vel: number;
+  pan: number;
+  release: number;
+  modX: number;
+  modY: number;
+  prob: number;
+}
+
+export interface SongClipSnapshot {
+  id: string;
+  /** Module whose note-in the clip drives; null = unrouted (silent). */
+  target: string | null;
+  length: number;
+  notes: SongNoteSnapshot[];
+}
+
+export interface SongPlacementSnapshot {
+  id: string;
+  clipId: string;
+  startBeat: number;
+}
+
+/**
+ * Full song-layer snapshot (SONG_PLAN.md): the worklet's SongPlayer schedules
+ * placements against the transport and emits notes straight to each clip's
+ * target module. Lanes/names/colors are UI-only and never cross this seam.
+ * Sent on any song edit or mode flip.
+ */
+export interface SongMessage {
+  type: 'song';
+  /** PAT = composers/sequencers free-loop; SONG = the playlist plays. */
+  mode: 'pat' | 'song';
+  clips: SongClipSnapshot[];
+  placements: SongPlacementSnapshot[];
+  /** Loop region in beats (SONG mode); null = play through. */
+  loop: { start: number; end: number } | null;
+}
+
 export interface NoteOnMessage {
   type: 'noteOn';
   moduleId: string;
@@ -124,6 +167,7 @@ export type EngineMessage =
   | ParamMessage
   | DataMessage
   | TransportMessage
+  | SongMessage
   | NoteOnMessage
   | NoteOffMessage
   | SampleMessage

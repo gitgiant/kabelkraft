@@ -19,6 +19,7 @@ import {
 import { MODULE_DEFS } from './core/registry';
 import { decodeSample, encodeSample, parseSampleKey, sampleKey, type SampleData } from './core/samples';
 import { deserializeProject, serializeProject, type ProjectMeta } from './core/serialize';
+import { clipFromData } from './core/composer';
 import { parseKkGroup } from './core/aiimport';
 import { planAutoWire } from './core/autowire';
 import { parseKkProject, type KkProjectGroup } from './core/aiproject';
@@ -30,6 +31,16 @@ import {
   type FaceSpec,
 } from './core/face';
 import { MidiManager } from './core/midi';
+import {
+  defaultSong,
+  forkClip,
+  newPlacementId,
+  newSongClip,
+  type Song,
+  type SongClip,
+  type SongLane,
+  type SongPlacement,
+} from './core/song';
 import { SttManager } from './core/stt';
 import { synthesizeSpeech } from './core/tts/tts';
 import type { LyricsLine } from './core/ailyrics';
@@ -70,6 +81,7 @@ export type StateEvent =
   | 'presetsChanged' // a module/container preset was saved/loaded/renamed/etc.
   | 'presetMenuChanged' // preset menu popup opened/closed
   | 'groupCollapseToggled' // a group was expanded/collapsed (tile toggle)
+  | 'songChanged' // song layer edited — clips/placements/lanes/mode
   | 'ttsChanged'; // TTS module text/voice/generation state changed
 
 type Listener = () => void;
@@ -86,6 +98,8 @@ export class AppState {
   graph = new Graph(MODULE_DEFS);
   readonly engine = new Engine();
   transport: TransportState = { ...DEFAULT_TRANSPORT };
+  /** Song layer (SONG_PLAN.md): clip library + playlist placements. */
+  song: Song = defaultSong();
   projectName = 'Untitled';
   /** Descriptive metadata saved with the project (Options → Project). */
   projectMeta: ProjectMeta = {};
@@ -608,6 +622,7 @@ export class AppState {
       this.visHub.setSampleRate(this.engine.sampleRate);
       this.syncEngine();
       this.engine.sendTransport(this.transport, this.transport.songPosition);
+      this.engine.sendSong(this.song);
       this.resendSamples();
     }
   }
@@ -956,6 +971,7 @@ export class AppState {
     this.graph = result.graph;
     this.projectName = result.name;
     this.transport = { ...result.transport, playing: wasPlaying };
+    this.song = result.song;
     this.clearSelection();
     this.heldVoices.clear();
     this.restoreMidiMap(result.midiMap);
@@ -966,6 +982,7 @@ export class AppState {
     this.emit('projectLoaded');
     this.emit('graphChanged');
     this.emit('transportChanged');
+    this.songEdited();
   }
 
   // -- Structure --------------------------------------------------------
@@ -2077,6 +2094,164 @@ export class AppState {
     this.engine.setMetronome(this.metronomeArmed, appSettings().recording.metronomeVolume);
   }
 
+  // -- Song layer (SONG_PLAN.md) ------------------------------------------
+  //
+  // Structural ops (add/delete/place/remove/fork) push their own undo step,
+  // like addModule. Content writes (notes/length) are raw, like setModuleData
+  // — the editing gesture calls beginUndoable() once at its start.
+
+  /** Every song mutation ends here: mirror to the worklet, notify the UI. */
+  private songEdited(): void {
+    this.engine.sendSong(this.song);
+    this.emit('songChanged');
+  }
+
+  /** Ruler loop region (SONG mode); null clears. Not an undo step. */
+  setSongLoop(loop: Song['loop']): void {
+    this.song.loop = loop && loop.end > loop.start
+      ? { start: Math.max(0, loop.start), end: loop.end }
+      : null;
+    this.songEdited();
+  }
+
+  songClip(clipId: string): SongClip | undefined {
+    return this.song.clips.find((c) => c.id === clipId);
+  }
+
+  songPlacement(placementId: string): SongPlacement | undefined {
+    return this.song.placements.find((p) => p.id === placementId);
+  }
+
+  addSongClip(init?: Parameters<typeof newSongClip>[0]): SongClip {
+    this.beginUndoable();
+    const clip = newSongClip(init);
+    this.song.clips.push(clip);
+    this.songEdited();
+    return clip;
+  }
+
+  /** Delete a library clip and every placement of it. */
+  deleteSongClip(clipId: string): void {
+    if (!this.songClip(clipId)) return;
+    this.beginUndoable();
+    this.song.clips = this.song.clips.filter((c) => c.id !== clipId);
+    this.song.placements = this.song.placements.filter((p) => p.clipId !== clipId);
+    this.songEdited();
+  }
+
+  /** Rename/retarget/recolor a clip (undoable — one-shot edits, not gestures). */
+  updateSongClip(clipId: string, patch: Partial<Pick<SongClip, 'name' | 'target' | 'color'>>): void {
+    const clip = this.songClip(clipId);
+    if (!clip) return;
+    this.beginUndoable();
+    Object.assign(clip, patch);
+    this.songEdited();
+  }
+
+  /** Raw content write — library refs mean every placement updates at once. */
+  setSongClipNotes(clipId: string, notes: SongClip['notes']): void {
+    const clip = this.songClip(clipId);
+    if (!clip) return;
+    clip.notes = notes;
+    this.songEdited();
+  }
+
+  /** Raw content write (see setSongClipNotes). */
+  setSongClipLength(clipId: string, length: number): void {
+    const clip = this.songClip(clipId);
+    if (!clip) return;
+    clip.length = length;
+    this.songEdited();
+  }
+
+  placeSongClip(clipId: string, lane: number, startBeat: number): SongPlacement | null {
+    if (!this.songClip(clipId)) return null;
+    this.beginUndoable();
+    const placement: SongPlacement = {
+      id: newPlacementId(),
+      clipId,
+      lane: Math.max(0, Math.round(lane)),
+      startBeat: Math.max(0, startBeat),
+    };
+    this.song.placements.push(placement);
+    this.ensureSongLanes(placement.lane + 1);
+    this.songEdited();
+    return placement;
+  }
+
+  /** Raw move — the drag gesture owns the undo step. */
+  moveSongPlacement(placementId: string, lane: number, startBeat: number): void {
+    const p = this.songPlacement(placementId);
+    if (!p) return;
+    p.lane = Math.max(0, Math.round(lane));
+    p.startBeat = Math.max(0, startBeat);
+    this.ensureSongLanes(p.lane + 1);
+    this.songEdited();
+  }
+
+  removeSongPlacement(placementId: string): void {
+    if (!this.songPlacement(placementId)) return;
+    this.beginUndoable();
+    this.song.placements = this.song.placements.filter((p) => p.id !== placementId);
+    this.songEdited();
+  }
+
+  /** "Make unique": fork the clip and point this placement at the copy. */
+  makeSongClipUnique(placementId: string): SongClip | null {
+    const p = this.songPlacement(placementId);
+    const clip = p && this.songClip(p.clipId);
+    if (!p || !clip) return null;
+    this.beginUndoable();
+    const copy = forkClip(clip, new Set(this.song.clips.map((c) => c.name)));
+    this.song.clips.push(copy);
+    p.clipId = copy.id;
+    this.songEdited();
+    return copy;
+  }
+
+  /** PAT = jam layer free-loops; SONG = playlist plays. Not an undo step. */
+  setSongMode(mode: Song['mode']): void {
+    if (this.song.mode === mode) return;
+    this.song.mode = mode;
+    this.songEdited();
+  }
+
+  ensureSongLanes(count: number): void {
+    while (this.song.lanes.length < count) this.song.lanes.push({});
+  }
+
+  updateSongLane(index: number, patch: Partial<SongLane>): void {
+    if (index < 0 || index >= this.song.lanes.length) return;
+    this.beginUndoable();
+    Object.assign(this.song.lanes[index], patch);
+    this.songEdited();
+  }
+
+  /**
+   * "Copy to song": clone a composer module's clip into the library. The new
+   * clip targets whatever the composer feeds (first note wire), so it sounds
+   * identical when the playlist plays it.
+   */
+  copyComposerToSong(moduleId: string): SongClip | null {
+    const mod = this.graph.modules.get(moduleId);
+    if (!mod || mod.type !== 'composer') return null;
+    const clip = clipFromData(mod.data);
+    let target: string | null = null;
+    for (const w of this.graph.wires.values()) {
+      if (w.type === 'note' && w.from.moduleId === moduleId) {
+        target = w.to.moduleId;
+        break;
+      }
+    }
+    return this.addSongClip({
+      name: mod.label ?? 'Composer clip',
+      notes: clip.notes,
+      length: clip.length,
+      target,
+      ...(mod.color !== undefined ? { color: mod.color } : {}),
+    });
+  }
+
   // -- Transport ---------------------------------------------------------
 
   transportCommand(cmd: 'play' | 'stop' | 'pause' | 'rewind'): void {
@@ -2139,7 +2314,10 @@ export class AppState {
 
   /** Undo snapshots: graph only, no sample PCM. */
   serialize(): string {
-    return serializeProject(this.projectName, this.graph, this.transport, undefined, this.midiMapObject());
+    return serializeProject(
+      this.projectName, this.graph, this.transport, undefined, this.midiMapObject(),
+      undefined, undefined, this.song,
+    );
   }
 
   /** Explicit project save: embeds sample PCM + face assets for portability (PRD §15). */
@@ -2167,6 +2345,7 @@ export class AppState {
     return serializeProject(
       this.projectName, this.graph, this.transport, samples, this.midiMapObject(), faceAssets,
       Object.keys(this.projectMeta).length ? this.projectMeta : undefined,
+      this.song,
     );
   }
 
@@ -2178,6 +2357,7 @@ export class AppState {
     this.projectName = result.name;
     this.projectMeta = result.meta;
     this.transport = result.transport;
+    this.song = result.song;
     this.selectedModuleId = null;
     this.selectedWireId = null;
     this.heldVoices.clear();
@@ -2204,6 +2384,7 @@ export class AppState {
     this.emit('projectLoaded');
     this.emit('graphChanged');
     this.emit('transportChanged');
+    this.songEdited();
     this.emit('sampleLoaded');
     return result.warnings;
   }

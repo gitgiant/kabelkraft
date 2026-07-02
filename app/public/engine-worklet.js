@@ -3385,6 +3385,14 @@ class EngineProcessor extends AudioWorkletProcessor {
     this.noteWires = [];
     this.controlWires = [];
     this.transport = { playing: false, tempo: 120, posBeats: 0 };
+    // Song layer (SONG_PLAN.md): playlist mirrored from the main thread.
+    // Placements schedule clip notes against absolute transport beats and
+    // emit straight to each clip's target module — no note wires involved.
+    this.songMode = 'pat';
+    this.songClips = new Map(); // clipId → { id, target, length, notes }
+    this.songPlacements = []; // { id, clipId, startBeat }
+    this.songLoop = null; // { start, end } beats, SONG mode only
+    this.songActiveNotes = []; // { voiceId, targetId, offAtSample, release, key }
     // Built-in master-bus recorder: captures the summed mix (out[0]/out[1])
     // pre the main-thread master gain, so monitor level/mute don't reach the file.
     this.masterRec = new RecorderModule(MASTER_REC_ID, {});
@@ -3491,7 +3499,39 @@ class EngineProcessor extends AudioWorkletProcessor {
               mod.allNotesOff((srcId, voiceId) => this.routeNoteOff(srcId, voiceId));
             }
           }
+          this.songAllNotesOff();
         }
+        break;
+      }
+      case 'song': {
+        const modeFlipped = this.songMode !== msg.mode;
+        this.songMode = msg.mode;
+        this.songLoop = msg.loop;
+        this.songClips = new Map(msg.clips.map((c) => [c.id, c]));
+        this.songPlacements = msg.placements;
+        if (modeFlipped) {
+          // Leaving SONG: silence the playlist. Leaving PAT: silence the
+          // free-loop layer. Either way the other layer starts clean.
+          if (msg.mode === 'pat') this.songAllNotesOff();
+          else {
+            for (const mod of this.modules.values()) {
+              if (mod.type === 'sequencer' || mod.type === 'composer') {
+                mod.allNotesOff((srcId, voiceId) => this.routeNoteOff(srcId, voiceId));
+              }
+            }
+          }
+        }
+        // Live-edit healing (ComposerModule.syncActive precedent): note-off any
+        // sounding voice whose source note is gone — placement removed, note
+        // deleted/moved, or clip retargeted — so it can't wedge a gate open.
+        this.songActiveNotes = this.songActiveNotes.filter((n) => {
+          const p = this.songPlacements.find((pl) => pl.id === n.placementId);
+          const clip = p && this.songClips.get(p.clipId);
+          const alive = clip && clip.target === n.targetId &&
+            clip.notes.some((note) => `${note.pitch}:${note.start}` === n.key);
+          if (!alive) this.songNoteOff(n);
+          return !!alive;
+        });
         break;
       }
       case 'noteOn': {
@@ -3541,6 +3581,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       case 'panic': {
         // Kill voices + zero every stateful audio buffer so a runaway feedback
         // loop (or hung note / reverb tail) is cut instantly.
+        this.songActiveNotes = []; // voices die below; drop the bookkeeping
         for (const mod of this.modules.values()) {
           if (mod.allNotesOff) mod.allNotesOff((srcId, voiceId) => this.routeNoteOff(srcId, voiceId));
           if (mod.panic) mod.panic(); // deep clear for feedback effects
@@ -3623,6 +3664,12 @@ class EngineProcessor extends AudioWorkletProcessor {
   runSequencers(blockSize) {
     const t = this.transport;
     const blockEnd = this.sampleCount + blockSize;
+    // SONG mode: the playlist plays and the free-loop layer (sequencer/
+    // composer stepping) is muted — scheduled note-offs still drain so
+    // nothing hangs. Arps stay live: they only sound while notes are held.
+    const songOn = this.songMode === 'song';
+
+    this.runSong(blockSize, blockEnd);
 
     for (const mod of this.modules.values()) {
       if (mod.type === 'arp') {
@@ -3630,7 +3677,7 @@ class EngineProcessor extends AudioWorkletProcessor {
         continue;
       }
       if (mod.type === 'composer') {
-        this.runComposer(mod, blockSize, blockEnd);
+        this.runComposer(mod, blockSize, blockEnd, songOn);
         continue;
       }
       if (mod.type !== 'sequencer') continue;
@@ -3644,7 +3691,7 @@ class EngineProcessor extends AudioWorkletProcessor {
         return true;
       });
 
-      if (!t.playing) continue;
+      if (!t.playing || songOn) continue;
       const steps = (mod.data && mod.data.steps) || [];
       if (steps.length === 0) continue;
 
@@ -3668,7 +3715,87 @@ class EngineProcessor extends AudioWorkletProcessor {
 
     if (t.playing) {
       t.posBeats += (t.tempo / 60) * (blockSize / sampleRate);
+      // SONG-mode ruler loop: wrap the transport. runSong already fired the
+      // wrapped window's notes this block, so nothing at the loop start skips.
+      const loop = songOn ? this.songLoop : null;
+      if (loop && loop.end > loop.start && t.posBeats >= loop.end) {
+        t.posBeats = loop.start + (t.posBeats - loop.end);
+      }
     }
+  }
+
+  /**
+   * Advance the song player across this block (SONG_PLAN.md phase 3): fire
+   * placed clip notes whose absolute start falls inside the block's beat
+   * window, straight at each clip's target module. Mirrors runComposer,
+   * minus wires — the clip carries its target.
+   */
+  runSong(blockSize, blockEnd) {
+    // Scheduled note-offs always drain, whatever the mode/transport.
+    this.songActiveNotes = this.songActiveNotes.filter((n) => {
+      if (n.offAtSample <= blockEnd) {
+        this.songNoteOff(n);
+        return false;
+      }
+      return true;
+    });
+
+    const t = this.transport;
+    if (!t.playing || this.songMode !== 'song' || this.songPlacements.length === 0) return;
+
+    const blockBeats = (t.tempo / 60) * (blockSize / sampleRate);
+    const bs = t.posBeats;
+    const be = bs + blockBeats;
+    // Window past the loop end folds back to the loop start (see the wrap in
+    // runSequencers); a note on the loop-start downbeat fires in this block.
+    const loop = this.songLoop;
+    const wrapEnd = loop && loop.end > loop.start && be > loop.end
+      ? loop.start + (be - loop.end)
+      : null;
+
+    for (const pl of this.songPlacements) {
+      const clip = this.songClips.get(pl.clipId);
+      if (!clip || !clip.target) continue;
+      const target = this.modules.get(clip.target);
+      if (!target || !target.noteOn) continue; // unrouted/dead → silent block
+
+      for (const note of clip.notes) {
+        if (note.start >= clip.length) continue; // past the clip end: inert
+        const s = pl.startBeat + note.start;
+        const hit = (s >= bs && s < be) || (wrapEnd !== null && s >= loop.start && s < wrapEnd);
+        if (!hit) continue;
+        const prob = note.prob === undefined ? 1 : note.prob;
+        if (prob < 1 && Math.random() > prob) continue;
+        const voiceId = this.nextVoiceId++;
+        target.noteOn(voiceId, note.pitch, note.vel === undefined ? 0.8 : note.vel, {
+          pan: note.pan || 0,
+          modX: note.modX || 0,
+          modY: note.modY || 0,
+        });
+        this.noteActivity.add(clip.target);
+        const durSamples = (note.length * 60 / t.tempo) * sampleRate;
+        this.songActiveNotes.push({
+          voiceId,
+          targetId: clip.target,
+          placementId: pl.id,
+          key: `${note.pitch}:${note.start}`, // identity for live-edit reconcile
+          offAtSample: this.sampleCount + durSamples,
+          release: note.release === undefined ? 0.5 : note.release,
+        });
+      }
+    }
+  }
+
+  /** Release one song voice at its target (module may have been deleted). */
+  songNoteOff(n) {
+    const target = this.modules.get(n.targetId);
+    if (target && target.noteOff) target.noteOff(n.voiceId, n.release);
+  }
+
+  /** Silence the whole playlist layer (stop, panic, mode flip). */
+  songAllNotesOff() {
+    for (const n of this.songActiveNotes) this.songNoteOff(n);
+    this.songActiveNotes = [];
   }
 
   /**
@@ -3677,7 +3804,7 @@ class EngineProcessor extends AudioWorkletProcessor {
    * the timeline with half-open windows, so each note fires exactly once
    * per pass (minus probability rolls).
    */
-  runComposer(mod, blockSize, blockEnd) {
+  runComposer(mod, blockSize, blockEnd, songOn) {
     const t = this.transport;
 
     mod.activeNotes = mod.activeNotes.filter((n) => {
@@ -3688,7 +3815,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       return true;
     });
 
-    if (!t.playing) return;
+    if (!t.playing || songOn) return;
     const notes = (mod.data && mod.data.notes) || [];
     const len = Math.max(1, (mod.data && mod.data.length) || 16);
     if (notes.length === 0) return;

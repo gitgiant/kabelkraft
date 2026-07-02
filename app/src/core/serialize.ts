@@ -9,6 +9,7 @@ import { bumpModuleId, type ModuleDef, type ModuleInstance } from './module';
 import { isVisGraph, sanitizeVisGraph, sceneToGraph } from '../visual/migrate';
 import type { VisGraphData } from '../visual/types';
 import type { SerializedSample } from './samples';
+import { defaultSong, sanitizeSong, type Song } from './song';
 import { DEFAULT_TRANSPORT, type TransportState } from './types';
 
 export const FORMAT_VERSION = 2;
@@ -30,6 +31,8 @@ export interface ProjectFile {
   modules: ModuleInstance[];
   wires: Wire[];
   groups?: ModuleGroup[];
+  /** Song layer (SONG_PLAN.md) — absent in pre-song projects. */
+  song?: Song;
   /** Embedded sample PCM — present only in explicit project saves, never in undo snapshots. */
   samples?: SerializedSample[];
   /** MIDI-learn mappings: "channel:cc" → target param. */
@@ -46,6 +49,7 @@ export function serializeProject(
   midiMap?: Record<string, { moduleId: string; paramId: string }>,
   faceAssets?: Record<string, string>,
   meta?: ProjectMeta,
+  song?: Song,
 ): string {
   const file: ProjectFile = {
     formatVersion: FORMAT_VERSION,
@@ -55,6 +59,7 @@ export function serializeProject(
     modules: [...graph.modules.values()],
     wires: [...graph.wires.values()],
     groups: [...graph.groups.values()],
+    song,
     samples,
     midiMap,
     faceAssets,
@@ -67,6 +72,7 @@ export interface LoadResult {
   name: string;
   meta: ProjectMeta;
   transport: TransportState;
+  song: Song;
   warnings: string[];
   samples: SerializedSample[];
   midiMap: Record<string, { moduleId: string; paramId: string }>;
@@ -160,6 +166,7 @@ export function deserializeProject(json: string, defs: Map<string, ModuleDef>): 
     name: raw.name ?? 'Untitled',
     meta,
     transport: { ...DEFAULT_TRANSPORT, ...raw.transport, playing: false },
+    song: raw.song !== undefined ? sanitizeSong(raw.song) : defaultSong(),
     warnings,
     samples: (raw.samples ?? []).filter((s) => graph.modules.has(s.moduleId)),
     midiMap,

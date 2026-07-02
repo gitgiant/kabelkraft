@@ -7,6 +7,7 @@
  */
 
 import type { Graph } from '../core/graph';
+import type { Song } from '../core/song';
 import type { TransportState } from '../core/types';
 import { ENGINE_MODULE_TYPES } from '../core/registry';
 import type {
@@ -521,6 +522,26 @@ export class Engine {
     this.metroMeter = Math.max(1, t.timeSignature?.num ?? 4);
     if (jumpTo !== undefined) this.metroPhaseBeats = jumpTo;
     this.updateMetro();
+  }
+
+  /** Mirror the song layer into the worklet's SongPlayer (SONG_PLAN.md). */
+  sendSong(song: Song): void {
+    this.send({
+      type: 'song',
+      mode: song.mode,
+      clips: song.clips.map((c) => ({
+        id: c.id,
+        target: c.target,
+        length: c.length,
+        notes: c.notes.map((n) => ({ ...n })),
+      })),
+      placements: song.placements.map((p) => ({
+        id: p.id,
+        clipId: p.clipId,
+        startBeat: p.startBeat,
+      })),
+      loop: song.loop ? { ...song.loop } : null,
+    });
   }
 
   allocVoiceId(): number {
